@@ -1,0 +1,8 @@
+fastapi
+uvicorn
+litellm
+rich
+typer
+requests
+psutil
+questionary
