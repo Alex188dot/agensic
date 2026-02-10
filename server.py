@@ -1,23 +1,106 @@
 import os
+import sys
 import json
 import uvicorn
 import re
+import shutil
+from pathlib import Path
 from fastapi import FastAPI
 from pydantic import BaseModel
 from litellm import completion
-import logging
 
-# Configuration paths
+# ==========================================
+# PROVIDED PROMPT ENGINEERING INTEGRATION
+# ==========================================
+
+# Mocking the dependencies required by the provided snippet
+class Settings:
+    history_lines: int = 50
+    max_commands_context: int = 40
+    max_packages_context: int = 40
+
+class RequestContext:
+    def __init__(self, history_file: str, cwd: str, buffer: str, shell: str):
+        self.history_file = history_file
+        self.cwd = cwd
+        self.buffer = buffer
+        self.shell = shell
+
+class SystemInventory:
+    def __init__(self):
+        self.commands: list[str] = []
+        self.packages: list[str] = []
+        self.package_sources: list[str] = []
+
+# --- Start of User Provided Code ---
+
+def _safe_tail(path: str, max_lines: int) -> list[str]:
+    if not path:
+        return []
+    candidate = Path(path).expanduser()
+    if not candidate.exists() or not candidate.is_file():
+        return []
+    try:
+        lines = candidate.read_text(errors="ignore").splitlines()
+    except OSError:
+        return []
+    return [line.strip() for line in lines[-max_lines:] if line.strip()]
+
+
+def _list_working_dir(path: str, max_items: int = 80) -> list[str]:
+    items: list[str] = []
+    try:
+        with os.scandir(path) as it:
+            for entry in it:
+                suffix = "/" if entry.is_dir() else ""
+                items.append(entry.name + suffix)
+                if len(items) >= max_items:
+                    break
+    except OSError:
+        return []
+    return sorted(items)
+
+
+def build_prompt_context(
+    request: RequestContext,
+    inventory: SystemInventory,
+    settings: Settings,
+) -> str:
+    history_file = request.history_file or ""
+    history = _safe_tail(history_file, settings.history_lines)
+    cwd_items = _list_working_dir(request.cwd)
+
+    commands_context = inventory.commands[: settings.max_commands_context]
+    packages_context = inventory.packages[: settings.max_packages_context]
+
+    lines: list[str] = [
+        f"OS shell: {request.shell}",
+        f"Current directory: {request.cwd}",
+        f"Current buffer: {request.buffer}",
+        "",
+        "Top executable commands from PATH:",
+        ", ".join(commands_context) if commands_context else "(none)",
+        "",
+        "Detected installed packages across package managers:",
+        ", ".join(packages_context) if packages_context else "(none)",
+        f"Package sources: {', '.join(inventory.package_sources) if inventory.package_sources else '(none)'}",
+        "",
+        "Recent command history:",
+        "\n".join(history[-20:]) if history else "(none)",
+        "",
+        "Current directory items:",
+        ", ".join(cwd_items) if cwd_items else "(none)",
+    ]
+    return "\n".join(lines)
+
+# --- End of User Provided Code ---
+
+# ==========================================
+# SERVER LOGIC
+# ==========================================
+
 CONFIG_DIR = os.path.expanduser("~/.termimind")
 CONFIG_FILE = os.path.join(CONFIG_DIR, "config.json")
-LOG_FILE = os.path.join(CONFIG_DIR, "server.log")
-
-# Setup Logging
-logging.basicConfig(
-    filename=LOG_FILE, 
-    level=logging.DEBUG,
-    format='%(asctime)s - %(levelname)s - %(message)s'
-)
 
 app = FastAPI()
 
@@ -29,133 +112,132 @@ class Context(BaseModel):
 
 def load_config():
     if not os.path.exists(CONFIG_FILE):
-        logging.warning("Config file not found!")
         return {}
     with open(CONFIG_FILE, "r") as f:
         return json.load(f)
 
+def get_history_file(shell: str) -> str:
+    """Guess history file based on shell."""
+    home = os.path.expanduser("~")
+    if "zsh" in shell:
+        return os.path.join(home, ".zsh_history")
+    elif "bash" in shell:
+        return os.path.join(home, ".bash_history")
+    return ""
+
+def get_simple_inventory() -> SystemInventory:
+    """Quickly gather some system context without blocking."""
+    inv = SystemInventory()
+    
+    # 1. Get some commands from PATH
+    paths = os.environ.get("PATH", "").split(os.pathsep)
+    cmds = set()
+    for p in paths[:3]: # check top 3 paths only
+        if os.path.exists(p):
+            try:
+                # Add first 10 files from each path
+                for f in os.listdir(p)[:10]:
+                    cmds.add(f)
+            except: pass
+    inv.commands = list(cmds)
+
+    # 2. Check for common package managers
+    if shutil.which("pip"): inv.package_sources.append("pip")
+    if shutil.which("brew"): inv.package_sources.append("homebrew")
+    if shutil.which("apt"): inv.package_sources.append("apt")
+    if shutil.which("npm"): inv.package_sources.append("npm")
+
+    return inv
+
 @app.post("/predict")
 def predict_completion(ctx: Context):
-    logging.info(f"=== NEW REQUEST ===")
-    logging.info(f"Buffer: '{ctx.command_buffer}'")
-    logging.info(f"Cursor: {ctx.cursor_position}")
-    logging.info(f"Dir: {ctx.working_directory}")
-    
+    # Load config
     config = load_config()
-    model = config.get("model", "gpt-3.5-turbo")
+    model = config.get("model", "gpt-5-mini")
     provider = config.get("provider", "openai")
     api_key = config.get("api_key", None)
     base_url = config.get("base_url", None)
 
-    logging.info(f"Provider: {provider}, Model: {model}")
-    logging.info(f"API Key present: {bool(api_key)}")
-    logging.info(f"Base URL: {base_url}")
+    # Prepare Context for Prompt Engineering
+    settings = Settings()
+    inventory = get_simple_inventory()
+    req_context = RequestContext(
+        history_file=get_history_file(ctx.shell),
+        cwd=ctx.working_directory,
+        buffer=ctx.command_buffer,
+        shell=ctx.shell
+    )
 
-    # Fix model names for different providers
+    # Generate the complex prompt
+    context_str = build_prompt_context(req_context, inventory, settings)
+
+    system_prompt = (
+        "You are a CLI terminal autocomplete engine. "
+        "Analyze the context (history, files, installed tools) provided below. "
+        "Complete the user's current buffer. "
+        "Output ONLY the completion text required to finish the command. "
+        "Do not repeat the input buffer. Do not output markdown. "
+        "If unsure, return an empty string.\n\n"
+        f"--- CONTEXT ---\n{context_str}"
+    )
+
+    # Provider specific adjustments
     if provider == "groq":
-        # Groq models should NOT have the groq/ prefix doubled
-        if model.startswith("groq/openai/"):
-            model = "groq/openai/gpt-oss-20b"
-            logging.info(f"Corrected Groq model to: {model}")
-        elif not model.startswith("groq/"):
+        if not model.startswith("groq/") and not model.startswith("groq/openai/"):
             model = f"groq/{model}"
-            logging.info(f"Added groq/ prefix: {model}")
-    
     elif provider == "ollama":
         if not model.startswith("ollama/"):
             model = f"ollama/{model}"
         if not base_url:
             base_url = "http://localhost:11434"
-    
     elif provider == "anthropic":
-        if not model.startswith("claude"):
-            model = f"claude-3-5-sonnet-20241022"
-    
+         if not model.startswith("claude"):
+            model = "claude-3-5-sonnet-20241022"
     elif provider == "gemini":
         if not model.startswith("gemini/"):
             model = f"gemini/{model}"
 
-    # STRICTER PROMPT
-    system_prompt = (
-        "You are a terminal autocomplete. "
-        "User typed a partial command. "
-        "Complete ONLY the rest - do NOT repeat what they typed. "
-        "No markdown, no explanations, just the completion.\n"
-        "Examples:\n"
-        "Input: 'git com' → 'mit -m \"\"'\n"
-        "Input: 'docker run ' → '-it ubuntu'\n"
-        "Input: 'pip install ' → 'requests'"
-    )
-
     try:
-        # Build kwargs for litellm
         kwargs = {
             "model": model,
             "messages": [
                 {"role": "system", "content": system_prompt},
-                {"role": "user", "content": f"Complete: {ctx.command_buffer}"}
+                {"role": "user", "content": f"Buffer: {ctx.command_buffer}"}
             ],
             "temperature": 0.1,
         }
-        
-        # Set API key if provided
+
         if api_key:
-            # For Groq, set the GROQ_API_KEY environment variable
-            if provider == "groq":
-                os.environ["GROQ_API_KEY"] = api_key
-                logging.info("Set GROQ_API_KEY environment variable")
-            elif provider == "openai":
-                os.environ["OPENAI_API_KEY"] = api_key
-            elif provider == "anthropic":
-                os.environ["ANTHROPIC_API_KEY"] = api_key
-            elif provider == "gemini":
-                os.environ["GEMINI_API_KEY"] = api_key
-            else:
-                kwargs["api_key"] = api_key
+            if provider == "groq": os.environ["GROQ_API_KEY"] = api_key
+            elif provider == "openai": os.environ["OPENAI_API_KEY"] = api_key
+            elif provider == "anthropic": os.environ["ANTHROPIC_API_KEY"] = api_key
+            elif provider == "gemini": os.environ["GEMINI_API_KEY"] = api_key
+            else: kwargs["api_key"] = api_key
         
-        # Set base URL for local models
         if base_url:
             kwargs["api_base"] = base_url
-            logging.info(f"Using api_base: {base_url}")
 
-        logging.info(f"Calling LLM with model: {model}")
-        logging.info(f"Messages: {kwargs['messages']}")
-        
         response = completion(**kwargs)
-        
-        logging.info(f"LLM Response object: {response}")
-        
         raw_suggestion = response.choices[0].message.content.strip()
-        
-        logging.info(f"Raw AI response: '{raw_suggestion}'")
 
-        # CLEANUP: Remove any markdown formatting
+        # Clean up Markdown or Quotes
         clean_suggestion = re.sub(r"```.*?```", "", raw_suggestion, flags=re.DOTALL)
         clean_suggestion = clean_suggestion.replace("```", "").strip()
-        
-        # Remove quotes if AI wrapped the response
         if clean_suggestion.startswith('"') and clean_suggestion.endswith('"'):
             clean_suggestion = clean_suggestion[1:-1]
-        if clean_suggestion.startswith("'") and clean_suggestion.endswith("'"):
+        elif clean_suggestion.startswith("'") and clean_suggestion.endswith("'"):
             clean_suggestion = clean_suggestion[1:-1]
 
-        input_cmd = ctx.command_buffer
-        
-        # OVERLAP REMOVAL: If AI repeated the input, extract only the new part
-        if clean_suggestion.startswith(input_cmd):
-            final_suggestion = clean_suggestion[len(input_cmd):]
-            logging.info(f"Removed overlap, extracted: '{final_suggestion}'")
-        else:
-            final_suggestion = clean_suggestion
+        # Remove overlap if the model repeated the input
+        if clean_suggestion.startswith(ctx.command_buffer):
+            clean_suggestion = clean_suggestion[len(ctx.command_buffer):]
 
-        logging.info(f"FINAL SUGGESTION: '{final_suggestion}' (length: {len(final_suggestion)})")
-        
-        return {"suggestion": final_suggestion}
+        return {"suggestion": clean_suggestion}
 
-    except Exception as e:
-        logging.error(f"ERROR: {str(e)}", exc_info=True)
-        return {"suggestion": "", "error": str(e)}
+    except Exception:
+        # Return empty on any error to prevent terminal noise
+        return {"suggestion": ""}
 
 if __name__ == "__main__":
-    logging.info("Starting TermiMind server on port 22000...")
-    uvicorn.run(app, host="127.0.0.1", port=22000, log_level="info")
+    # Completely silent startup
+    uvicorn.run(app, host="127.0.0.1", port=22000, log_level="critical")

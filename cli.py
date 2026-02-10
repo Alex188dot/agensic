@@ -32,19 +32,19 @@ def setup():
     ).ask()
 
     # Set proper default models for each provider
-    default_model = "gpt-4o-mini"
+    default_model = "gpt-5-mini"
     if provider == "groq": 
-        default_model = "llama-3.3-70b-versatile"  # Don't include groq/ prefix here
+        default_model = "openai/gpt-oss-20b"  # Don't include groq/ prefix here
     elif provider == "ollama": 
-        default_model = "qwen2.5:3b"
+        default_model = "qwen3:8b"
     elif provider == "lm_studio": 
         default_model = "local-model"
     elif provider == "gemini": 
-        default_model = "gemini-2.0-flash-exp"
+        default_model = "gemini-3-flash-preview"
     elif provider == "anthropic": 
-        default_model = "claude-3-5-sonnet-20241022"
+        default_model = "claude-3-7-sonnet-20250219"
     elif provider == "azure": 
-        default_model = "gpt-4o-mini"
+        default_model = "gpt-5-mini"
     
     model = questionary.text("Enter Model Name:", default=default_model).ask()
 
