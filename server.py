@@ -99,7 +99,7 @@ def build_prompt_context(
 # SERVER LOGIC
 # ==========================================
 
-CONFIG_DIR = os.path.expanduser("~/.termimind")
+CONFIG_DIR = os.path.expanduser("~/.ghostshell")
 CONFIG_FILE = os.path.join(CONFIG_DIR, "config.json")
 
 app = FastAPI()
@@ -175,9 +175,10 @@ def predict_completion(ctx: Context):
         "You are a CLI terminal autocomplete engine. "
         "Analyze the context (history, files, installed tools) provided below. "
         "Complete the user's current buffer. "
-        "Output ONLY the completion text required to finish the command. "
+        "Output EXACTLY 3 suggestions, each separated by a pipe character (|). "
+        "Each suggestion should be ONLY the completion text required to finish the command. "
         "Do not repeat the input buffer. Do not output markdown. "
-        "If unsure, return an empty string.\n\n"
+        "If unsure or if there are fewer than 3 suggestions, return empty strings for the remaining ones (e.g., 'git checkout | git commit | ').\n\n"
         f"--- CONTEXT ---\n{context_str}"
     )
 
@@ -218,25 +219,33 @@ def predict_completion(ctx: Context):
             kwargs["api_base"] = base_url
 
         response = completion(**kwargs)
-        raw_suggestion = response.choices[0].message.content.strip()
+        raw_output = response.choices[0].message.content.strip()
 
-        # Clean up Markdown or Quotes
-        clean_suggestion = re.sub(r"```.*?```", "", raw_suggestion, flags=re.DOTALL)
-        clean_suggestion = clean_suggestion.replace("```", "").strip()
-        if clean_suggestion.startswith('"') and clean_suggestion.endswith('"'):
-            clean_suggestion = clean_suggestion[1:-1]
-        elif clean_suggestion.startswith("'") and clean_suggestion.endswith("'"):
-            clean_suggestion = clean_suggestion[1:-1]
+        # Split by | and clean up each suggestion
+        raw_suggestions = raw_output.split("|")
+        clean_suggestions = []
+        for raw_sugg in raw_suggestions:
+            s = raw_sugg.strip()
+            # Clean up Markdown or Quotes
+            s = re.sub(r"```.*?```", "", s, flags=re.DOTALL)
+            s = s.replace("```", "").strip()
+            if s.startswith('"') and s.endswith('"'): s = s[1:-1]
+            elif s.startswith("'") and s.endswith("'"): s = s[1:-1]
+            
+            # Remove overlap if the model repeated the input
+            if s.startswith(ctx.command_buffer):
+                s = s[len(ctx.command_buffer):]
+            clean_suggestions.append(s)
 
-        # Remove overlap if the model repeated the input
-        if clean_suggestion.startswith(ctx.command_buffer):
-            clean_suggestion = clean_suggestion[len(ctx.command_buffer):]
+        # Pad with empty strings if less than 3
+        while len(clean_suggestions) < 3:
+            clean_suggestions.append("")
 
-        return {"suggestion": clean_suggestion}
+        return {"suggestions": clean_suggestions[:3]}
 
     except Exception:
         # Return empty on any error to prevent terminal noise
-        return {"suggestion": ""}
+        return {"suggestions": ["", "", ""]}
 
 if __name__ == "__main__":
     # Completely silent startup

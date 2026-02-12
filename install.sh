@@ -1,16 +1,16 @@
 #!/bin/bash
 
-echo "🚀 Installing TermiMind..."
+echo "🚀 Installing GhostShell..."
 
 # 1. Create directory
-INSTALL_DIR="$HOME/.termimind"
+INSTALL_DIR="$HOME/.ghostshell"
 mkdir -p "$INSTALL_DIR"
 
 # 2. Copy files
 cp requirements.txt "$INSTALL_DIR/"
 cp server.py "$INSTALL_DIR/"
 cp cli.py "$INSTALL_DIR/"
-cp termimind.zsh "$INSTALL_DIR/"
+cp ghostshell.zsh "$INSTALL_DIR/"
 
 # 3. Install Python Dependencies
 echo "📦 Installing Python dependencies..."
@@ -24,7 +24,7 @@ if [ -f "$HOME/.bashrc" ]; then
 fi
 
 echo "alias aiterminal='python3 $INSTALL_DIR/cli.py'" >> "$SHELL_RC"
-echo "source $INSTALL_DIR/termimind.zsh" >> "$SHELL_RC"
+echo "source $INSTALL_DIR/ghostshell.zsh" >> "$SHELL_RC"
 
 echo "✅ Installation complete!"
 echo "------------------------------------------------"

@@ -8,14 +8,14 @@ import questionary
 from rich.console import Console
 from rich.panel import Panel
 
-app = typer.Typer()
+app = typer.Typer(add_completion=False)
 console = Console()
 
-CONFIG_DIR = os.path.expanduser("~/.termimind")
+CONFIG_DIR = os.path.expanduser("~/.ghostshell")
 CONFIG_FILE = os.path.join(CONFIG_DIR, "config.json")
 PID_FILE = os.path.join(CONFIG_DIR, "daemon.pid")
 SERVER_SCRIPT = os.path.join(os.path.dirname(os.path.abspath(__file__)), "server.py")
-PLIST_PATH = os.path.expanduser("~/Library/LaunchAgents/com.termimind.daemon.plist")
+PLIST_PATH = os.path.expanduser("~/Library/LaunchAgents/com.ghostshell.daemon.plist")
 
 def ensure_config_dir():
     if not os.path.exists(CONFIG_DIR): os.makedirs(CONFIG_DIR)
@@ -23,7 +23,7 @@ def ensure_config_dir():
 @app.command()
 def setup():
     ensure_config_dir()
-    console.print(Panel.fit("[bold cyan]TermiMind Configuration[/bold cyan]"))
+    console.print(Panel.fit("[bold cyan]GhostShell Configuration[/bold cyan]"))
 
     provider = questionary.select(
         "Select Provider:",
@@ -81,7 +81,7 @@ def enable_startup():
 <plist version="1.0">
 <dict>
     <key>Label</key>
-    <string>com.termimind.daemon</string>
+    <string>com.ghostshell.daemon</string>
     <key>ProgramArguments</key>
     <array>
         <string>{python_path}</string>
@@ -105,7 +105,7 @@ def enable_startup():
     os.system(f"launchctl unload {PLIST_PATH} 2>/dev/null")
     os.system(f"launchctl load {PLIST_PATH}")
     
-    console.print(f"[bold green]✔ TermiMind set to start automatically![/bold green]")
+    console.print(f"[bold green]✔ GhostShell set to start automatically![/bold green]")
 
 @app.command()
 def start():
@@ -115,7 +115,7 @@ def start():
         console.print("[yellow]Already running (or stale PID). Restarting...[/yellow]")
         stop()
 
-    console.print("[cyan]Starting TermiMind Daemon...[/cyan]")
+    console.print("[cyan]Starting GhostShell Daemon...[/cyan]")
     with open(os.path.join(CONFIG_DIR, "server.log"), "w") as out:
         process = subprocess.Popen(
             [sys.executable, SERVER_SCRIPT],
@@ -163,7 +163,7 @@ def logs():
 @app.command()
 def test():
     """Test the AI connection manually."""
-    console.print("[bold]Testing connection to TermiMind Daemon (Port 22000)...[/bold]")
+    console.print("[bold]Testing connection to GhostShell Daemon (Port 22000)...[/bold]")
     try:
         response = requests.post(
             "http://127.0.0.1:22000/predict",
@@ -176,13 +176,14 @@ def test():
             timeout=5
         )
         data = response.json()
-        sugg = data.get("suggestion", "")
+        suggestions = data.get("suggestions", [])
+        sugg = suggestions[0] if suggestions else ""
         error = data.get("error", "")
         
         if error:
             console.print(f"[red]✗ Server Error:[/red] {error}")
         
-        console.print(f"[green]✓ Server Response:[/green] '{sugg}'")
+        console.print(f"[green]✓ Server Response:[/green] {suggestions}")
         if sugg == "":
             console.print("[yellow]⚠ Received empty suggestion (Model might be unsure or filtered).[/yellow]")
         else:
@@ -193,6 +194,29 @@ def test():
         console.print("\n[yellow]Troubleshooting:[/yellow]")
         console.print("1. Check if server is running: aiterminal start")
         console.print("2. View logs: aiterminal logs")
+
+@app.callback(invoke_without_command=True)
+def main(
+    ctx: typer.Context,
+    shortcuts: bool = typer.Option(False, "--shortcuts", help="Show keyboard shortcuts help")
+):
+    """GhostShell: AI-powered terminal autocomplete."""
+    if shortcuts:
+        show_shortcuts()
+        raise typer.Exit()
+    if ctx.invoked_subcommand is None:
+        console.print("[bold cyan]GhostShell[/bold cyan] - Use --help for commands.")
+
+def show_shortcuts():
+    """Display the shortcuts help panel."""
+    shortcuts_text = (
+        "[bold green]Trigger Suggestion:[/bold green] Ctrl+Space (or Option+Esc fallback)\n"
+        "[bold green]Partial Accept (Word-by-Word):[/bold green] Cmd + Right arrow\n"
+        "[bold green]Cycle Suggestions:[/bold green] Opt + [ and Opt + ]\n"
+        "[bold green]Show AI Panel:[/bold green] Ctrl+Enter (Ctrl+J)\n"
+        "[bold green]Accept Selection:[/bold green] Tab\n"
+    )
+    console.print(Panel(shortcuts_text, title="[bold cyan]GhostShell Shortcuts[/bold cyan]", expand=False))
 
 if __name__ == "__main__":
     app()
