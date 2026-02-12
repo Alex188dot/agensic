@@ -5,6 +5,7 @@ import subprocess
 import sys
 import requests
 import questionary
+import socket
 from rich.console import Console
 from rich.panel import Panel
 
@@ -19,6 +20,12 @@ PLIST_PATH = os.path.expanduser("~/Library/LaunchAgents/com.ghostshell.daemon.pl
 
 def ensure_config_dir():
     if not os.path.exists(CONFIG_DIR): os.makedirs(CONFIG_DIR)
+
+def is_port_open(host: str = "127.0.0.1", port: int = 22000) -> bool:
+    """Return True if something is already listening on host:port."""
+    with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
+        s.settimeout(0.3)
+        return s.connect_ex((host, port)) == 0
 
 @app.command()
 def setup():
@@ -62,10 +69,13 @@ def setup():
     console.print("[green]✓ Configuration saved![/green]")
     console.print(f"[dim]Provider: {provider}, Model: {model}[/dim]")
     
+    start_enabled = False
     if questionary.confirm("Enable start on boot (Recommended)?").ask():
         enable_startup()
-    
-    if questionary.confirm("Start daemon now?").ask():
+        start_enabled = True
+
+    # If launchd was enabled we already load/start it in enable_startup().
+    if not start_enabled and questionary.confirm("Start daemon now?").ask():
         start()
 
 @app.command()
@@ -111,6 +121,10 @@ def enable_startup():
 def start():
     """Start the background AI daemon manually."""
     ensure_config_dir()
+    if is_port_open():
+        console.print("[yellow]Daemon already running on port 22000.[/yellow]")
+        return
+
     if os.path.exists(PID_FILE):
         console.print("[yellow]Already running (or stale PID). Restarting...[/yellow]")
         stop()
@@ -133,6 +147,10 @@ def start():
 @app.command()
 def stop():
     """Stop the daemon."""
+    # Unload launchd first to prevent KeepAlive respawning while stopping.
+    if os.path.exists(PLIST_PATH):
+        os.system(f"launchctl unload {PLIST_PATH} 2>/dev/null")
+
     if os.path.exists(PID_FILE):
         with open(PID_FILE, "r") as f:
             try:
@@ -141,11 +159,7 @@ def stop():
             except:
                 pass
         os.remove(PID_FILE)
-    
-    # Also unload launchd if it exists
-    if os.path.exists(PLIST_PATH):
-        os.system(f"launchctl unload {PLIST_PATH} 2>/dev/null")
-    
+
     console.print("[red]✓ Stopped.[/red]")
 
 @app.command()
