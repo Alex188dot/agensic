@@ -1,5 +1,5 @@
 import os
-import sys
+import logging
 import json
 import uvicorn
 import re
@@ -10,10 +10,21 @@ from pydantic import BaseModel
 from litellm import completion
 
 # ==========================================
-# PROVIDED PROMPT ENGINEERING INTEGRATION
+# LOGGING
 # ==========================================
 
-# Mocking the dependencies required by the provided snippet
+logging.basicConfig(
+    level=logging.INFO,
+    format='%(asctime)s [%(levelname)s] %(message)s',
+    datefmt='%Y-%m-%d %H:%M:%S'
+)
+logger = logging.getLogger("ghostshell")
+
+# ==========================================
+# PROMPT ENGINEERING 
+# ==========================================
+
+
 class Settings:
     history_lines: int = 50
     max_commands_context: int = 40
@@ -93,7 +104,6 @@ def build_prompt_context(
     ]
     return "\n".join(lines)
 
-# --- End of User Provided Code ---
 
 # ==========================================
 # SERVER LOGIC
@@ -151,6 +161,10 @@ def get_simple_inventory() -> SystemInventory:
 
 @app.post("/predict")
 def predict_completion(ctx: Context):
+    
+    # Log request to terminal
+    logger.info(f"Prediction requested | Buffer: '{ctx.command_buffer}' | Directory: {ctx.working_directory}")
+
     # Load config
     config = load_config()
     model = config.get("model", "gpt-5-mini")
@@ -241,6 +255,8 @@ def predict_completion(ctx: Context):
         while len(clean_suggestions) < 3:
             clean_suggestions.append("")
 
+        logger.info(f"AI Response: {clean_suggestions}")
+
         return {"suggestions": clean_suggestions[:3]}
 
     except Exception:
@@ -249,4 +265,4 @@ def predict_completion(ctx: Context):
 
 if __name__ == "__main__":
     # Completely silent startup
-    uvicorn.run(app, host="127.0.0.1", port=22000, log_level="critical")
+    uvicorn.run(app, host="127.0.0.1", port=22000, log_level="info")
