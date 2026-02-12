@@ -6,6 +6,7 @@ import sys
 import requests
 import questionary
 import socket
+import signal
 from rich.console import Console
 from rich.panel import Panel
 
@@ -26,6 +27,42 @@ def is_port_open(host: str = "127.0.0.1", port: int = 22000) -> bool:
     with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
         s.settimeout(0.3)
         return s.connect_ex((host, port)) == 0
+
+def _read_pid_file() -> int | None:
+    if not os.path.exists(PID_FILE):
+        return None
+    try:
+        with open(PID_FILE, "r") as f:
+            return int(f.read().strip())
+    except Exception:
+        return None
+
+def _find_listening_pids(port: int = 22000) -> list[int]:
+    try:
+        result = subprocess.run(
+            ["lsof", "-nP", f"-iTCP:{port}", "-sTCP:LISTEN", "-t"],
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+    except Exception:
+        return []
+
+    pids: list[int] = []
+    for line in result.stdout.splitlines():
+        line = line.strip()
+        if line.isdigit():
+            pids.append(int(line))
+    return pids
+
+def _try_kill_pid(pid: int, sig: int = signal.SIGTERM) -> bool:
+    try:
+        os.kill(pid, sig)
+        return True
+    except ProcessLookupError:
+        return True
+    except Exception:
+        return False
 
 @app.command()
 def setup():
@@ -110,12 +147,17 @@ def enable_startup():
 """
     with open(PLIST_PATH, "w") as f:
         f.write(plist_content)
-    
-    # Load the service immediately
+
+    was_running = is_port_open()
+    if was_running:
+        console.print("[yellow]GhostShell is already running. Restarting under launchd...[/yellow]")
+        stop()
+
+    # Load the service immediately.
     os.system(f"launchctl unload {PLIST_PATH} 2>/dev/null")
     os.system(f"launchctl load {PLIST_PATH}")
     
-    console.print(f"[bold green]✔ GhostShell set to start automatically![/bold green]")
+    console.print(f"[bold green]✔ GhostShell started and set to start automatically![/bold green]")
 
 @app.command()
 def start():
@@ -151,16 +193,28 @@ def stop():
     if os.path.exists(PLIST_PATH):
         os.system(f"launchctl unload {PLIST_PATH} 2>/dev/null")
 
-    if os.path.exists(PID_FILE):
-        with open(PID_FILE, "r") as f:
-            try:
-                pid = int(f.read().strip())
-                os.kill(pid, 15)
-            except:
-                pass
-        os.remove(PID_FILE)
+    stopped_any = False
 
-    console.print("[red]✓ Stopped.[/red]")
+    pid = _read_pid_file()
+    if pid is not None and _try_kill_pid(pid):
+        stopped_any = True
+
+    # Also stop any process currently listening on the daemon port.
+    for listener_pid in _find_listening_pids():
+        if _try_kill_pid(listener_pid):
+            stopped_any = True
+
+    if os.path.exists(PID_FILE):
+        try:
+            os.remove(PID_FILE)
+        except OSError:
+            # Non-fatal: stale/permission-protected pid files should not crash setup/stop.
+            pass
+
+    if stopped_any:
+        console.print("[red]✓ Stopped.[/red]")
+    else:
+        console.print("[yellow]GhostShell was not running.[/yellow]")
 
 @app.command()
 def logs():
