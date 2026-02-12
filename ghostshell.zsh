@@ -67,6 +67,13 @@ _ghostshell_self_insert() {
     zle .self-insert
 }
 
+_ghostshell_backward_delete_char() {
+    POSTDISPLAY=""
+    region_highlight=()
+    GHOSTSHELL_SUGGESTIONS=("" "" "")
+    zle .backward-delete-char
+}
+
 _ghostshell_accept_widget() {
     local current="${GHOSTSHELL_SUGGESTIONS[$GHOSTSHELL_SUGGESTION_INDEX]}"
     if [[ -n "$current" ]]; then
@@ -162,6 +169,7 @@ zle -N _ghostshell_cycle_next
 zle -N _ghostshell_cycle_prev
 zle -N _ghostshell_partial_accept
 zle -N self-insert _ghostshell_self_insert
+zle -N backward-delete-char _ghostshell_backward_delete_char
 
 _ghostshell_bind_widget() {
     local key="$1"

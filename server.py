@@ -190,13 +190,13 @@ def predict_completion(ctx: Context):
         "Analyze the context (history, files, installed tools) provided below. "
         "Complete the user's current buffer by providing FULL command suggestions, not just the next word. "
         "Provide practical and likely full commands based on the user's partial input. "
-        "Output EXACTLY 3 suggestions, each separated by a pipe character (|). "
-        "Each suggestion must be a complete, runnable command. "
+        "Output ONLY valid JSON with EXACTLY these keys: option_1, option_2, option_3. "
+        "Each value must be a string containing a complete, runnable command suggestion. "
         "Examples:\n"
-        "- If the user types 'pip', suggest: 'pip install pandas | pip install numpy | pip install requests'\n"
-        "- If the user types 'aiterminal -', suggest: 'aiterminal --help | aiterminal --shortcuts | aiterminal setup'\n"
-        "If unsure, or if there are fewer than 3 relevant suggestions, return empty strings for the remaining ones (e.g., 'git checkout | git commit | '). "
-        "Do not repeat the input buffer. Do not output markdown. "
+        "- If the user types 'pip', suggest: {\"option_1\": \"pip install pandas\", \"option_2\": \"pip install numpy\", \"option_3\": \"pip install requests\"}\n"
+        "- If the user types 'aiterminal -', suggest: {\"option_1\": \"aiterminal --help\", \"option_2\": \"aiterminal --shortcuts\", \"option_3\": \"aiterminal setup\"}\n"
+        "If unsure, or if there are fewer than 3 relevant suggestions, return empty strings for the remaining ones. "
+        "Do not repeat the input buffer. Do not output markdown or explanations. "
         f"--- CONTEXT ---\n{context_str}"
     )
 
@@ -223,7 +223,8 @@ def predict_completion(ctx: Context):
                 {"role": "system", "content": system_prompt},
                 {"role": "user", "content": f"Buffer: {ctx.command_buffer}"}
             ],
-            "temperature": 0.1,
+            "temperature": 0.5,
+            "response_format": {"type": "json_object"},
         }
 
         if api_key:
@@ -236,20 +237,50 @@ def predict_completion(ctx: Context):
         if base_url:
             kwargs["api_base"] = base_url
 
-        response = completion(**kwargs)
-        raw_output = response.choices[0].message.content.strip()
+        try:
+            response = completion(**kwargs)
+        except Exception as first_error:
+            # Some providers/models don't support response_format yet.
+            if "response_format" not in str(first_error).lower():
+                raise
+            kwargs.pop("response_format", None)
+            response = completion(**kwargs)
 
-        # Split by | and clean up each suggestion
-        raw_suggestions = raw_output.split("|")
+        raw_output = (response.choices[0].message.content or "").strip()
+
+        # Parse JSON output with a defensive fallback for wrapped responses.
+        parsed = None
+        try:
+            parsed = json.loads(raw_output)
+        except json.JSONDecodeError:
+            match = re.search(r"\{.*\}", raw_output, flags=re.DOTALL)
+            if match:
+                try:
+                    parsed = json.loads(match.group(0))
+                except json.JSONDecodeError:
+                    parsed = None
+
         clean_suggestions = []
+        if isinstance(parsed, dict):
+            raw_suggestions = [
+                parsed.get("option_1", ""),
+                parsed.get("option_2", ""),
+                parsed.get("option_3", ""),
+            ]
+        else:
+            # Fallback for non-JSON responses from weaker models.
+            raw_suggestions = raw_output.split("|")
+
         for raw_sugg in raw_suggestions:
-            s = raw_sugg.strip()
+            s = str(raw_sugg).strip() if raw_sugg is not None else ""
             # Clean up Markdown or Quotes
             s = re.sub(r"```.*?```", "", s, flags=re.DOTALL)
             s = s.replace("```", "").strip()
-            if s.startswith('"') and s.endswith('"'): s = s[1:-1]
-            elif s.startswith("'") and s.endswith("'"): s = s[1:-1]
-            
+            if s.startswith('"') and s.endswith('"'):
+                s = s[1:-1]
+            elif s.startswith("'") and s.endswith("'"):
+                s = s[1:-1]
+
             # Remove overlap if the model repeated the input
             if s.startswith(ctx.command_buffer):
                 s = s[len(ctx.command_buffer):]

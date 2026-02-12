@@ -16,15 +16,35 @@ cp ghostshell.zsh "$INSTALL_DIR/"
 echo "📦 Installing Python dependencies..."
 pip3 install -r "$INSTALL_DIR/requirements.txt"
 
-# 4. Create alias for the CLI
+# 4. Create alias for the CLI (idempotent)
 # We add this to rc file so 'aiterminal' command works
 SHELL_RC="$HOME/.zshrc"
 if [ -f "$HOME/.bashrc" ]; then
     SHELL_RC="$HOME/.bashrc"
 fi
 
-echo "alias aiterminal='python3 $INSTALL_DIR/cli.py'" >> "$SHELL_RC"
-echo "source $INSTALL_DIR/ghostshell.zsh" >> "$SHELL_RC"
+START_MARKER="# >>> ghostshell >>>"
+END_MARKER="# <<< ghostshell <<<"
+
+touch "$SHELL_RC"
+
+# Remove old unmanaged lines from previous installs.
+sed -i.bak \
+  -e "\|alias aiterminal='python3 .*\\.ghostshell/cli\\.py'|d" \
+  -e "\|source .*\\.ghostshell/ghostshell\\.zsh|d" \
+  "$SHELL_RC"
+
+# Remove previous managed block if present.
+sed -i.bak \
+  -e "/$START_MARKER/,/$END_MARKER/d" \
+  "$SHELL_RC"
+
+cat >> "$SHELL_RC" <<EOF
+$START_MARKER
+alias aiterminal='python3 $INSTALL_DIR/cli.py'
+source $INSTALL_DIR/ghostshell.zsh
+$END_MARKER
+EOF
 
 echo "✅ Installation complete!"
 echo "------------------------------------------------"
