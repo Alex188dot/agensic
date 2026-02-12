@@ -63,6 +63,9 @@ def _list_working_dir(path: str, max_items: int = 80) -> list[str]:
     try:
         with os.scandir(path) as it:
             for entry in it:
+                # Hide dotfiles/dot-directories to reduce prompt noise and avoid leaking local metadata.
+                if entry.name.startswith("."):
+                    continue
                 suffix = "/" if entry.is_dir() else ""
                 items.append(entry.name + suffix)
                 if len(items) >= max_items:
@@ -238,6 +241,11 @@ def predict_completion(ctx: Context):
             kwargs["api_base"] = base_url
 
         try:
+            # log message payload
+#            logger.info(
+#                "LiteLLM messages payload: %s",
+#                json.dumps(kwargs.get("messages", []), ensure_ascii=False),
+#            )
             response = completion(**kwargs)
         except Exception as first_error:
             # Some providers/models don't support response_format yet.
