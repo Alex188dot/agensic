@@ -186,13 +186,17 @@ def predict_completion(ctx: Context):
     context_str = build_prompt_context(req_context, inventory, settings)
 
     system_prompt = (
-        "You are a CLI terminal autocomplete engine. "
+        "You are an advanced CLI terminal autocomplete engine. "
         "Analyze the context (history, files, installed tools) provided below. "
-        "Complete the user's current buffer. "
+        "Complete the user's current buffer by providing FULL command suggestions, not just the next word. "
+        "Provide practical and likely full commands based on the user's partial input. "
         "Output EXACTLY 3 suggestions, each separated by a pipe character (|). "
-        "Each suggestion should be ONLY the completion text required to finish the command. "
+        "Each suggestion must be a complete, runnable command. "
+        "Examples:\n"
+        "- If the user types 'pip', suggest: 'pip install pandas | pip install numpy | pip install requests'\n"
+        "- If the user types 'aiterminal -', suggest: 'aiterminal --help | aiterminal --shortcuts | aiterminal setup'\n"
+        "If unsure, or if there are fewer than 3 relevant suggestions, return empty strings for the remaining ones (e.g., 'git checkout | git commit | '). "
         "Do not repeat the input buffer. Do not output markdown. "
-        "If unsure or if there are fewer than 3 suggestions, return empty strings for the remaining ones (e.g., 'git checkout | git commit | ').\n\n"
         f"--- CONTEXT ---\n{context_str}"
     )
 
@@ -259,8 +263,8 @@ def predict_completion(ctx: Context):
 
         return {"suggestions": clean_suggestions[:3]}
 
-    except Exception:
-        # Return empty on any error to prevent terminal noise
+    except Exception as e:
+        logger.error(f"Prediction failed: {str(e)}", exc_info=True)
         return {"suggestions": ["", "", ""]}
 
 if __name__ == "__main__":

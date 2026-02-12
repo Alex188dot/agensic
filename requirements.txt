@@ -1,8 +1,8 @@
-fastapi
-uvicorn
-litellm
-rich
-typer
-requests
-psutil
-questionary
+fastapi==0.118.0
+uvicorn==0.34.0
+litellm==1.81.9
+rich==14.3.2
+typer==0.21.1
+requests==2.32.5
+psutil==6.1.0
+questionary==2.1.1
