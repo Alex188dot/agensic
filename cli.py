@@ -215,12 +215,10 @@ def main(
 def show_shortcuts():
     """Display the shortcuts help panel."""
     rows = [
-        ("Trigger suggestion", "Ctrl+Space", "-", "Manual trigger"),
-        ("Partial accept (word)", "Ctrl+Right", "Option+Right, Option+F", "Cursor-like word step"),
-        ("Cycle suggestions", "Ctrl+N / Ctrl+P", "-", "Next / previous"),
-        ("Show AI panel", "Ctrl+G", "Ctrl+X then A, Option+J", "Show 3 suggestions"),
-        ("AI panel navigation", "Up / Down", "Enter to accept", "Esc to cancel"),
         ("Accept inline suggestion", "Tab", "-", "Accept full suggestion"),
+        ("Trigger suggestion", "Ctrl+Space", "-", "Manual trigger"),
+        ("Partial accept (word)", "Option+Right", "-", "Accept next word"),
+        ("Cycle suggestions", "Ctrl+N / Ctrl+P", "-", "Next / previous"),
     ]
     separator = "-" * 60
     lines = []

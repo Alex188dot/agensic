@@ -150,60 +150,6 @@ _ghostshell_cycle_prev() {
     fi
 }
 
-_ghostshell_ai_panel() {
-    if [[ ${#BUFFER} -ge 2 && -z "${GHOSTSHELL_SUGGESTIONS[1]}" && -z "${GHOSTSHELL_SUGGESTIONS[2]}" && -z "${GHOSTSHELL_SUGGESTIONS[3]}" ]]; then
-        _ghostshell_fetch_suggestion
-    fi
-
-    local has_suggestion=0
-    for s in "${GHOSTSHELL_SUGGESTIONS[@]}"; do
-        [[ -n "$s" ]] && has_suggestion=1 && break
-    done
-    if [[ $has_suggestion -eq 0 ]]; then
-        zle -M "No AI suggestions available for this input."
-        return
-    fi
-
-    local selected=1
-    local key
-    
-    while true; do
-        local msg="--- GhostShell AI Panel ---"
-        for i in 1 2 3; do
-            local mark="  "
-            [[ $i -eq $selected ]] && mark="> "
-            local line="${GHOSTSHELL_SUGGESTIONS[$i]}"
-            [[ -z "$line" ]] && line="(empty)"
-            msg+="\n$mark${line}"
-        done
-        msg+="\n(Up/Down to toggle, Enter to choose, Esc to cancel)"
-        
-        zle -M "$msg"
-        
-        read -k 1 key
-        if [[ "$key" == $'\x1b' ]]; then
-            # Peek for arrow keys
-            read -k 2 -t 0.1 rest
-            if [[ "$rest" == "[A" ]]; then # Up
-                selected=$(( (selected + 1) % 3 + 1 ))
-            elif [[ "$rest" == "[B" ]]; then # Down
-                selected=$(( selected % 3 + 1 ))
-            else
-                zle -M ""
-                break
-            fi
-        elif [[ "$key" == $'\x0d' ]]; then # Enter
-            GHOSTSHELL_SUGGESTION_INDEX=$selected
-            _ghostshell_accept_widget
-            zle -M ""
-            break
-        else
-            zle -M ""
-            break
-        fi
-    done
-}
-
 _ghostshell_space_trigger() {
     zle .self-insert
     _ghostshell_suggest_widget
@@ -215,7 +161,6 @@ zle -N _ghostshell_space_trigger
 zle -N _ghostshell_cycle_next
 zle -N _ghostshell_cycle_prev
 zle -N _ghostshell_partial_accept
-zle -N _ghostshell_ai_panel
 zle -N self-insert _ghostshell_self_insert
 
 _ghostshell_bind_widget() {
@@ -229,20 +174,14 @@ _ghostshell_bind_widget() {
 # Trigger suggestion: Ctrl+Space (^@)
 _ghostshell_bind_widget '^@' _ghostshell_suggest_widget
 
-# Partial Accept (Word-by-Word): Ctrl+Right, with Option+Right fallback
-_ghostshell_bind_widget '^[[1;5C' _ghostshell_partial_accept
-_ghostshell_bind_widget '^[[5C' _ghostshell_partial_accept
+# Partial accept: Option+Right (terminal-dependent encodings)
 _ghostshell_bind_widget '^[[1;3C' _ghostshell_partial_accept
+_ghostshell_bind_widget '^[[1;9C' _ghostshell_partial_accept
 _ghostshell_bind_widget '^[f' _ghostshell_partial_accept
 
 # Cycle suggestions (non-ambiguous): Ctrl+P / Ctrl+N
 _ghostshell_bind_widget '^P' _ghostshell_cycle_prev
 _ghostshell_bind_widget '^N' _ghostshell_cycle_next
-
-# AI Panel: Ctrl+G, Ctrl+X then A, Option+J fallback
-_ghostshell_bind_widget '^G' _ghostshell_ai_panel
-_ghostshell_bind_widget '^Xa' _ghostshell_ai_panel
-_ghostshell_bind_widget '^[j' _ghostshell_ai_panel
 
 _ghostshell_bind_widget ' ' _ghostshell_space_trigger
 _ghostshell_bind_widget '^I' _ghostshell_accept_widget
