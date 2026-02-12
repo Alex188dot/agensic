@@ -38,7 +38,7 @@ _ghostshell_update_display() {
         done
         
         if [[ $others -gt 1 ]]; then
-            POSTDISPLAY="$current (Opt+[ / Opt+] to cycle)"
+            POSTDISPLAY="$current (Ctrl+P / Ctrl+N to cycle)"
         else
             POSTDISPLAY="$current"
         fi
@@ -83,6 +83,11 @@ _ghostshell_accept_widget() {
 
 _ghostshell_partial_accept() {
     local current="${GHOSTSHELL_SUGGESTIONS[$GHOSTSHELL_SUGGESTION_INDEX]}"
+    if [[ -z "$current" && ${#BUFFER} -ge 2 ]]; then
+        _ghostshell_fetch_suggestion
+        current="${GHOSTSHELL_SUGGESTIONS[$GHOSTSHELL_SUGGESTION_INDEX]}"
+    fi
+
     if [[ -n "$current" ]]; then
         # Take the first word
         local first_word="${current%% *}"
@@ -96,22 +101,69 @@ _ghostshell_partial_accept() {
         POSTDISPLAY=""
         region_highlight=()
         zle -R
+    else
+        zle forward-word
     fi
 }
 
 _ghostshell_cycle_next() {
-    GHOSTSHELL_SUGGESTION_INDEX=$(( GHOSTSHELL_SUGGESTION_INDEX % 3 + 1 ))
-    _ghostshell_update_display
-    zle -R
+    local has_suggestion=0
+    for s in "${GHOSTSHELL_SUGGESTIONS[@]}"; do
+        [[ -n "$s" ]] && has_suggestion=1 && break
+    done
+
+    if [[ $has_suggestion -eq 0 && ${#BUFFER} -ge 2 ]]; then
+        _ghostshell_fetch_suggestion
+        for s in "${GHOSTSHELL_SUGGESTIONS[@]}"; do
+            [[ -n "$s" ]] && has_suggestion=1 && break
+        done
+    fi
+
+    if [[ $has_suggestion -eq 1 ]]; then
+        GHOSTSHELL_SUGGESTION_INDEX=$(( GHOSTSHELL_SUGGESTION_INDEX % 3 + 1 ))
+        _ghostshell_update_display
+        zle -R
+    else
+        zle down-line-or-history
+    fi
 }
 
 _ghostshell_cycle_prev() {
-    GHOSTSHELL_SUGGESTION_INDEX=$(( (GHOSTSHELL_SUGGESTION_INDEX + 1) % 3 + 1 ))
-    _ghostshell_update_display
-    zle -R
+    local has_suggestion=0
+    for s in "${GHOSTSHELL_SUGGESTIONS[@]}"; do
+        [[ -n "$s" ]] && has_suggestion=1 && break
+    done
+
+    if [[ $has_suggestion -eq 0 && ${#BUFFER} -ge 2 ]]; then
+        _ghostshell_fetch_suggestion
+        for s in "${GHOSTSHELL_SUGGESTIONS[@]}"; do
+            [[ -n "$s" ]] && has_suggestion=1 && break
+        done
+    fi
+
+    if [[ $has_suggestion -eq 1 ]]; then
+        GHOSTSHELL_SUGGESTION_INDEX=$(( (GHOSTSHELL_SUGGESTION_INDEX + 1) % 3 + 1 ))
+        _ghostshell_update_display
+        zle -R
+    else
+        zle up-line-or-history
+    fi
 }
 
 _ghostshell_ai_panel() {
+    if [[ ${#BUFFER} -ge 2 && -z "${GHOSTSHELL_SUGGESTIONS[1]}" && -z "${GHOSTSHELL_SUGGESTIONS[2]}" && -z "${GHOSTSHELL_SUGGESTIONS[3]}" ]]; then
+        _ghostshell_fetch_suggestion
+    fi
+
+    local has_suggestion=0
+    for s in "${GHOSTSHELL_SUGGESTIONS[@]}"; do
+        [[ -n "$s" ]] && has_suggestion=1 && break
+    done
+    if [[ $has_suggestion -eq 0 ]]; then
+        zle -M "No AI suggestions available for this input."
+        return
+    fi
+
     local selected=1
     local key
     
@@ -120,7 +172,9 @@ _ghostshell_ai_panel() {
         for i in 1 2 3; do
             local mark="  "
             [[ $i -eq $selected ]] && mark="> "
-            msg+="\n$mark${GHOSTSHELL_SUGGESTIONS[$i]}"
+            local line="${GHOSTSHELL_SUGGESTIONS[$i]}"
+            [[ -z "$line" ]] && line="(empty)"
+            msg+="\n$mark${line}"
         done
         msg+="\n(Up/Down to toggle, Enter to choose, Esc to cancel)"
         
@@ -164,21 +218,31 @@ zle -N _ghostshell_partial_accept
 zle -N _ghostshell_ai_panel
 zle -N self-insert _ghostshell_self_insert
 
-# Trigger suggestion: Ctrl+Space (^@), Option+Esc (^[)
-bindkey '^@' _ghostshell_suggest_widget
-bindkey '^[服' _ghostshell_suggest_widget # Placeholder
+_ghostshell_bind_widget() {
+    local key="$1"
+    local widget="$2"
+    bindkey -M emacs "$key" "$widget"
+    bindkey -M viins "$key" "$widget"
+    bindkey -M vicmd "$key" "$widget"
+}
 
-# Partial Accept (Word-by-Word): Cmd + Right arrow (often ^[[1;9C)
-bindkey '^[[1;9C' _ghostshell_partial_accept
-bindkey '^[[1;3C' _ghostshell_partial_accept # Alt+Right fallback
+# Trigger suggestion: Ctrl+Space (^@)
+_ghostshell_bind_widget '^@' _ghostshell_suggest_widget
 
-# Cycle suggestions: Opt + [ and Opt + ]
-# In zsh bindkey, we can use escape sequences
-bindkey '^[[' _ghostshell_cycle_prev
-bindkey '^[]' _ghostshell_cycle_next
+# Partial Accept (Word-by-Word): Ctrl+Right, with Option+Right fallback
+_ghostshell_bind_widget '^[[1;5C' _ghostshell_partial_accept
+_ghostshell_bind_widget '^[[5C' _ghostshell_partial_accept
+_ghostshell_bind_widget '^[[1;3C' _ghostshell_partial_accept
+_ghostshell_bind_widget '^[f' _ghostshell_partial_accept
 
-# AI Panel: Ctrl+Enter (Ctrl+J)
-bindkey '^J' _ghostshell_ai_panel
+# Cycle suggestions (non-ambiguous): Ctrl+P / Ctrl+N
+_ghostshell_bind_widget '^P' _ghostshell_cycle_prev
+_ghostshell_bind_widget '^N' _ghostshell_cycle_next
 
-bindkey ' ' _ghostshell_space_trigger
-bindkey '^I' _ghostshell_accept_widget
+# AI Panel: Ctrl+G, Ctrl+X then A, Option+J fallback
+_ghostshell_bind_widget '^G' _ghostshell_ai_panel
+_ghostshell_bind_widget '^Xa' _ghostshell_ai_panel
+_ghostshell_bind_widget '^[j' _ghostshell_ai_panel
+
+_ghostshell_bind_widget ' ' _ghostshell_space_trigger
+_ghostshell_bind_widget '^I' _ghostshell_accept_widget

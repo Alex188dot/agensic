@@ -195,6 +195,11 @@ def test():
         console.print("1. Check if server is running: aiterminal start")
         console.print("2. View logs: aiterminal logs")
 
+@app.command("shortcuts")
+def shortcuts_command():
+    """Show keyboard shortcuts."""
+    show_shortcuts()
+
 @app.callback(invoke_without_command=True)
 def main(
     ctx: typer.Context,
@@ -209,14 +214,32 @@ def main(
 
 def show_shortcuts():
     """Display the shortcuts help panel."""
-    shortcuts_text = (
-        "[bold green]Trigger Suggestion:[/bold green] Ctrl+Space (or Option+Esc fallback)\n"
-        "[bold green]Partial Accept (Word-by-Word):[/bold green] Cmd + Right arrow\n"
-        "[bold green]Cycle Suggestions:[/bold green] Opt + [ and Opt + ]\n"
-        "[bold green]Show AI Panel:[/bold green] Ctrl+Enter (Ctrl+J)\n"
-        "[bold green]Accept Selection:[/bold green] Tab\n"
+    rows = [
+        ("Trigger suggestion", "Ctrl+Space", "-", "Manual trigger"),
+        ("Partial accept (word)", "Ctrl+Right", "Option+Right, Option+F", "Cursor-like word step"),
+        ("Cycle suggestions", "Ctrl+N / Ctrl+P", "-", "Next / previous"),
+        ("Show AI panel", "Ctrl+G", "Ctrl+X then A, Option+J", "Show 3 suggestions"),
+        ("AI panel navigation", "Up / Down", "Enter to accept", "Esc to cancel"),
+        ("Accept inline suggestion", "Tab", "-", "Accept full suggestion"),
+    ]
+    separator = "-" * 60
+    lines = []
+    for action, primary, fallback, notes in rows:
+        lines.append(f"[bold green]{action}[/bold green]")
+        lines.append(f"Primary : {primary}")
+        lines.append(f"Fallback: {fallback}")
+        lines.append(f"Notes   : {notes}")
+        lines.append(separator)
+
+    shortcuts_text = "\n".join(lines[:-1])
+    console.print(
+        Panel(
+            shortcuts_text,
+            title="[bold cyan]GhostShell Shortcuts[/bold cyan]",
+            subtitle="Use `aiterminal shortcuts` or `aiterminal --shortcuts`",
+            expand=False,
+        )
     )
-    console.print(Panel(shortcuts_text, title="[bold cyan]GhostShell Shortcuts[/bold cyan]", expand=False))
 
 if __name__ == "__main__":
     app()

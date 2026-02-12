@@ -1,4 +1,4 @@
-# TermiMind 🧠
+# GhostShell 👻
 
 AI Autocomplete for your Terminal. Works with ROS2, Git, Docker, and everything else.
 
