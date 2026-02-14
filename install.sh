@@ -12,6 +12,10 @@ cp server.py "$INSTALL_DIR/"
 cp cli.py "$INSTALL_DIR/"
 cp ghostshell.zsh "$INSTALL_DIR/"
 
+# Copy new modules
+if [ -f "engine.py" ]; then cp engine.py "$INSTALL_DIR/"; fi
+if [ -f "learning.py" ]; then cp learning.py "$INSTALL_DIR/"; fi
+
 # 3. Install Python Dependencies
 echo "📦 Installing Python dependencies..."
 pip3 install -r "$INSTALL_DIR/requirements.txt"
