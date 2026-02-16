@@ -145,6 +145,9 @@ _ghostshell_log_command() {
 
 _ghostshell_update_display() {
     local current="${GHOSTSHELL_SUGGESTIONS[$GHOSTSHELL_SUGGESTION_INDEX]}"
+    # Ensure no newlines break the display
+    current="${current//$'\n'/}" 
+    current="${current//$'\r'/}"
     
     if [[ -n "$current" ]]; then
         local others=0
@@ -154,14 +157,14 @@ _ghostshell_update_display() {
         
         # Show pool count if we have more than 3
         local pool_count=${#GHOSTSHELL_SUGGESTION_POOL[@]}
-        if [[ $pool_count -gt 3 ]]; then
-            POSTDISPLAY="$current ($pool_count options, Ctrl+P/N to cycle)"
-        elif [[ $others -gt 1 ]]; then
-            POSTDISPLAY="$current (Ctrl+P / Ctrl+N to cycle)"
+        if [[ $pool_count -gt 3 ]] || [[ $others -gt 1 ]]; then
+            # Shorter hint to prevent wrapping on standard terminals
+            POSTDISPLAY="${current}  (Ctrl+P/N to cycle)"
         else
             POSTDISPLAY="$current"
         fi
-        region_highlight=("${#BUFFER} $((${#BUFFER} + ${#current})) fg=242")
+        # Highlight BOTH the suggestion and the hint in grey (ghost text style)
+        region_highlight=("${#BUFFER} $((${#BUFFER} + ${#POSTDISPLAY})) fg=242")
     else
         POSTDISPLAY=""
         region_highlight=()
@@ -212,8 +215,6 @@ zle -N _ghostshell_on_timer_trigger
 TRAPUSR1() {
     # Ensure we are in ZLE
     if zle; then
-        # Invalidate current display
-        zle -I
         # Invoke the update logic AS A WIDGET
         zle _ghostshell_on_timer_trigger
     fi
