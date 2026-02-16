@@ -186,6 +186,17 @@ def start():
     console.print(f"[green]✔ Started (PID: {process.pid})[/green]")
     console.print(f"[dim]Log file: {CONFIG_DIR}/server.log[/dim]")
 
+    # Interactive countdown for DB initialization
+    import time
+    try:
+        with console.status("[yellow]Waiting for DB initialization...[/yellow]", spinner="dots") as status:
+            for i in range(10, 0, -1):
+                status.update(f"[yellow]Waiting for DB initialization... {i}s[/yellow]")
+                time.sleep(1)
+        console.print("[green]✔ DB Ready![/green]")
+    except KeyboardInterrupt:
+        pass
+
 @app.command()
 def stop():
     """Stop the daemon."""
