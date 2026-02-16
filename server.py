@@ -49,7 +49,7 @@ def get_history_file(shell: str) -> str:
 async def predict_completion(ctx: Context):
     # Quick filter: empty buffer
     if not ctx.command_buffer.strip():
-        return {"suggestions": ["", "", ""]}
+        return {"suggestions": ["", "", ""], "pool": []}
 
     config = load_config()
     
@@ -60,10 +60,10 @@ async def predict_completion(ctx: Context):
         shell=ctx.shell
     )
 
-    suggestions = await engine.get_suggestions(config, req_context)
+    suggestions, pool = await engine.get_suggestions(config, req_context)
     
-    logger.info(f"Req: '{ctx.command_buffer}' -> Sug: {suggestions}")
-    return {"suggestions": suggestions}
+    logger.info(f"Req: '{ctx.command_buffer}' -> Sug: {suggestions[:3]}, Pool: {len([p for p in pool if p])}")
+    return {"suggestions": suggestions, "pool": pool}
 
 @app.post("/feedback")
 def log_feedback(fb: Feedback, background_tasks: BackgroundTasks):
@@ -74,5 +74,16 @@ def log_feedback(fb: Feedback, background_tasks: BackgroundTasks):
     background_tasks.add_task(engine.log_feedback, fb.command_buffer, fb.accepted_suggestion)
     return {"status": "ok"}
 
+@app.post("/log_command")
+def log_command(data: dict, background_tasks: BackgroundTasks):
+    """
+    Endpoint for logging executed commands to the vector database.
+    """
+    command = data.get("command", "")
+    if command:
+        background_tasks.add_task(engine.log_executed_command, command)
+    return {"status": "ok"}
+
 if __name__ == "__main__":
     uvicorn.run(app, host="127.0.0.1", port=22000, log_level="warning")
+

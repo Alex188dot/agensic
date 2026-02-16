@@ -7,6 +7,7 @@ import glob
 from pathlib import Path
 from litellm import acompletion
 from learning import Learner
+from vector_db import CommandVectorDB
 
 logger = logging.getLogger("ghostshell.engine")
 
@@ -32,6 +33,8 @@ class SuggestionEngine:
     def __init__(self):
         self.learner = Learner()
         self.inventory = self._get_simple_inventory()
+        self.vector_db = CommandVectorDB()
+        self._initialized_history = False  # Track if we've loaded history
 
     def _safe_tail(self, path: str, max_lines: int) -> list[str]:
         if not path: return []
@@ -84,26 +87,30 @@ class SuggestionEngine:
         if shutil.which("cargo"): inv.package_sources.append("cargo")
         return inv
 
-    def _get_deterministic_candidates(self, ctx: RequestContext) -> list[str]:
+    def _get_vector_candidates(self, ctx: RequestContext) -> list[str]:
         """
-        Generate candidates purely from history and local files (FAST).
-        Used to 'prime' the suggestions or provide fallback.
+        Get command suggestions from the vector database.
+        Returns exact prefix matches using semantic similarity.
         """
-        candidates = []
         prefix = ctx.buffer.strip()
         if len(prefix) < 2:
             return []
-
-        # 1. History match (Exact prefix)
-        history = self._safe_tail(ctx.history_file, 1000) # Look deeper for deterministic
-        seen = set()
-        # Iterate backwards
-        for cmd in reversed(history):
+        
+        # Initialize history on first use
+        if not self._initialized_history and ctx.history_file:
+            logger.info("First run: initializing vector DB from history")
+            self.vector_db.initialize_from_history(ctx.history_file)
+            self._initialized_history = True
+        
+        # Get exact prefix matches from vector DB (top 20)
+        matches = self.vector_db.get_exact_prefix_matches(prefix, topk=20)
+        
+        # Return only the suffix part (what comes after the prefix)
+        candidates = []
+        for cmd in matches:
             if cmd.startswith(prefix) and cmd != prefix:
-                if cmd not in seen:
-                    candidates.append(cmd[len(prefix):]) # Return suffix
-                    seen.add(cmd)
-            if len(candidates) >= 2: break
+                suffix = cmd[len(prefix):]
+                candidates.append(suffix)
         
         return candidates
 
@@ -127,12 +134,40 @@ class SuggestionEngine:
         ]
         return "\n".join(lines)
 
-    async def get_suggestions(self, config: dict, ctx: RequestContext) -> list[str]:
-        # 1. Deterministic Pass (Very fast)
-        # We capture these but still ask LLM for creativity, unless deterministic is perfect.
-        # deterministic = self._get_deterministic_candidates(ctx)
+    async def get_suggestions(self, config: dict, ctx: RequestContext) -> tuple[list[str], list[str]]:
+        """
+        New paradigm:
+        1. Get top 20 exact prefix matches from vector DB
+        2. Return first 3 as suggestions + full pool of 20
+        3. Only invoke AI if ALL 20 matches are exhausted (user typed something not in history)
         
-        # 2. LLM Pass
+        Returns:
+            tuple: (top_3_suggestions, full_pool_of_20)
+        """
+        # Get vector-based candidates (up to 20)
+        vector_candidates = self._get_vector_candidates(ctx)
+        
+        # If we have candidates from history, return the top 3 + full pool
+        if vector_candidates:
+            # Rerank based on learning feedback
+            reranked = self.learner.rerank(ctx.buffer, vector_candidates)
+            suggestions = reranked[:3]
+            pool = reranked[:20]  # Full pool for filtering
+            
+            # Pad to 3 if needed
+            while len(suggestions) < 3:
+                suggestions.append("")
+            
+            # Pad pool to 20
+            while len(pool) < 20:
+                pool.append("")
+            
+            logger.info(f"Vector DB returned {len(vector_candidates)} matches, using top 3")
+            return (suggestions, pool)
+        
+        # If no vector matches, this is a new/unknown command - invoke AI
+        logger.info("No vector matches found, invoking AI for new command")
+        
         model = config.get("model", "gpt-5-mini")
         provider = config.get("provider", "openai")
         api_key = config.get("api_key", None)
@@ -175,7 +210,7 @@ class SuggestionEngine:
                     {"role": "system", "content": system_prompt},
                     {"role": "user", "content": f"Buffer: {ctx.buffer}"}
                 ],
-                "temperature": 0.3, # Lower temperature for stability
+                "temperature": 0.3,
                 "response_format": {"type": "json_object"},
             }
 
@@ -231,16 +266,26 @@ class SuggestionEngine:
 
         except Exception as e:
             logger.error(f"LLM Error: {e}")
-            # Fallback to deterministic if LLM fails
-            suggestions = self._get_deterministic_candidates(ctx)
+            suggestions = []
 
-        # Pad
-        while len(suggestions) < 3: suggestions.append("")
+        # Pad to 3
+        while len(suggestions) < 3:
+            suggestions.append("")
 
-        # 3. Rerank based on Learning (Local feedback)
-        final_suggestions = self.learner.rerank(ctx.buffer, suggestions)
-        
-        return final_suggestions[:3]
+        # For AI suggestions, pool is same as suggestions (no filtering needed)
+        pool = suggestions[:]
+        while len(pool) < 20:
+            pool.append("")
+
+        return (suggestions[:3], pool)
 
     def log_feedback(self, buffer: str, accepted: str):
         self.learner.log_accept(buffer, accepted)
+    
+    def log_executed_command(self, command: str):
+        """
+        Log a command that was executed by the user.
+        This adds it to the vector database for future suggestions.
+        """
+        if command and command.strip():
+            self.vector_db.insert_command(command.strip())

@@ -11,10 +11,8 @@ cp requirements.txt "$INSTALL_DIR/"
 cp server.py "$INSTALL_DIR/"
 cp cli.py "$INSTALL_DIR/"
 cp ghostshell.zsh "$INSTALL_DIR/"
-
-# Copy new modules
-if [ -f "engine.py" ]; then cp engine.py "$INSTALL_DIR/"; fi
-if [ -f "learning.py" ]; then cp learning.py "$INSTALL_DIR/"; fi
+cp engine.py "$INSTALL_DIR/"
+cp vector_db.py "$INSTALL_DIR/"
 
 # 3. Install Python Dependencies
 echo "📦 Installing Python dependencies..."
