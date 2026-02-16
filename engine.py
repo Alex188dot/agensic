@@ -5,7 +5,7 @@ import re
 import shutil
 import glob
 from pathlib import Path
-from litellm import completion
+from litellm import acompletion
 from learning import Learner
 
 logger = logging.getLogger("ghostshell.engine")
@@ -127,7 +127,7 @@ class SuggestionEngine:
         ]
         return "\n".join(lines)
 
-    def get_suggestions(self, config: dict, ctx: RequestContext) -> list[str]:
+    async def get_suggestions(self, config: dict, ctx: RequestContext) -> list[str]:
         # 1. Deterministic Pass (Very fast)
         # We capture these but still ask LLM for creativity, unless deterministic is perfect.
         # deterministic = self._get_deterministic_candidates(ctx)
@@ -189,11 +189,11 @@ class SuggestionEngine:
             if base_url: kwargs["api_base"] = base_url
 
             try:
-                response = completion(**kwargs)
+                response = await acompletion(**kwargs)
             except Exception as first_error:
                 if "response_format" not in str(first_error).lower(): raise
                 kwargs.pop("response_format", None)
-                response = completion(**kwargs)
+                response = await acompletion(**kwargs)
 
             raw = (response.choices[0].message.content or "").strip()
             

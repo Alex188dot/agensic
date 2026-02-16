@@ -1,6 +1,6 @@
 #!/bin/bash
 
-echo "🚀 Installing GhostShell 👻..."
+echo "🚀 Installing GhostShell 👻✨..."
 
 # 1. Create directory
 INSTALL_DIR="$HOME/.ghostshell"
@@ -50,9 +50,9 @@ source $INSTALL_DIR/ghostshell.zsh
 $END_MARKER
 EOF
 
-echo "✅ GhostShell 👻 Installation complete!"
+echo "✅ GhostShell 👻✨ Installation complete!"
 echo "------------------------------------------------"
 echo "1. Restart your terminal."
 echo "2. Run: aiterminal setup"
-echo "3. Start typing commands (e.g. 'git c', 'ros2 ru')."
+echo "3. Start typing commands (e.g. 'git c', 'docker ru')."
 echo "------------------------------------------------"

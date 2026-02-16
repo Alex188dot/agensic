@@ -46,7 +46,7 @@ def get_history_file(shell: str) -> str:
     return ""
 
 @app.post("/predict")
-def predict_completion(ctx: Context):
+async def predict_completion(ctx: Context):
     # Quick filter: empty buffer
     if not ctx.command_buffer.strip():
         return {"suggestions": ["", "", ""]}
@@ -60,7 +60,7 @@ def predict_completion(ctx: Context):
         shell=ctx.shell
     )
 
-    suggestions = engine.get_suggestions(config, req_context)
+    suggestions = await engine.get_suggestions(config, req_context)
     
     logger.info(f"Req: '{ctx.command_buffer}' -> Sug: {suggestions}")
     return {"suggestions": suggestions}
