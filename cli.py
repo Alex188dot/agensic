@@ -158,6 +158,15 @@ def enable_startup():
     os.system(f"launchctl load {PLIST_PATH}")
     
     console.print(f"[bold green]✔ GhostShell started and set to start automatically![/bold green]")
+    import time
+    try:
+        with console.status("[yellow]Waiting for DB initialization...[/yellow]", spinner="dots") as status:
+            for i in range(10, 0, -1):
+                status.update(f"[yellow]Waiting for DB initialization... {i}s[/yellow]")
+                time.sleep(1)
+        console.print("[green]✔ DB Ready![/green]")
+    except KeyboardInterrupt:
+        pass
 
 @app.command()
 def start():
@@ -200,9 +209,16 @@ def start():
 @app.command()
 def stop():
     """Stop the daemon."""
+    # Capture if it's running before we start killing things
+    was_running = is_port_open() or os.path.exists(PID_FILE)
+    
     # Unload launchd first to prevent KeepAlive respawning while stopping.
     if os.path.exists(PLIST_PATH):
-        os.system(f"launchctl unload {PLIST_PATH} 2>/dev/null")
+        # On macOS, launchctl unload might stop the process immediately.
+        # We check return code: 0 means it was loaded and successfully unloaded.
+        res = os.system(f"launchctl unload {PLIST_PATH} 2>/dev/null")
+        if res == 0:
+            was_running = True
 
     stopped_any = False
 
@@ -222,7 +238,7 @@ def stop():
             # Non-fatal: stale/permission-protected pid files should not crash setup/stop.
             pass
 
-    if stopped_any:
+    if stopped_any or was_running:
         console.print("[red]✓ Stopped.[/red]")
     else:
         console.print("[yellow]GhostShell was not running.[/yellow]")

@@ -13,6 +13,7 @@ cp cli.py "$INSTALL_DIR/"
 cp ghostshell.zsh "$INSTALL_DIR/"
 cp engine.py "$INSTALL_DIR/"
 cp vector_db.py "$INSTALL_DIR/"
+cp learning.py "$INSTALL_DIR/"
 
 # 3. Install Python Dependencies
 echo "📦 Installing Python dependencies..."

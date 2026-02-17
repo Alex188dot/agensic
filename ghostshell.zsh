@@ -261,11 +261,6 @@ _ghostshell_backward_delete_char() {
     
     # Clear suggestions and pool on delete
     _ghostshell_clear_suggestions
-    
-    # Start timer to re-fetch
-    if [[ ${#BUFFER} -ge 2 ]]; then
-        _ghostshell_start_timer
-    fi
 }
 
 _ghostshell_interrupt() {

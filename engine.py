@@ -289,3 +289,8 @@ class SuggestionEngine:
         """
         if command and command.strip():
             self.vector_db.insert_command(command.strip())
+    
+    def close(self):
+        """Clean up resources."""
+        if hasattr(self, 'vector_db'):
+            self.vector_db.close()

@@ -1,4 +1,4 @@
-# GhostShell 🚀
+# GhostShell 👻✨
 
 An intelligent terminal autocomplete powered by vector databases and AI.
 
