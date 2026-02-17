@@ -162,7 +162,7 @@ class SuggestionEngine:
             while len(pool) < 20:
                 pool.append("")
             
-            logger.info(f"Vector DB returned {len(vector_candidates)} matches, using top 3")
+            logger.info(f"Vector DB returned {len(vector_candidates)} matches")
             return (suggestions, pool)
         
         # If no vector matches, this is a new/unknown command - invoke AI

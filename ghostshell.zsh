@@ -2,12 +2,8 @@
 # Uses vector DB for suggestions, triggers on 0.2s pause, no trigger chars
 
 typeset -g -a GHOSTSHELL_SUGGESTIONS
-GHOSTSHELL_SUGGESTIONS=("" "" "")
+GHOSTSHELL_SUGGESTIONS=()
 typeset -g GHOSTSHELL_SUGGESTION_INDEX=1
-
-# Pool of up to 20 suggestions from vector DB
-typeset -g -a GHOSTSHELL_SUGGESTION_POOL
-GHOSTSHELL_SUGGESTION_POOL=()
 
 # Timer for pause detection
 typeset -g GHOSTSHELL_TIMER_PID=""
@@ -23,8 +19,7 @@ _ghostshell_fetch_suggestions() {
     
     # Don't fetch if buffer is too short
     if [[ ${#buffer_content} -lt 2 ]]; then
-        GHOSTSHELL_SUGGESTION_POOL=()
-        GHOSTSHELL_SUGGESTIONS=("" "" "")
+        GHOSTSHELL_SUGGESTIONS=()
         return
     fi
     
@@ -38,81 +33,58 @@ try:
     req = urllib.request.Request('http://127.0.0.1:22000/predict', data=json.dumps(data).encode('utf-8'), headers={'Content-Type': 'application/json'})
     with urllib.request.urlopen(req, timeout=1.5) as r:
         result = json.load(r)
-        # Get both the top 3 suggestions and the full pool if available
-        suggestions = result.get('suggestions', ['', '', ''])
-        pool = result.get('pool', suggestions)  # Fallback to suggestions if no pool
-        while len(suggestions) < 3: suggestions.append('')
-        while len(pool) < 20: pool.append('')
-        # Print suggestions|pool (separated by special delimiter)
-        print('|'.join(suggestions[:3]) + '|||' + '|'.join(pool[:20]))
+        # Get the pool of suggestions (usually 20)
+        pool = result.get('pool', result.get('suggestions', []))
+        # Filter out empty or duplicate strings and limit to 20
+        seen = set()
+        clean_pool = []
+        for s in pool:
+            if s and s not in seen:
+                clean_pool.append(s)
+                seen.add(s)
+        print('|'.join(clean_pool[:20]))
 except Exception as e:
-    print('||')
+    print('')
 " 2>/dev/null)
     
-    # Parse response: first 3 are current suggestions, rest is the pool
-    if [[ "$response" == *"|||"* ]]; then
-        local sugg_part="${response%%|||*}"
-        local pool_part="${response##*|||}"
-        GHOSTSHELL_SUGGESTIONS=("${(@s:|:)sugg_part}")
-        GHOSTSHELL_SUGGESTION_POOL=("${(@s:|:)pool_part}")
-    else
+    # Parse response into GHOSTSHELL_SUGGESTIONS array
+    if [[ -n "$response" ]]; then
         GHOSTSHELL_SUGGESTIONS=("${(@s:|:)response}")
-        GHOSTSHELL_SUGGESTION_POOL=("${GHOSTSHELL_SUGGESTIONS[@]}")
+    else
+        GHOSTSHELL_SUGGESTIONS=()
     fi
     
     GHOSTSHELL_SUGGESTION_INDEX=1
 }
 
 _ghostshell_filter_pool() {
-    # Filter the suggestion pool based on current buffer
-    # This is called as user types to narrow down options
+    # Filter the suggestion pool based on current buffer (typed since last fetch)
     local buffer="$BUFFER"
     
-    # If buffer is shorter than last fetch, clear pool (backspace)
+    # If buffer is shorter than last fetch, we can't reliably filter the suffixes
     if [[ ${#buffer} -lt ${#GHOSTSHELL_LAST_BUFFER} ]]; then
-        GHOSTSHELL_SUGGESTION_POOL=()
+        GHOSTSHELL_SUGGESTIONS=()
         return
     fi
     
-    # Simple prefix filtering
-    # We check if suggestions in pool start with the typed suffix
-    # But since suggestions are suffixes themselves, we need logic.
-    # Actually simpler: The pool contains suffixes valid for GHOSTSHELL_LAST_BUFFER.
-    # We need to see if they are still valid for BUFFER.
-    
     local typed_since_fetch="${buffer#$GHOSTSHELL_LAST_BUFFER}"
     
-    # If user typed something not matching start of suggestions, filter
-    local new_pool=()
-    for sugg in "${GHOSTSHELL_SUGGESTION_POOL[@]}"; do
+    # Filter suggestions that still match what the user typed
+    local new_suggestions=()
+    for sugg in "${GHOSTSHELL_SUGGESTIONS[@]}"; do
         if [[ "$sugg" == "$typed_since_fetch"* ]]; then
-            # Keep it, but trim the typed part for display? 
-            # No, keep full suffix, but display logic handles it?
-            # actually we should update suggestions to reflect remaining part
-            new_pool+=("$sugg")
+            new_suggestions+=("$sugg")
         fi
     done
     
-    if [[ ${#new_pool[@]} -gt 0 ]]; then
-        GHOSTSHELL_SUGGESTION_POOL=("${new_pool[@]}")
-        # Update current top 3 from pool
-        GHOSTSHELL_SUGGESTIONS=("" "" "")
-        [[ -n "${new_pool[1]}" ]] && GHOSTSHELL_SUGGESTIONS[1]="${new_pool[1]}"
-        [[ -n "${new_pool[2]}" ]] && GHOSTSHELL_SUGGESTIONS[2]="${new_pool[2]}"
-        [[ -n "${new_pool[3]}" ]] && GHOSTSHELL_SUGGESTIONS[3]="${new_pool[3]}"
-        
-        # Reset index if out of bounds
+    if [[ ${#new_suggestions[@]} -gt 0 ]]; then
+        GHOSTSHELL_SUGGESTIONS=("${new_suggestions[@]}")
         GHOSTSHELL_SUGGESTION_INDEX=1
-        
         _ghostshell_update_display
     else
-        # Pool exhausted, maybe clear or fetch new?
-        # For now clear
-        GHOSTSHELL_SUGGESTIONS=("" "" "")
+        # Pool exhausted, clear and wait for next pause
+        GHOSTSHELL_SUGGESTIONS=()
         _ghostshell_update_display
-        
-        # Trigger fetch immediately? 
-        # Or wait for pause? Wait for pause is safer.
         _ghostshell_start_timer
     fi
 }
@@ -145,23 +117,22 @@ _ghostshell_log_command() {
 
 _ghostshell_update_display() {
     local current="${GHOSTSHELL_SUGGESTIONS[$GHOSTSHELL_SUGGESTION_INDEX]}"
-    # Ensure no newlines break the display
-    current="${current//$'\n'/}" 
-    current="${current//$'\r'/}"
     
-    if [[ -n "$current" ]]; then
-        local others=0
-        for s in "${GHOSTSHELL_SUGGESTIONS[@]}"; do
-            [[ -n "$s" ]] && ((others++))
-        done
-        
-        # Show pool count if we have more than 3
-        local pool_count=${#GHOSTSHELL_SUGGESTION_POOL[@]}
-        if [[ $pool_count -gt 3 ]] || [[ $others -gt 1 ]]; then
-            # Shorter hint to prevent wrapping on standard terminals
-            POSTDISPLAY="${current}  (Ctrl+P/N to cycle)"
+    # If filtering happened, we might need a part of the suggestion
+    # The suggestions are suffixes relative to GHOSTSHELL_LAST_BUFFER
+    local typed_since_fetch="${BUFFER#$GHOSTSHELL_LAST_BUFFER}"
+    local display_sugg="${current#$typed_since_fetch}"
+    
+    # Ensure no newlines break the display
+    display_sugg="${display_sugg//$'\n'/}" 
+    display_sugg="${display_sugg//$'\r'/}"
+    
+    if [[ -n "$display_sugg" ]]; then
+        local count=${#GHOSTSHELL_SUGGESTIONS[@]}
+        if [[ $count -gt 1 ]]; then
+            POSTDISPLAY="${display_sugg}  ($GHOSTSHELL_SUGGESTION_INDEX/$count, Ctrl+P/N)"
         else
-            POSTDISPLAY="$current"
+            POSTDISPLAY="$display_sugg"
         fi
         # Highlight BOTH the suggestion and the hint in grey (ghost text style)
         region_highlight=("${#BUFFER} $((${#BUFFER} + ${#POSTDISPLAY})) fg=242")
@@ -229,8 +200,7 @@ _ghostshell_clear_suggestions() {
         POSTDISPLAY=""
         region_highlight=()
     fi
-    GHOSTSHELL_SUGGESTIONS=("" "" "")
-    GHOSTSHELL_SUGGESTION_POOL=()
+    GHOSTSHELL_SUGGESTIONS=()
     _ghostshell_stop_timer
 }
 
@@ -238,20 +208,14 @@ _ghostshell_self_insert() {
     zle .self-insert
     
     # Filter existing pool if we have one
-    if [[ ${#GHOSTSHELL_SUGGESTION_POOL[@]} -gt 0 ]]; then
+    if [[ ${#GHOSTSHELL_SUGGESTIONS[@]} -gt 0 ]]; then
         _ghostshell_filter_pool
         _ghostshell_update_display
         zle -R
     fi
     
-    # Check if pool is exhausted (no matches left)
-    local has_matches=0
-    for s in "${GHOSTSHELL_SUGGESTION_POOL[@]}"; do
-        [[ -n "$s" ]] && has_matches=1 && break
-    done
-    
     # If pool is exhausted and buffer is long enough, start timer for AI
-    if [[ $has_matches -eq 0 && ${#BUFFER} -ge 2 ]]; then
+    if [[ ${#GHOSTSHELL_SUGGESTIONS[@]} -eq 0 && ${#BUFFER} -ge 2 ]]; then
         _ghostshell_start_timer
     fi
 }
@@ -279,8 +243,10 @@ _ghostshell_paste() {
 _ghostshell_accept_widget() {
     local current="${GHOSTSHELL_SUGGESTIONS[$GHOSTSHELL_SUGGESTION_INDEX]}"
     if [[ -n "$current" ]]; then
-        _ghostshell_send_feedback "$BUFFER" "$current"
-        BUFFER="${BUFFER}${current}"
+        local typed_since_fetch="${BUFFER#$GHOSTSHELL_LAST_BUFFER}"
+        local to_add="${current#$typed_since_fetch}"
+        _ghostshell_send_feedback "$BUFFER" "$to_add"
+        BUFFER="${BUFFER}${to_add}"
         CURSOR=${#BUFFER}
         _ghostshell_clear_suggestions
         zle -R
@@ -294,9 +260,11 @@ _ghostshell_partial_accept() {
     local current="${GHOSTSHELL_SUGGESTIONS[$GHOSTSHELL_SUGGESTION_INDEX]}"
     
     if [[ -n "$current" ]]; then
-        local first_word="${current%% *}"
-        if [[ "$first_word" == "$current" ]]; then
-             BUFFER="${BUFFER}${current}"
+        local typed_since_fetch="${BUFFER#$GHOSTSHELL_LAST_BUFFER}"
+        local remaining="${current#$typed_since_fetch}"
+        local first_word="${remaining%% *}"
+        if [[ "$first_word" == "$remaining" ]]; then
+             BUFFER="${BUFFER}${remaining}"
         else
              BUFFER="${BUFFER}${first_word} "
         fi
@@ -310,11 +278,9 @@ _ghostshell_partial_accept() {
 
 # --- Cycle Suggestions ---
 _ghostshell_cycle_next() {
-    local has_suggestion=0
-    for s in "${GHOSTSHELL_SUGGESTIONS[@]}"; do [[ -n "$s" ]] && has_suggestion=1 && break; done
-
-    if [[ $has_suggestion -eq 1 ]]; then
-        GHOSTSHELL_SUGGESTION_INDEX=$(( GHOSTSHELL_SUGGESTION_INDEX % 3 + 1 ))
+    local count=${#GHOSTSHELL_SUGGESTIONS[@]}
+    if [[ $count -gt 0 ]]; then
+        GHOSTSHELL_SUGGESTION_INDEX=$(( GHOSTSHELL_SUGGESTION_INDEX % count + 1 ))
         _ghostshell_update_display
         zle -R
     else
@@ -323,11 +289,9 @@ _ghostshell_cycle_next() {
 }
 
 _ghostshell_cycle_prev() {
-    local has_suggestion=0
-    for s in "${GHOSTSHELL_SUGGESTIONS[@]}"; do [[ -n "$s" ]] && has_suggestion=1 && break; done
-
-    if [[ $has_suggestion -eq 1 ]]; then
-        GHOSTSHELL_SUGGESTION_INDEX=$(( (GHOSTSHELL_SUGGESTION_INDEX + 1) % 3 + 1 ))
+    local count=${#GHOSTSHELL_SUGGESTIONS[@]}
+    if [[ $count -gt 0 ]]; then
+        GHOSTSHELL_SUGGESTION_INDEX=$(( (GHOSTSHELL_SUGGESTION_INDEX + count - 2) % count + 1 ))
         _ghostshell_update_display
         zle -R
     else

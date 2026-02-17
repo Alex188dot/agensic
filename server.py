@@ -62,7 +62,7 @@ async def predict_completion(ctx: Context):
 
     suggestions, pool = await engine.get_suggestions(config, req_context)
     
-    logger.info(f"Req: '{ctx.command_buffer}' -> Sug: {suggestions[:3]}, Pool: {len([p for p in pool if p])}")
+    logger.info(f"Req: '{ctx.command_buffer}' -> Sug: {suggestions}")
     return {"suggestions": suggestions, "pool": pool}
 
 @app.post("/feedback")
