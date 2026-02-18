@@ -100,6 +100,17 @@ _ghostshell_filter_pool() {
     fi
 }
 
+_ghostshell_merge_suffix() {
+    local base="$1"
+    local suffix="$2"
+    if [[ -n "$base" && -n "$suffix" ]]; then
+        if [[ "${base: -1}" == " " && "${suffix:0:1}" == " " ]]; then
+            suffix="${suffix##[[:space:]]#}"
+        fi
+    fi
+    print -r -- "$suffix"
+}
+
 _ghostshell_send_feedback() {
     local buffer="$1"
     local accepted="$2"
@@ -141,6 +152,7 @@ _ghostshell_update_display() {
     # The suggestions are suffixes relative to GHOSTSHELL_LAST_BUFFER
     local typed_since_fetch="${BUFFER#$GHOSTSHELL_LAST_BUFFER}"
     local display_sugg="${current#$typed_since_fetch}"
+    display_sugg="$(_ghostshell_merge_suffix "$BUFFER" "$display_sugg")"
     
     # Ensure no newlines break the display
     display_sugg="${display_sugg//$'\n'/}" 
@@ -266,6 +278,7 @@ _ghostshell_accept_widget() {
     elif [[ -n "$current" ]]; then
         local typed_since_fetch="${BUFFER#$GHOSTSHELL_LAST_BUFFER}"
         local to_add="${current#$typed_since_fetch}"
+        to_add="$(_ghostshell_merge_suffix "$BUFFER" "$to_add")"
         _ghostshell_send_feedback "$BUFFER" "$to_add"
         BUFFER="${BUFFER}${to_add}"
         CURSOR=${#BUFFER}
@@ -285,6 +298,7 @@ _ghostshell_partial_accept() {
     elif [[ -n "$current" ]]; then
         local typed_since_fetch="${BUFFER#$GHOSTSHELL_LAST_BUFFER}"
         local remaining="${current#$typed_since_fetch}"
+        remaining="$(_ghostshell_merge_suffix "$BUFFER" "$remaining")"
         local first_word="${remaining%% *}"
         if [[ "$first_word" == "$remaining" ]]; then
              BUFFER="${BUFFER}${remaining}"

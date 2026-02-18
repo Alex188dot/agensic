@@ -60,7 +60,7 @@ class CommandVectorDB:
 
     @staticmethod
     def normalize_command(command: str) -> str:
-        return " ".join((command or "").strip().split())
+        return (command or "").strip()
 
     @staticmethod
     def extract_context_key(buffer_context: str) -> str:
@@ -90,6 +90,14 @@ class CommandVectorDB:
         payload = f"{context_key}\x1f{suggestion_suffix}"
         digest = hashlib.sha256(payload.encode("utf-8")).hexdigest()[:60]
         return f"ctx_{digest}"
+
+    @staticmethod
+    def merge_buffer_and_suffix(buffer_context: str, suggestion_suffix: str) -> str:
+        base = buffer_context or ""
+        suffix = suggestion_suffix or ""
+        if base and suffix and base[-1].isspace() and suffix[0].isspace():
+            suffix = suffix.lstrip()
+        return f"{base}{suffix}"
 
     @staticmethod
     def blend_rank_score(
@@ -546,7 +554,8 @@ class CommandVectorDB:
 
         context_keys = self.extract_context_keys(buffer_context)
         full_commands = [
-            self.normalize_command(f"{buffer_context}{suffix}") for suffix in candidates
+            self.normalize_command(self.merge_buffer_and_suffix(buffer_context, suffix))
+            for suffix in candidates
         ]
         command_ids = [self.command_doc_id(command) for command in full_commands]
 
@@ -660,7 +669,9 @@ class CommandVectorDB:
 
     def record_feedback(self, buffer_context: str, accepted_suggestion: str):
         accepted_suggestion = accepted_suggestion or ""
-        full_command = self.normalize_command(f"{buffer_context}{accepted_suggestion}")
+        full_command = self.normalize_command(
+            self.merge_buffer_and_suffix(buffer_context, accepted_suggestion)
+        )
         if not full_command:
             return
 
