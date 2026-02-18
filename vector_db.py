@@ -100,6 +100,68 @@ class CommandVectorDB:
         return f"{base}{suffix}"
 
     @staticmethod
+    def canonicalize_shell_spacing(command: str) -> str:
+        """
+        Collapse repeated separator whitespace outside quotes/escapes.
+        Keep whitespace inside single/double quotes untouched.
+        """
+        s = command or ""
+        out: List[str] = []
+        in_single = False
+        in_double = False
+        escaped = False
+        pending_space = False
+
+        for ch in s:
+            if escaped:
+                if pending_space:
+                    if out and out[-1] != " ":
+                        out.append(" ")
+                    pending_space = False
+                out.append(ch)
+                escaped = False
+                continue
+
+            if ch == "\\" and not in_single:
+                if pending_space:
+                    if out and out[-1] != " ":
+                        out.append(" ")
+                    pending_space = False
+                out.append(ch)
+                escaped = True
+                continue
+
+            if ch == "'" and not in_double:
+                if pending_space:
+                    if out and out[-1] != " ":
+                        out.append(" ")
+                    pending_space = False
+                in_single = not in_single
+                out.append(ch)
+                continue
+
+            if ch == '"' and not in_single:
+                if pending_space:
+                    if out and out[-1] != " ":
+                        out.append(" ")
+                    pending_space = False
+                in_double = not in_double
+                out.append(ch)
+                continue
+
+            if ch.isspace() and not in_single and not in_double:
+                pending_space = True
+                continue
+
+            if pending_space:
+                if out and out[-1] != " ":
+                    out.append(" ")
+                pending_space = False
+            out.append(ch)
+
+        return "".join(out).strip()
+
+    @staticmethod
     def blend_rank_score(
         rank: int,
         context_count: int,
@@ -554,7 +616,11 @@ class CommandVectorDB:
 
         context_keys = self.extract_context_keys(buffer_context)
         full_commands = [
-            self.normalize_command(self.merge_buffer_and_suffix(buffer_context, suffix))
+            self.normalize_command(
+                self.canonicalize_shell_spacing(
+                    self.merge_buffer_and_suffix(buffer_context, suffix)
+                )
+            )
             for suffix in candidates
         ]
         command_ids = [self.command_doc_id(command) for command in full_commands]
@@ -670,7 +736,9 @@ class CommandVectorDB:
     def record_feedback(self, buffer_context: str, accepted_suggestion: str):
         accepted_suggestion = accepted_suggestion or ""
         full_command = self.normalize_command(
-            self.merge_buffer_and_suffix(buffer_context, accepted_suggestion)
+            self.canonicalize_shell_spacing(
+                self.merge_buffer_and_suffix(buffer_context, accepted_suggestion)
+            )
         )
         if not full_command:
             return

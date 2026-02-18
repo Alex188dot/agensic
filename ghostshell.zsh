@@ -103,12 +103,36 @@ _ghostshell_filter_pool() {
 _ghostshell_merge_suffix() {
     local base="$1"
     local suffix="$2"
-    if [[ -n "$base" && -n "$suffix" ]]; then
-        if [[ "${base: -1}" == " " && "${suffix:0:1}" == " " ]]; then
-            suffix="${suffix##[[:space:]]#}"
-        fi
+    if [[ -n "$base" && -n "$suffix" && "$base" == *[[:space:]] && "$suffix" == [[:space:]]* ]]; then
+        # Deduplicate separator whitespace only at join boundary.
+        local leading_ws="${suffix%%[![:space:]]*}"
+        suffix="${suffix#$leading_ws}"
     fi
     print -r -- "$suffix"
+}
+
+_ghostshell_canonicalize_buffer_spacing() {
+    local value="$1"
+    # Skip aggressive normalization when command likely needs literal spacing semantics.
+    if [[ "$value" == *"'"* || "$value" == *'"'* || "$value" == *"\\ "* ]]; then
+        print -r -- "$value"
+        return
+    fi
+
+    value="${value//$'\t'/ }"
+    while [[ "$value" == *"  "* ]]; do
+        value="${value//  / }"
+    done
+
+    # Trim edges to avoid storing accidental surrounding spaces.
+    while [[ -n "$value" && "${value:0:1}" == " " ]]; do
+        value="${value:1}"
+    done
+    while [[ -n "$value" && "${value: -1}" == " " ]]; do
+        value="${value:0:${#value}-1}"
+    done
+
+    print -r -- "$value"
 }
 
 _ghostshell_send_feedback() {
@@ -279,8 +303,15 @@ _ghostshell_accept_widget() {
         local typed_since_fetch="${BUFFER#$GHOSTSHELL_LAST_BUFFER}"
         local to_add="${current#$typed_since_fetch}"
         to_add="$(_ghostshell_merge_suffix "$BUFFER" "$to_add")"
-        _ghostshell_send_feedback "$BUFFER" "$to_add"
-        BUFFER="${BUFFER}${to_add}"
+        local merged="${BUFFER}${to_add}"
+        local normalized_merged="$(_ghostshell_canonicalize_buffer_spacing "$merged")"
+        local normalized_buffer="$(_ghostshell_canonicalize_buffer_spacing "$BUFFER")"
+        local normalized_to_add="$to_add"
+        if [[ "$normalized_merged" == "$normalized_buffer"* ]]; then
+            normalized_to_add="${normalized_merged#$normalized_buffer}"
+        fi
+        _ghostshell_send_feedback "$normalized_buffer" "$normalized_to_add"
+        BUFFER="$normalized_merged"
         CURSOR=${#BUFFER}
         _ghostshell_clear_suggestions
         zle -R
@@ -305,6 +336,7 @@ _ghostshell_partial_accept() {
         else
              BUFFER="${BUFFER}${first_word} "
         fi
+        BUFFER="$(_ghostshell_canonicalize_buffer_spacing "$BUFFER")"
         CURSOR=${#BUFFER}
         _ghostshell_clear_suggestions
         zle -R
