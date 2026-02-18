@@ -34,6 +34,8 @@ class CommandVectorDB:
 
     SCORE_ALPHA = 1.10
     SCORE_BETA = 0.35
+    SCORE_EXECUTE = 0.20
+    SCORE_HISTORY = 0.10
 
     def __init__(self, db_path: str = None, model_name: str = "all-MiniLM-L6-v2"):
         if db_path is None:
@@ -165,13 +167,19 @@ class CommandVectorDB:
     def blend_rank_score(
         rank: int,
         context_count: int,
-        global_count: int,
+        accept_count: int,
+        execute_count: int = 0,
+        history_count: int = 0,
         alpha: float = SCORE_ALPHA,
         beta: float = SCORE_BETA,
+        gamma: float = SCORE_EXECUTE,
+        delta: float = SCORE_HISTORY,
     ) -> float:
         base = 1.0 / float(rank + 1)
         return base + (alpha * math.log1p(max(context_count, 0))) + (
-            beta * math.log1p(max(global_count, 0))
+            beta * math.log1p(max(accept_count, 0))
+        ) + (gamma * math.log1p(max(execute_count, 0))) + (
+            delta * math.log1p(max(history_count, 0))
         )
 
     @staticmethod
@@ -179,17 +187,27 @@ class CommandVectorDB:
         candidates: List[str],
         global_counts: Dict[str, int],
         context_counts: Dict[str, int],
+        execute_counts: Optional[Dict[str, int]] = None,
+        history_counts: Optional[Dict[str, int]] = None,
         alpha: float = SCORE_ALPHA,
         beta: float = SCORE_BETA,
+        gamma: float = SCORE_EXECUTE,
+        delta: float = SCORE_HISTORY,
     ) -> List[str]:
+        execute_counts = execute_counts or {}
+        history_counts = history_counts or {}
         scored = []
         for rank, suffix in enumerate(candidates):
             final_score = CommandVectorDB.blend_rank_score(
                 rank=rank,
                 context_count=context_counts.get(suffix, 0),
-                global_count=global_counts.get(suffix, 0),
+                accept_count=global_counts.get(suffix, 0),
+                execute_count=execute_counts.get(suffix, 0),
+                history_count=history_counts.get(suffix, 0),
                 alpha=alpha,
                 beta=beta,
+                gamma=gamma,
+                delta=delta,
             )
             scored.append((rank, suffix, final_score))
 
@@ -256,6 +274,8 @@ class CommandVectorDB:
                 zvec.FieldSchema("command", zvec.DataType.STRING),
                 zvec.FieldSchema("timestamp", zvec.DataType.INT64),
                 zvec.FieldSchema("accept_count", zvec.DataType.INT64, nullable=True),
+                zvec.FieldSchema("history_count", zvec.DataType.INT64, nullable=True),
+                zvec.FieldSchema("execute_count", zvec.DataType.INT64, nullable=True),
                 zvec.FieldSchema("last_accepted_at", zvec.DataType.INT64, nullable=True),
             ],
             vectors=zvec.VectorSchema("embedding", zvec.DataType.VECTOR_FP32, self.dimensions),
@@ -308,10 +328,15 @@ class CommandVectorDB:
             logger.warning(f"Vector DB health check failed with non-fatal error: {exc}")
             return True
 
-    def _command_schema_is_v2_collection(self, collection: zvec.Collection) -> bool:
+    def _command_schema_is_v3_collection(self, collection: zvec.Collection) -> bool:
         try:
             field_names = {field.name for field in collection.schema.fields}
-            return "accept_count" in field_names and "last_accepted_at" in field_names
+            return (
+                "accept_count" in field_names
+                and "history_count" in field_names
+                and "execute_count" in field_names
+                and "last_accepted_at" in field_names
+            )
         except Exception:
             return False
 
@@ -331,8 +356,8 @@ class CommandVectorDB:
         else:
             collection = self._create_command_collection(path)
 
-        if not self._command_schema_is_v2_collection(collection):
-            logger.warning("Command database is not v2 schema; recreating fresh database")
+        if not self._command_schema_is_v3_collection(collection):
+            logger.warning("Command database is not v3 schema; recreating fresh database")
             self._quarantine_corrupted_path(path)
             collection = self._create_command_collection(path)
 
@@ -406,9 +431,18 @@ class CommandVectorDB:
                 line = parts[1].strip()
         return line
 
+    @staticmethod
+    def count_history_commands(lines: List[str]) -> Dict[str, int]:
+        command_counts: Dict[str, int] = {}
+        for cmd in lines:
+            if not cmd:
+                continue
+            command_counts[cmd] = command_counts.get(cmd, 0) + 1
+        return command_counts
+
     def _read_history_commands_from_offset(
         self, history_path: Path, start_offset: int
-    ) -> Tuple[List[str], int]:
+    ) -> Tuple[Dict[str, int], int]:
         with open(history_path, "rb") as f:
             started_mid_line = False
             if start_offset > 0:
@@ -419,23 +453,21 @@ class CommandVectorDB:
             end_offset = f.tell()
 
         if not chunk:
-            return ([], end_offset)
+            return ({}, end_offset)
 
         text = chunk.decode("utf-8", errors="ignore")
         lines = text.splitlines()
         if started_mid_line and lines:
             lines = lines[1:]
 
-        batch_seen = set()
-        commands: List[str] = []
+        parsed_commands: List[str] = []
         for raw_line in lines:
             cmd = self.normalize_command(self._parse_history_line(raw_line))
-            if not cmd or cmd in batch_seen:
+            if not cmd:
                 continue
-            batch_seen.add(cmd)
-            commands.append(cmd)
+            parsed_commands.append(cmd)
 
-        return (commands, end_offset)
+        return (self.count_history_commands(parsed_commands), end_offset)
 
     def initialize_from_history(self, history_file: str):
         history_path = Path(history_file).expanduser()
@@ -478,8 +510,10 @@ class CommandVectorDB:
             if start_offset > 0:
                 logger.info(f"Incremental history sync from byte offset {start_offset}")
 
-            commands, end_offset = self._read_history_commands_from_offset(history_path, start_offset)
-            if not commands:
+            command_counts, end_offset = self._read_history_commands_from_offset(
+                history_path, start_offset
+            )
+            if not command_counts:
                 self._save_index_state(
                     {
                         "history_file": history_key,
@@ -490,8 +524,11 @@ class CommandVectorDB:
                 )
                 return
 
-            logger.info(f"Found {len(commands)} new commands in history")
-            inserted = self.insert_commands(commands)
+            total_occurrences = sum(command_counts.values())
+            logger.info(
+                f"Found {total_occurrences} new history entries across {len(command_counts)} unique commands"
+            )
+            inserted = self.upsert_history_commands(command_counts)
             if inserted == 0:
                 logger.warning("History sync failed, keeping previous history pointer")
                 return
@@ -550,6 +587,8 @@ class CommandVectorDB:
                             "command": command,
                             "timestamp": timestamp,
                             "accept_count": 0,
+                            "history_count": 0,
+                            "execute_count": 0,
                             "last_accepted_at": timestamp,
                         },
                         vectors={"embedding": emb},
@@ -572,7 +611,77 @@ class CommandVectorDB:
         normalized = self.normalize_command(command)
         if not normalized:
             return
-        self.insert_commands([normalized])
+        self._increment_execute_count(normalized)
+
+    def upsert_history_commands(self, command_counts: Dict[str, int]) -> int:
+        if self._is_closed:
+            return 0
+
+        normalized_counts: Dict[str, int] = {}
+        for command, count in command_counts.items():
+            normalized = self.normalize_command(command)
+            if not normalized:
+                continue
+            n = int(count or 0)
+            if n <= 0:
+                continue
+            normalized_counts[normalized] = normalized_counts.get(normalized, 0) + n
+
+        if not normalized_counts:
+            return 0
+
+        commands = list(normalized_counts.keys())
+        command_ids = [self.command_doc_id(command) for command in commands]
+        timestamp = int(time.time())
+        updated = 0
+        new_commands: List[str] = []
+
+        try:
+            with self._io_lock:
+                existing = self.collection.fetch(command_ids)
+                for command, command_id in zip(commands, command_ids):
+                    doc = existing.get(command_id)
+                    if doc is None:
+                        new_commands.append(command)
+                        continue
+                    prev = int(doc.fields.get("history_count", 0) or 0)
+                    self.collection.update(
+                        zvec.Doc(
+                            id=command_id,
+                            fields={"history_count": prev + normalized_counts[command]},
+                        )
+                    )
+                    updated += 1
+
+            if new_commands:
+                embeddings = self.model.encode(new_commands, show_progress_bar=False)
+                docs = []
+                for command, emb in zip(new_commands, embeddings):
+                    docs.append(
+                        zvec.Doc(
+                            id=self.command_doc_id(command),
+                            fields={
+                                "command": command,
+                                "timestamp": timestamp,
+                                "accept_count": 0,
+                                "history_count": normalized_counts[command],
+                                "execute_count": 0,
+                                "last_accepted_at": timestamp,
+                            },
+                            vectors={"embedding": emb},
+                        )
+                    )
+
+                batch_size = 100
+                with self._io_lock:
+                    for i in range(0, len(docs), batch_size):
+                        self.collection.insert(docs[i : i + batch_size])
+                self.inserted_commands.update(new_commands)
+
+            return updated + len(new_commands)
+        except Exception as exc:
+            logger.error(f"Error upserting history commands: {exc}")
+            return 0
 
     def search(self, query: str, topk: int = 20) -> List[Tuple[str, float]]:
         if not query:
@@ -627,6 +736,8 @@ class CommandVectorDB:
 
         global_counts: Dict[str, int] = {}
         context_counts: Dict[str, int] = {}
+        execute_counts: Dict[str, int] = {}
+        history_counts: Dict[str, int] = {}
 
         try:
             with self._io_lock:
@@ -635,8 +746,12 @@ class CommandVectorDB:
                     doc = command_docs.get(command_id)
                     if doc is None:
                         global_counts[suffix] = 0
+                        execute_counts[suffix] = 0
+                        history_counts[suffix] = 0
                     else:
                         global_counts[suffix] = int(doc.fields.get("accept_count", 0) or 0)
+                        execute_counts[suffix] = int(doc.fields.get("execute_count", 0) or 0)
+                        history_counts[suffix] = int(doc.fields.get("history_count", 0) or 0)
 
                 for suffix in candidates:
                     context_counts[suffix] = 0
@@ -653,12 +768,21 @@ class CommandVectorDB:
                 candidates=candidates,
                 global_counts=global_counts,
                 context_counts=context_counts,
+                execute_counts=execute_counts,
+                history_counts=history_counts,
                 alpha=self.SCORE_ALPHA,
                 beta=self.SCORE_BETA,
+                gamma=self.SCORE_EXECUTE,
+                delta=self.SCORE_HISTORY,
             )
-            if any(context_counts.values()) or any(global_counts.values()):
+            if (
+                any(context_counts.values())
+                or any(global_counts.values())
+                or any(execute_counts.values())
+                or any(history_counts.values())
+            ):
                 preview = ", ".join(
-                    f"{suffix.strip() or '<empty>'}(ctx={context_counts.get(suffix, 0)},glob={global_counts.get(suffix, 0)})"
+                    f"{suffix.strip() or '<empty>'}(ctx={context_counts.get(suffix, 0)},acc={global_counts.get(suffix, 0)},exec={execute_counts.get(suffix, 0)},hist={history_counts.get(suffix, 0)})"
                     for suffix in reranked[:3]
                 )
                 logger.info(f"Feedback rerank for '{self.normalize_command(buffer_context)}': {preview}")
@@ -691,12 +815,49 @@ class CommandVectorDB:
                     "command": full_command,
                     "timestamp": accepted_at,
                     "accept_count": 1,
+                    "history_count": 0,
+                    "execute_count": 0,
                     "last_accepted_at": accepted_at,
                 },
                 vectors={"embedding": embedding},
             )
         )
         self.inserted_commands.add(full_command)
+
+    def _increment_execute_count(self, full_command: str):
+        command_id = self.command_doc_id(full_command)
+        now_ts = int(time.time())
+        try:
+            with self._io_lock:
+                existing = self.collection.fetch([command_id]).get(command_id)
+                if existing is not None:
+                    prev = int(existing.fields.get("execute_count", 0) or 0)
+                    self.collection.update(
+                        zvec.Doc(
+                            id=command_id,
+                            fields={"execute_count": prev + 1},
+                        )
+                    )
+                    return
+
+            embedding = self.model.encode([full_command], show_progress_bar=False)[0]
+            self.collection.insert(
+                zvec.Doc(
+                    id=command_id,
+                    fields={
+                        "command": full_command,
+                        "timestamp": now_ts,
+                        "accept_count": 0,
+                        "history_count": 0,
+                        "execute_count": 1,
+                        "last_accepted_at": now_ts,
+                    },
+                    vectors={"embedding": embedding},
+                )
+            )
+            self.inserted_commands.add(full_command)
+        except Exception as exc:
+            logger.error(f"Failed to increment execute_count for '{full_command}': {exc}")
 
     def _increment_context_feedback(
         self, context_key: str, suggestion_suffix: str, accepted_at: int
