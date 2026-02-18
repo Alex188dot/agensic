@@ -1,7 +1,11 @@
 import os
+os.environ["TOKENIZERS_PARALLELISM"] = "false"
+
 import logging
 import json
+import warnings
 import uvicorn
+from contextlib import asynccontextmanager
 from fastapi import FastAPI, BackgroundTasks
 from pydantic import BaseModel
 from engine import SuggestionEngine, RequestContext
@@ -17,11 +21,33 @@ logging.basicConfig(
 )
 logger = logging.getLogger("ghostshell")
 
+# Python 3.12 + torch/sentence-transformers can emit this at interpreter shutdown
+# even after clean app teardown. Suppress the known noisy warning line.
+warnings.filterwarnings(
+    "ignore",
+    message=r"resource_tracker: There appear to be \d+ leaked semaphore objects to clean up at shutdown",
+    category=UserWarning,
+)
+
 CONFIG_DIR = os.path.expanduser("~/.ghostshell")
 CONFIG_FILE = os.path.join(CONFIG_DIR, "config.json")
 
-app = FastAPI()
 engine = SuggestionEngine()
+uvicorn_server = None
+
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    # Startup
+    logger.info("Starting GhostShell server...")
+    startup_history = get_history_file(os.environ.get("SHELL", "zsh"))
+    if startup_history:
+        engine.bootstrap_async(startup_history)
+    yield
+    # Shutdown
+    logger.info("Shutting down GhostShell server gracefully...")
+    engine.close()
+
+app = FastAPI(lifespan=lifespan)
 
 class Context(BaseModel):
     command_buffer: str
@@ -84,6 +110,20 @@ def log_command(data: dict, background_tasks: BackgroundTasks):
         background_tasks.add_task(engine.log_executed_command, command)
     return {"status": "ok"}
 
-if __name__ == "__main__":
-    uvicorn.run(app, host="127.0.0.1", port=22000, log_level="warning")
+@app.post("/shutdown")
+async def shutdown():
+    """
+    Trigger a graceful shutdown of the server.
+    """
+    global uvicorn_server
+    logger.info("Shutdown request received.")
+    if uvicorn_server is not None:
+        uvicorn_server.should_exit = True
+    else:
+        logger.warning("Uvicorn server handle not available; shutdown deferred")
+    return {"status": "shutting down"}
 
+if __name__ == "__main__":
+    config = uvicorn.Config(app, host="127.0.0.1", port=22000, log_level="warning")
+    uvicorn_server = uvicorn.Server(config)
+    uvicorn_server.run()

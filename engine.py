@@ -3,11 +3,10 @@ import logging
 import json
 import re
 import shutil
-import glob
+import threading
 from pathlib import Path
 from litellm import acompletion
 from learning import Learner
-from vector_db import CommandVectorDB
 
 logger = logging.getLogger("ghostshell.engine")
 
@@ -33,8 +32,66 @@ class SuggestionEngine:
     def __init__(self):
         self.learner = Learner()
         self.inventory = self._get_simple_inventory()
-        self.vector_db = CommandVectorDB()
-        self._initialized_history = False  # Track if we've loaded history
+        self.vector_db = None
+        self._vector_db_lock = threading.Lock()
+        self._vector_db_ready = threading.Event()
+        self._bootstrap_lock = threading.Lock()
+        self._bootstrap_thread = None
+        self._bootstrap_history_file = ""
+        self._bootstrap_completed_for = ""
+
+    def _ensure_vector_db(self):
+        if self.vector_db is not None:
+            return self.vector_db
+
+        with self._vector_db_lock:
+            if self.vector_db is None:
+                from vector_db import CommandVectorDB
+                self.vector_db = CommandVectorDB()
+                self._vector_db_ready.set()
+        return self.vector_db
+
+    def _bootstrap_worker(self, history_file: str):
+        try:
+            logger.info("Starting vector DB bootstrap in background")
+            vector_db = self._ensure_vector_db()
+            if history_file:
+                vector_db.initialize_from_history(history_file)
+            logger.info("Background history sync complete")
+        except Exception as e:
+            logger.error(f"Background history sync failed: {e}")
+        finally:
+            with self._bootstrap_lock:
+                self._bootstrap_completed_for = history_file
+
+    def bootstrap_async(self, history_file: str):
+        history_file = (history_file or "").strip()
+        if not history_file:
+            return
+
+        history_file = os.path.expanduser(history_file)
+        with self._bootstrap_lock:
+            if (
+                self._bootstrap_completed_for == history_file
+                and self._vector_db_ready.is_set()
+            ):
+                return
+
+            if (
+                self._bootstrap_thread
+                and self._bootstrap_thread.is_alive()
+                and self._bootstrap_history_file == history_file
+            ):
+                return
+
+            self._bootstrap_history_file = history_file
+            self._bootstrap_thread = threading.Thread(
+                target=self._bootstrap_worker,
+                args=(history_file,),
+                daemon=True,
+                name="ghostshell-history-index",
+            )
+            self._bootstrap_thread.start()
 
     def _safe_tail(self, path: str, max_lines: int) -> list[str]:
         if not path: return []
@@ -95,15 +152,18 @@ class SuggestionEngine:
         prefix = ctx.buffer.strip()
         if len(prefix) < 2:
             return []
-        
-        # Initialize history on first use
-        if not self._initialized_history and ctx.history_file:
-            logger.info("First run: initializing vector DB from history")
-            self.vector_db.initialize_from_history(ctx.history_file)
-            self._initialized_history = True
-        
-        # Get exact prefix matches from vector DB (top 20)
-        matches = self.vector_db.get_exact_prefix_matches(prefix, topk=20)
+
+        if ctx.history_file:
+            self.bootstrap_async(ctx.history_file)
+
+        if not self._vector_db_ready.is_set() or self.vector_db is None:
+            return []
+
+        try:
+            matches = self.vector_db.get_exact_prefix_matches(prefix, topk=20)
+        except Exception as e:
+            logger.error(f"Vector DB lookup failed: {e}")
+            return []
         
         # Return only the suffix part (what comes after the prefix)
         candidates = []
@@ -288,9 +348,23 @@ class SuggestionEngine:
         This adds it to the vector database for future suggestions.
         """
         if command and command.strip():
-            self.vector_db.insert_command(command.strip())
+            try:
+                vector_db = self._ensure_vector_db()
+                vector_db.insert_command(command.strip())
+            except Exception as e:
+                logger.error(f"Failed to log command to vector DB: {e}")
     
     def close(self):
         """Clean up resources."""
-        if hasattr(self, 'vector_db'):
+        with self._bootstrap_lock:
+            thread = self._bootstrap_thread
+
+        if thread and thread.is_alive() and thread is not threading.current_thread():
+            thread.join(timeout=20)
+            if thread.is_alive():
+                logger.warning("History bootstrap thread did not finish before shutdown")
+
+        if self.vector_db is not None:
             self.vector_db.close()
+            self.vector_db = None
+            self._vector_db_ready.clear()

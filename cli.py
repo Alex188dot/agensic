@@ -64,6 +64,15 @@ def _try_kill_pid(pid: int, sig: int = signal.SIGTERM) -> bool:
     except Exception:
         return False
 
+def _wait_for_port_close(timeout_seconds: float = 10.0, interval_seconds: float = 0.2) -> bool:
+    import time
+    deadline = time.time() + timeout_seconds
+    while time.time() < deadline:
+        if not is_port_open():
+            return True
+        time.sleep(interval_seconds)
+    return not is_port_open()
+
 @app.command()
 def setup():
     ensure_config_dir()
@@ -158,15 +167,15 @@ def enable_startup():
     os.system(f"launchctl load {PLIST_PATH}")
     
     console.print(f"[bold green]✔ GhostShell started and set to start automatically![/bold green]")
-    import time
-    try:
-        with console.status("[yellow]Waiting for DB initialization...[/yellow]", spinner="dots") as status:
-            for i in range(10, 0, -1):
-                status.update(f"[yellow]Waiting for DB initialization... {i}s[/yellow]")
-                time.sleep(1)
-        console.print("[green]✔ DB Ready![/green]")
-    except KeyboardInterrupt:
-        pass
+    # import time
+    # try:
+    #     with console.status("[yellow]Waiting for DB initialization...[/yellow]", spinner="dots") as status:
+    #         for i in range(10, 0, -1):
+    #             status.update(f"[yellow]Waiting for DB initialization... {i}s[/yellow]")
+    #             time.sleep(1)
+    #     console.print("[green]✔ DB Ready![/green]")
+    # except KeyboardInterrupt:
+    #     pass
 
 @app.command()
 def start():
@@ -196,40 +205,59 @@ def start():
     console.print(f"[dim]Log file: {CONFIG_DIR}/server.log[/dim]")
 
     # Interactive countdown for DB initialization
-    import time
-    try:
-        with console.status("[yellow]Waiting for DB initialization...[/yellow]", spinner="dots") as status:
-            for i in range(10, 0, -1):
-                status.update(f"[yellow]Waiting for DB initialization... {i}s[/yellow]")
-                time.sleep(1)
-        console.print("[green]✔ DB Ready![/green]")
-    except KeyboardInterrupt:
-        pass
+    # import time
+    # try:
+    #     with console.status("[yellow]Waiting for DB initialization...[/yellow]", spinner="dots") as status:
+    #         for i in range(10, 0, -1):
+    #             status.update(f"[yellow]Waiting for DB initialization... {i}s[/yellow]")
+    #             time.sleep(1)
+    #     console.print("[green]✔ DB Ready![/green]")
+    # except KeyboardInterrupt:
+    #     pass
 
 @app.command()
 def stop():
     """Stop the daemon."""
     # Capture if it's running before we start killing things
     was_running = is_port_open() or os.path.exists(PID_FILE)
+    graceful_stopped = False
     
-    # Unload launchd first to prevent KeepAlive respawning while stopping.
+    # Try graceful shutdown first
+    if is_port_open():
+        try:
+            console.print("[cyan]Requesting graceful shutdown...[/cyan]")
+            response = requests.post("http://127.0.0.1:22000/shutdown", timeout=4)
+            if response.status_code == 200:
+                console.print("[green]✔ Shutdown request accepted.[/green]")
+                graceful_stopped = _wait_for_port_close(timeout_seconds=12.0, interval_seconds=0.2)
+                if graceful_stopped:
+                    console.print("[green]✔ Server exited cleanly.[/green]")
+                else:
+                    console.print("[yellow]Graceful shutdown timed out, applying fallback stop.[/yellow]")
+        except Exception:
+            pass
+
+    # Unload launchd to prevent KeepAlive respawning.
     if os.path.exists(PLIST_PATH):
-        # On macOS, launchctl unload might stop the process immediately.
-        # We check return code: 0 means it was loaded and successfully unloaded.
         res = os.system(f"launchctl unload {PLIST_PATH} 2>/dev/null")
         if res == 0:
             was_running = True
 
-    stopped_any = False
+    stopped_any = graceful_stopped
 
-    pid = _read_pid_file()
-    if pid is not None and _try_kill_pid(pid):
-        stopped_any = True
-
-    # Also stop any process currently listening on the daemon port.
-    for listener_pid in _find_listening_pids():
-        if _try_kill_pid(listener_pid):
+    # Fallback hard stop only if the daemon is still present.
+    if is_port_open() or _read_pid_file() is not None:
+        pid = _read_pid_file()
+        if pid is not None and _try_kill_pid(pid):
             stopped_any = True
+
+        # Also stop any process currently listening on the daemon port.
+        for listener_pid in _find_listening_pids():
+            if _try_kill_pid(listener_pid):
+                stopped_any = True
+
+        if is_port_open():
+            _wait_for_port_close(timeout_seconds=2.0, interval_seconds=0.1)
 
     if os.path.exists(PID_FILE):
         try:
@@ -242,6 +270,7 @@ def stop():
         console.print("[red]✓ Stopped.[/red]")
     else:
         console.print("[yellow]GhostShell was not running.[/yellow]")
+
 
 @app.command()
 def logs():
