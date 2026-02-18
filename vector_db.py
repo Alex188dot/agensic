@@ -3,12 +3,12 @@ import logging
 import json
 import gc
 import threading
+import shutil
 import zvec
 import transformers
 from sentence_transformers import SentenceTransformer
 from pathlib import Path
 from typing import List, Tuple
-from datetime import datetime, timezone
 
 # --- 1. SILENCE WARNINGS (Must be before other imports) ---
 # Tell HuggingFace to NEVER check the internet
@@ -99,10 +99,14 @@ class CommandVectorDB:
         )
 
     def _quarantine_corrupted_db(self):
-        timestamp = datetime.now(timezone.utc).strftime("%Y%m%d%H%M%S")
-        backup_path = f"{self.db_path}.corrupt.{timestamp}"
-        os.rename(self.db_path, backup_path)
-        logger.error(f"Moved corrupted database to {backup_path}")
+        if os.path.isdir(self.db_path):
+            shutil.rmtree(self.db_path, ignore_errors=True)
+        elif os.path.exists(self.db_path):
+            try:
+                os.remove(self.db_path)
+            except OSError:
+                pass
+        logger.error(f"Deleted corrupted database at {self.db_path}")
 
     def _create_new_database(self) -> zvec.Collection:
         logger.info(f"Creating new database at {self.db_path}")
@@ -498,11 +502,5 @@ class CommandVectorDB:
             self.model = None
             gc.collect()
 
-            try:
-                import multiprocessing as mp
-                for child in mp.active_children():
-                    child.join(timeout=1)
-            except Exception:
-                pass
         except Exception as e:
             logger.error(f"Error closing vector database: {e}")
