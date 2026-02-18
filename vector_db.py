@@ -4,6 +4,7 @@ import json
 import logging
 import math
 import os
+import shlex
 import shutil
 import threading
 import time
@@ -36,6 +37,7 @@ class CommandVectorDB:
     SCORE_BETA = 0.35
     SCORE_EXECUTE = 0.20
     SCORE_HISTORY = 0.10
+    BLOCKED_EXECUTABLES = {"rm"}
 
     def __init__(self, db_path: str = None, model_name: str = "all-MiniLM-L6-v2"):
         if db_path is None:
@@ -63,6 +65,71 @@ class CommandVectorDB:
     @staticmethod
     def normalize_command(command: str) -> str:
         return (command or "").strip()
+
+    @staticmethod
+    def tokenize_command(command: str) -> List[str]:
+        normalized = CommandVectorDB.normalize_command(command)
+        if not normalized:
+            return []
+        try:
+            return shlex.split(normalized, posix=True)
+        except Exception:
+            return normalized.split()
+
+    @staticmethod
+    def extract_executable(tokens: List[str]) -> str:
+        if not tokens:
+            return ""
+
+        i = 0
+        n = len(tokens)
+        while i < n:
+            token = (tokens[i] or "").strip()
+            if not token:
+                i += 1
+                continue
+
+            if token in {"sudo", "command"}:
+                i += 1
+                continue
+
+            if token in {"env", "/usr/bin/env"}:
+                i += 1
+                while i < n:
+                    env_token = (tokens[i] or "").strip()
+                    if not env_token:
+                        i += 1
+                        continue
+                    if env_token.startswith("-"):
+                        i += 1
+                        continue
+                    if "=" in env_token and not env_token.startswith("="):
+                        i += 1
+                        continue
+                    break
+                continue
+
+            if token.startswith("-"):
+                i += 1
+                continue
+
+            # Supports patterns like KEY=value command ...
+            if "=" in token and not token.startswith("="):
+                i += 1
+                continue
+
+            return token
+
+        return ""
+
+    @staticmethod
+    def is_blocked_command(command: str) -> bool:
+        tokens = CommandVectorDB.tokenize_command(command)
+        executable = CommandVectorDB.extract_executable(tokens)
+        if not executable:
+            return False
+        executable_name = os.path.basename(executable).strip().lower()
+        return executable_name in CommandVectorDB.BLOCKED_EXECUTABLES
 
     @staticmethod
     def extract_context_key(buffer_context: str) -> str:
@@ -529,7 +596,7 @@ class CommandVectorDB:
                 f"Found {total_occurrences} new history entries across {len(command_counts)} unique commands"
             )
             inserted = self.upsert_history_commands(command_counts)
-            if inserted == 0:
+            if inserted < 0:
                 logger.warning("History sync failed, keeping previous history pointer")
                 return
 
@@ -553,6 +620,9 @@ class CommandVectorDB:
         for command in commands:
             normalized = self.normalize_command(command)
             if not normalized or normalized in seen:
+                continue
+            if self.is_blocked_command(normalized):
+                logger.debug("Skipping blocked command insert")
                 continue
             seen.add(normalized)
             normalized_unique.append(normalized)
@@ -611,6 +681,9 @@ class CommandVectorDB:
         normalized = self.normalize_command(command)
         if not normalized:
             return
+        if self.is_blocked_command(normalized):
+            logger.debug("Skipping blocked command execute_count update")
+            return
         self._increment_execute_count(normalized)
 
     def upsert_history_commands(self, command_counts: Dict[str, int]) -> int:
@@ -621,6 +694,9 @@ class CommandVectorDB:
         for command, count in command_counts.items():
             normalized = self.normalize_command(command)
             if not normalized:
+                continue
+            if self.is_blocked_command(normalized):
+                logger.debug("Skipping blocked command from history upsert")
                 continue
             n = int(count or 0)
             if n <= 0:
@@ -681,7 +757,7 @@ class CommandVectorDB:
             return updated + len(new_commands)
         except Exception as exc:
             logger.error(f"Error upserting history commands: {exc}")
-            return 0
+            return -1
 
     def search(self, query: str, topk: int = 20) -> List[Tuple[str, float]]:
         if not query:
@@ -716,22 +792,34 @@ class CommandVectorDB:
             return []
 
         candidates = self.search(prefix, topk=topk * 2)
-        matches = [command for command, _ in candidates if command.startswith(prefix)]
+        matches = [
+            command
+            for command, _ in candidates
+            if command.startswith(prefix) and not self.is_blocked_command(command)
+        ]
         return matches[:topk]
 
     def rerank_candidates(self, buffer_context: str, candidates: List[str]) -> List[str]:
         if not candidates:
             return []
 
-        context_keys = self.extract_context_keys(buffer_context)
-        full_commands = [
-            self.normalize_command(
+        filtered_pairs: List[Tuple[str, str]] = []
+        for suffix in candidates:
+            full_command = self.normalize_command(
                 self.canonicalize_shell_spacing(
                     self.merge_buffer_and_suffix(buffer_context, suffix)
                 )
             )
-            for suffix in candidates
-        ]
+            if not full_command or self.is_blocked_command(full_command):
+                continue
+            filtered_pairs.append((suffix, full_command))
+
+        if not filtered_pairs:
+            return []
+
+        candidates = [suffix for suffix, _ in filtered_pairs]
+        context_keys = self.extract_context_keys(buffer_context)
+        full_commands = [full_command for _, full_command in filtered_pairs]
         command_ids = [self.command_doc_id(command) for command in full_commands]
 
         global_counts: Dict[str, int] = {}
@@ -902,6 +990,9 @@ class CommandVectorDB:
             )
         )
         if not full_command:
+            return
+        if self.is_blocked_command(full_command):
+            logger.debug("Skipping blocked command feedback record")
             return
 
         # Store both 1-token and 2-token contexts derived from the finalized command.

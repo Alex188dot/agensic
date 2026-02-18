@@ -48,6 +48,7 @@ source $INSTALL_DIR/ghostshell.zsh
 $END_MARKER
 EOF
 
+echo ""
 echo "✅ GhostShell 👻✨ Installation complete!"
 echo "------------------------------------------------"
 echo "1. Restart your terminal."

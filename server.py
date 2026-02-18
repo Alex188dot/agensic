@@ -115,9 +115,23 @@ def log_command(data: dict, background_tasks: BackgroundTasks):
     """
     Endpoint for logging executed commands to the vector database.
     """
-    command = data.get("command", "")
-    if command:
-        background_tasks.add_task(engine.log_executed_command, command)
+    command = str(data.get("command", "") or "").strip()
+    if not command:
+        return {"status": "ignored", "reason": "empty_command"}
+
+    raw_exit_code = data.get("exit_code", None)
+    exit_code = None
+    if raw_exit_code is not None:
+        try:
+            exit_code = int(raw_exit_code)
+        except (TypeError, ValueError):
+            return {"status": "ignored", "reason": "invalid_exit_code"}
+
+    source = str(data.get("source", "unknown") or "unknown").strip().lower()
+    if source not in {"runtime", "history", "unknown"}:
+        return {"status": "ignored", "reason": "invalid_source"}
+
+    background_tasks.add_task(engine.log_executed_command, command, exit_code, source)
     return {"status": "ok"}
 
 @app.get("/status")

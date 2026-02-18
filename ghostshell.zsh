@@ -9,6 +9,8 @@ typeset -g GHOSTSHELL_STATUS_PREFIX="__GHOSTSHELL_STATUS__:"
 # Timer for pause detection
 typeset -g GHOSTSHELL_TIMER_PID=""
 typeset -g GHOSTSHELL_LAST_BUFFER=""
+typeset -g GHOSTSHELL_LAST_EXECUTED_CMD=""
+typeset -g GHOSTSHELL_HOOKS_REGISTERED=0
 
 # ======================================================
 # 1. CORE LOGIC (Fetch, Display, Feedback)
@@ -151,14 +153,95 @@ _ghostshell_send_feedback() {
 
 _ghostshell_log_command() {
     local command="$1"
+    local exit_code="$2"
+    local source="${3:-runtime}"
     # Log executed command to vector DB
     (
         local escaped_cmd="${command//\'/\'\\\'\'}"
-        local json_data="{\"command\": \"$escaped_cmd\"}"
+        local json_data="{\"command\": \"$escaped_cmd\", \"exit_code\": ${exit_code}, \"source\": \"${source}\"}"
         curl -s -X POST "http://127.0.0.1:22000/log_command" \
              -H "Content-Type: application/json" \
              -d "$json_data" > /dev/null 2>&1
     ) &!
+}
+
+_ghostshell_is_blocked_runtime_command() {
+    local command="$1"
+    local -a tokens
+    local token=""
+    local exe=""
+    local i=1
+
+    tokens=(${(z)command})
+    if (( ${#tokens[@]} == 0 )); then
+        return 1
+    fi
+
+    while (( i <= ${#tokens[@]} )); do
+        token="${tokens[$i]}"
+        if [[ -z "$token" ]]; then
+            (( i++ ))
+            continue
+        fi
+
+        case "$token" in
+            sudo|command)
+                (( i++ ))
+                continue
+                ;;
+            env|/usr/bin/env)
+                (( i++ ))
+                while (( i <= ${#tokens[@]} )); do
+                    token="${tokens[$i]}"
+                    if [[ -z "$token" || "$token" == -* || "$token" == *=* ]]; then
+                        (( i++ ))
+                        continue
+                    fi
+                    break
+                done
+                continue
+                ;;
+            -*|*=*)
+                (( i++ ))
+                continue
+                ;;
+            *)
+                exe="$token"
+                break
+                ;;
+        esac
+    done
+
+    if [[ -z "$exe" ]]; then
+        return 1
+    fi
+
+    exe="${exe:t}"
+    [[ "$exe" == "rm" ]]
+}
+
+_ghostshell_preexec_hook() {
+    GHOSTSHELL_LAST_EXECUTED_CMD="$1"
+}
+
+_ghostshell_precmd_hook() {
+    local exit_code="$?"
+    local cmd="$GHOSTSHELL_LAST_EXECUTED_CMD"
+    GHOSTSHELL_LAST_EXECUTED_CMD=""
+
+    if [[ -z "$cmd" ]]; then
+        return
+    fi
+
+    if [[ "$exit_code" -ne 0 ]]; then
+        return
+    fi
+
+    if _ghostshell_is_blocked_runtime_command "$cmd"; then
+        return
+    fi
+
+    _ghostshell_log_command "$cmd" "$exit_code" "runtime"
 }
 
 _ghostshell_update_display() {
@@ -380,14 +463,7 @@ _ghostshell_manual_trigger() {
 
 # --- Accept Line (Execute Command) ---
 _ghostshell_accept_line() {
-    local cmd="$BUFFER"
     _ghostshell_clear_suggestions
-    
-    # Log the command to vector DB
-    if [[ -n "$cmd" ]]; then
-        _ghostshell_log_command "$cmd"
-    fi
-    
     zle .accept-line
 }
 
@@ -434,3 +510,13 @@ _ghostshell_bind_widget '^M' _ghostshell_accept_line       # Enter
 _ghostshell_bind_widget '^[[1;3C' _ghostshell_partial_accept
 _ghostshell_bind_widget '^[[1;9C' _ghostshell_partial_accept
 _ghostshell_bind_widget '^[f' _ghostshell_partial_accept
+
+# ======================================================
+# 6. SHELL LIFECYCLE HOOKS (Success-only learning)
+# ======================================================
+if (( GHOSTSHELL_HOOKS_REGISTERED == 0 )); then
+    autoload -Uz add-zsh-hook
+    add-zsh-hook preexec _ghostshell_preexec_hook
+    add-zsh-hook precmd _ghostshell_precmd_hook
+    GHOSTSHELL_HOOKS_REGISTERED=1
+fi

@@ -200,6 +200,39 @@ class SuggestionEngine:
         
         return candidates
 
+    def _is_blocked_command(self, command: str) -> bool:
+        if self.vector_db is not None:
+            return self.vector_db.is_blocked_command(command)
+        from vector_db import CommandVectorDB
+        return CommandVectorDB.is_blocked_command(command)
+
+    def _filter_blocked_candidates(self, buffer: str, candidates: list[str]) -> list[str]:
+        if not candidates:
+            return []
+
+        from vector_db import CommandVectorDB
+
+        filtered: list[str] = []
+        for suffix in candidates:
+            if not suffix:
+                continue
+            standalone_command = CommandVectorDB.normalize_command(
+                CommandVectorDB.canonicalize_shell_spacing(suffix)
+            )
+            full_command = CommandVectorDB.normalize_command(
+                CommandVectorDB.canonicalize_shell_spacing(
+                    CommandVectorDB.merge_buffer_and_suffix(buffer, suffix)
+                )
+            )
+            if not full_command and not standalone_command:
+                continue
+            if standalone_command and self._is_blocked_command(standalone_command):
+                continue
+            if full_command and self._is_blocked_command(full_command):
+                continue
+            filtered.append(suffix)
+        return filtered
+
     def build_prompt_context(self, request: RequestContext) -> str:
         history = self._safe_tail(request.history_file, Settings.history_lines)
         cwd_items = self._list_working_dir(request.cwd)
@@ -238,6 +271,7 @@ class SuggestionEngine:
             reranked = vector_candidates
             if self.vector_db is not None:
                 reranked = self.vector_db.rerank_candidates(ctx.buffer, vector_candidates)
+            reranked = self._filter_blocked_candidates(ctx.buffer, reranked)
             suggestions = reranked[:3]
             pool = reranked[:20]  # Full pool for filtering
             
@@ -350,8 +384,8 @@ class SuggestionEngine:
                 if s.startswith(ctx.buffer):
                     s = s[len(ctx.buffer):]
                 clean.append(s)
-            
-            suggestions = clean
+
+            suggestions = self._filter_blocked_candidates(ctx.buffer, clean)
 
         except Exception as e:
             logger.error(f"LLM Error: {e}")
@@ -380,17 +414,28 @@ class SuggestionEngine:
         except Exception as e:
             logger.error(f"Failed to log feedback to vector DB: {e}")
     
-    def log_executed_command(self, command: str):
+    def log_executed_command(self, command: str, exit_code: int | None = None, source: str = "unknown"):
         """
         Log a command that was executed by the user.
         This adds it to the vector database for future suggestions.
         """
-        if command and command.strip():
-            try:
-                vector_db = self._ensure_vector_db()
-                vector_db.insert_command(command.strip())
-            except Exception as e:
-                logger.error(f"Failed to log command to vector DB: {e}")
+        normalized_source = (source or "unknown").strip().lower()
+        normalized_command = (command or "").strip()
+        if not normalized_command:
+            return
+
+        if normalized_source == "runtime" and exit_code != 0:
+            logger.debug("Skipping runtime command with non-zero exit code")
+            return
+
+        try:
+            vector_db = self._ensure_vector_db()
+            if vector_db.is_blocked_command(normalized_command):
+                logger.debug("Skipping blocked command from runtime logging")
+                return
+            vector_db.insert_command(normalized_command)
+        except Exception as e:
+            logger.error(f"Failed to log command to vector DB: {e}")
     
     def close(self):
         """Clean up resources."""
