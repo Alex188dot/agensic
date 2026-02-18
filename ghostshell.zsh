@@ -4,6 +4,7 @@
 typeset -g -a GHOSTSHELL_SUGGESTIONS
 GHOSTSHELL_SUGGESTIONS=()
 typeset -g GHOSTSHELL_SUGGESTION_INDEX=1
+typeset -g GHOSTSHELL_STATUS_PREFIX="__GHOSTSHELL_STATUS__:"
 
 # Timer for pause detection
 typeset -g GHOSTSHELL_TIMER_PID=""
@@ -35,6 +36,7 @@ try:
         result = json.load(r)
         # Get the pool of suggestions (usually 20)
         pool = result.get('pool', result.get('suggestions', []))
+        bootstrap = result.get('bootstrap', {})
         # Filter out empty or duplicate strings and limit to 20
         seen = set()
         clean_pool = []
@@ -42,6 +44,10 @@ try:
             if s and s not in seen:
                 clean_pool.append(s)
                 seen.add(s)
+        # If bootstrap is still running and we don't yet have suggestions,
+        # return a non-actionable status ghost text.
+        if not clean_pool and bootstrap.get('running'):
+            clean_pool = ['__GHOSTSHELL_STATUS__: ** Index is still loading, suggestions coming in a few seconds **']
         print('|'.join(clean_pool[:20]))
 except Exception as e:
     print('')
@@ -55,6 +61,11 @@ except Exception as e:
     fi
     
     GHOSTSHELL_SUGGESTION_INDEX=1
+}
+
+_ghostshell_is_status_suggestion() {
+    local value="$1"
+    [[ "$value" == "$GHOSTSHELL_STATUS_PREFIX"* ]]
 }
 
 _ghostshell_filter_pool() {
@@ -117,6 +128,14 @@ _ghostshell_log_command() {
 
 _ghostshell_update_display() {
     local current="${GHOSTSHELL_SUGGESTIONS[$GHOSTSHELL_SUGGESTION_INDEX]}"
+    if _ghostshell_is_status_suggestion "$current"; then
+        local status_msg="${current#$GHOSTSHELL_STATUS_PREFIX}"
+        status_msg="${status_msg//$'\n'/}"
+        status_msg="${status_msg//$'\r'/}"
+        POSTDISPLAY="$status_msg"
+        region_highlight=("${#BUFFER} $((${#BUFFER} + ${#POSTDISPLAY})) fg=242")
+        return
+    fi
     
     # If filtering happened, we might need a part of the suggestion
     # The suggestions are suffixes relative to GHOSTSHELL_LAST_BUFFER
@@ -242,7 +261,9 @@ _ghostshell_paste() {
 # --- Accept Suggestion ---
 _ghostshell_accept_widget() {
     local current="${GHOSTSHELL_SUGGESTIONS[$GHOSTSHELL_SUGGESTION_INDEX]}"
-    if [[ -n "$current" ]]; then
+    if _ghostshell_is_status_suggestion "$current"; then
+        zle expand-or-complete
+    elif [[ -n "$current" ]]; then
         local typed_since_fetch="${BUFFER#$GHOSTSHELL_LAST_BUFFER}"
         local to_add="${current#$typed_since_fetch}"
         _ghostshell_send_feedback "$BUFFER" "$to_add"
@@ -259,7 +280,9 @@ _ghostshell_accept_widget() {
 _ghostshell_partial_accept() {
     local current="${GHOSTSHELL_SUGGESTIONS[$GHOSTSHELL_SUGGESTION_INDEX]}"
     
-    if [[ -n "$current" ]]; then
+    if _ghostshell_is_status_suggestion "$current"; then
+        zle forward-word
+    elif [[ -n "$current" ]]; then
         local typed_since_fetch="${BUFFER#$GHOSTSHELL_LAST_BUFFER}"
         local remaining="${current#$typed_since_fetch}"
         local first_word="${remaining%% *}"
@@ -365,5 +388,3 @@ _ghostshell_bind_widget '^M' _ghostshell_accept_line       # Enter
 _ghostshell_bind_widget '^[[1;3C' _ghostshell_partial_accept
 _ghostshell_bind_widget '^[[1;9C' _ghostshell_partial_accept
 _ghostshell_bind_widget '^[f' _ghostshell_partial_accept
-
-# NO MORE TRIGGER CHARACTERS - removed the loop that bound space, dot, etc.

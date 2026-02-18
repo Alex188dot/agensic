@@ -93,6 +93,34 @@ class SuggestionEngine:
             )
             self._bootstrap_thread.start()
 
+    def get_bootstrap_status(self) -> dict:
+        with self._bootstrap_lock:
+            thread = self._bootstrap_thread
+            history_file = self._bootstrap_history_file
+            completed_for = self._bootstrap_completed_for
+
+        running = bool(thread and thread.is_alive())
+        ready = bool(
+            self._vector_db_ready.is_set()
+            and history_file
+            and completed_for == history_file
+            and not running
+        )
+
+        indexed_commands = 0
+        if self.vector_db is not None and hasattr(self.vector_db, "inserted_commands"):
+            try:
+                indexed_commands = len(self.vector_db.inserted_commands)
+            except Exception:
+                indexed_commands = 0
+
+        return {
+            "running": running,
+            "ready": ready,
+            "history_file": history_file,
+            "indexed_commands": indexed_commands,
+        }
+
     def _safe_tail(self, path: str, max_lines: int) -> list[str]:
         if not path: return []
         candidate = Path(path).expanduser()

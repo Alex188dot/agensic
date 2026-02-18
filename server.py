@@ -96,9 +96,10 @@ async def predict_completion(ctx: Context):
     )
 
     suggestions, pool = await engine.get_suggestions(config, req_context)
+    bootstrap = engine.get_bootstrap_status()
     
     logger.info(f"Req: '{ctx.command_buffer}' -> Sug: {suggestions}")
-    return {"suggestions": suggestions, "pool": pool}
+    return {"suggestions": suggestions, "pool": pool, "bootstrap": bootstrap}
 
 @app.post("/feedback")
 def log_feedback(fb: Feedback, background_tasks: BackgroundTasks):
@@ -118,6 +119,14 @@ def log_command(data: dict, background_tasks: BackgroundTasks):
     if command:
         background_tasks.add_task(engine.log_executed_command, command)
     return {"status": "ok"}
+
+@app.get("/status")
+def daemon_status():
+    bootstrap = engine.get_bootstrap_status()
+    return {
+        "status": "ok",
+        "bootstrap": bootstrap,
+    }
 
 @app.post("/shutdown")
 async def shutdown():

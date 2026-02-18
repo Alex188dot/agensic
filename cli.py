@@ -73,6 +73,46 @@ def _wait_for_port_close(timeout_seconds: float = 10.0, interval_seconds: float 
         time.sleep(interval_seconds)
     return not is_port_open()
 
+def _fetch_daemon_status() -> dict | None:
+    try:
+        response = requests.get("http://127.0.0.1:22000/status", timeout=0.8)
+        if response.status_code != 200:
+            return None
+        return response.json()
+    except Exception:
+        return None
+
+def _wait_for_bootstrap_ready(timeout_seconds: float = 20.0) -> tuple[bool, int]:
+    import time
+
+    deadline = time.time() + timeout_seconds
+    last_indexed = 0
+    saw_status = False
+
+    with console.status("[yellow]Warming up command index...[/yellow]", spinner="dots") as status:
+        while time.time() < deadline:
+            if not is_port_open():
+                return (False, last_indexed)
+
+            payload = _fetch_daemon_status()
+            if payload and isinstance(payload.get("bootstrap"), dict):
+                saw_status = True
+                bootstrap = payload["bootstrap"]
+                last_indexed = int(bootstrap.get("indexed_commands", 0) or 0)
+                if bootstrap.get("ready"):
+                    return (True, last_indexed)
+
+                status.update(
+                    "[yellow]Warming up command index in background (you can use the shell while this completes)...[/yellow]"
+                )
+
+            time.sleep(0.25)
+
+    # If status endpoint is unavailable, don't block startup.
+    if not saw_status:
+        return (False, 0)
+    return (False, last_indexed)
+
 @app.command()
 def setup():
     ensure_config_dir()
@@ -167,15 +207,6 @@ def enable_startup():
     os.system(f"launchctl load {PLIST_PATH}")
     
     console.print(f"[bold green]✔ GhostShell started and set to start automatically![/bold green]")
-    # import time
-    # try:
-    #     with console.status("[yellow]Waiting for DB initialization...[/yellow]", spinner="dots") as status:
-    #         for i in range(10, 0, -1):
-    #             status.update(f"[yellow]Waiting for DB initialization... {i}s[/yellow]")
-    #             time.sleep(1)
-    #     console.print("[green]✔ DB Ready![/green]")
-    # except KeyboardInterrupt:
-    #     pass
 
 @app.command()
 def start():
@@ -203,17 +234,11 @@ def start():
     
     console.print(f"[green]✔ Started (PID: {process.pid})[/green]")
     console.print(f"[dim]Log file: {CONFIG_DIR}/server.log[/dim]")
-
-    # Interactive countdown for DB initialization
-    # import time
-    # try:
-    #     with console.status("[yellow]Waiting for DB initialization...[/yellow]", spinner="dots") as status:
-    #         for i in range(10, 0, -1):
-    #             status.update(f"[yellow]Waiting for DB initialization... {i}s[/yellow]")
-    #             time.sleep(1)
-    #     console.print("[green]✔ DB Ready![/green]")
-    # except KeyboardInterrupt:
-    #     pass
+    ready, indexed = _wait_for_bootstrap_ready(timeout_seconds=20.0)
+    if ready:
+        console.print(f"[green]✔ Command index ready ({indexed} commands loaded).[/green]")
+    else:
+        console.print("[yellow]Index warmup still running in background. Suggestions may improve in a few seconds.[/yellow]")
 
 @app.command()
 def stop():
