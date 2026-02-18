@@ -180,7 +180,7 @@ This means:
 - **Storage**: `~/.ghostshell/zvec_commands`
 - **Model**: all-MiniLM-L6-v2 (384 dimensions)
 - **Index**: HNSW (m=16, ef_construction=200)
-- **Deduplication**: Automatic via hash set
+- **Deduplication**: Deterministic command IDs (SHA-256)
 - **Max query**: 1024 results (zvec limitation)
 
 ### Pause Detection
@@ -232,7 +232,7 @@ The vector DB batches inserts in groups of 100. If you see this error, your hist
 ### Run Tests
 
 ```bash
-python3 test_vector_db.py
+python3 -m unittest test_learning_migration.py
 ```
 
 ### Project Structure
@@ -242,11 +242,10 @@ ai_terminal2/
 ├── ghostshell.zsh       # Shell plugin
 ├── server.py            # HTTP server
 ├── engine.py            # Suggestion engine
-├── vector_db.py         # Vector database
-├── learning.py          # Feedback learning
+├── vector_db.py         # Vector DB + learning signals
 ├── cli.py               # CLI tool
 ├── requirements.txt     # Dependencies
-└── test_vector_db.py    # Tests
+└── test_learning_migration.py  # Tests
 ```
 
 ## Contributing

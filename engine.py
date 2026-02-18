@@ -6,7 +6,6 @@ import shutil
 import threading
 from pathlib import Path
 from litellm import acompletion
-from learning import Learner
 
 logger = logging.getLogger("ghostshell.engine")
 
@@ -30,7 +29,6 @@ class SystemInventory:
 
 class SuggestionEngine:
     def __init__(self):
-        self.learner = Learner()
         self.inventory = self._get_simple_inventory()
         self.vector_db = None
         self._vector_db_lock = threading.Lock()
@@ -237,8 +235,9 @@ class SuggestionEngine:
         
         # If we have candidates from history, return the top 3 + full pool
         if vector_candidates:
-            # Rerank based on learning feedback
-            reranked = self.learner.rerank(ctx.buffer, vector_candidates)
+            reranked = vector_candidates
+            if self.vector_db is not None:
+                reranked = self.vector_db.rerank_candidates(ctx.buffer, vector_candidates)
             suggestions = reranked[:3]
             pool = reranked[:20]  # Full pool for filtering
             
@@ -292,13 +291,15 @@ class SuggestionEngine:
         suggestions = ["", "", ""]
 
         try:
+            model_for_temp = model.split("/")[-1]
+            temperature = 1 if model_for_temp.startswith("gpt-5") else 0.3
             kwargs = {
                 "model": model,
                 "messages": [
                     {"role": "system", "content": system_prompt},
                     {"role": "user", "content": f"Buffer: {ctx.buffer}"}
                 ],
-                "temperature": 0.3,
+                "temperature": temperature,
                 "response_format": {"type": "json_object"},
             }
 
@@ -368,7 +369,16 @@ class SuggestionEngine:
         return (suggestions[:3], pool)
 
     def log_feedback(self, buffer: str, accepted: str):
-        self.learner.log_accept(buffer, accepted)
+        if not buffer:
+            return
+        try:
+            vector_db = self._ensure_vector_db()
+            vector_db.record_feedback(buffer, accepted)
+            full_command = f"{buffer}{accepted}".replace("\n", " ").replace("\r", " ").strip()
+            if full_command:
+                logger.info(f"Feedback recorded for: {full_command}")
+        except Exception as e:
+            logger.error(f"Failed to log feedback to vector DB: {e}")
     
     def log_executed_command(self, command: str):
         """

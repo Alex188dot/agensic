@@ -103,7 +103,7 @@ _ghostshell_filter_pool() {
 _ghostshell_send_feedback() {
     local buffer="$1"
     local accepted="$2"
-    # Fire and forget feedback to server for learning
+    # Fire and forget feedback to server for zvec feedback stats
     (
         local escaped_buf="${buffer//\'/\'\\\'\'}"
         local escaped_acc="${accepted//\'/\'\\\'\'}"
