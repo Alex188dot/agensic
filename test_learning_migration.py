@@ -42,6 +42,17 @@ class TestLearningMigration(unittest.TestCase):
         )
         self.assertEqual(reranked, candidates)
 
+    def test_single_acceptance_can_promote_candidate(self):
+        candidates = [" --help", " -help", " stop"]
+        global_counts = {" --help": 0, " -help": 0, " stop": 1}
+        context_counts = {" --help": 0, " -help": 0, " stop": 1}
+        reranked = CommandVectorDB.rerank_suffixes_from_counts(
+            candidates=candidates,
+            global_counts=global_counts,
+            context_counts=context_counts,
+        )
+        self.assertEqual(reranked[0], " stop")
+
 
 if __name__ == "__main__":
     unittest.main()

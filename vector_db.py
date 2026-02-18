@@ -32,8 +32,8 @@ class CommandVectorDB:
     This implementation assumes a fresh v2 schema and does not run migrations.
     """
 
-    SCORE_ALPHA = 0.35
-    SCORE_BETA = 0.15
+    SCORE_ALPHA = 1.10
+    SCORE_BETA = 0.35
 
     def __init__(self, db_path: str = None, model_name: str = "all-MiniLM-L6-v2"):
         if db_path is None:
@@ -68,6 +68,16 @@ class CommandVectorDB:
         if not tokens:
             return ""
         return " ".join(tokens[:2])
+
+    @staticmethod
+    def extract_context_keys(buffer_context: str) -> List[str]:
+        tokens = CommandVectorDB.normalize_command(buffer_context).lower().split()
+        if not tokens:
+            return []
+        keys = [tokens[0]]
+        if len(tokens) > 1:
+            keys.append(" ".join(tokens[:2]))
+        return keys
 
     @staticmethod
     def command_doc_id(command: str) -> str:
@@ -534,7 +544,7 @@ class CommandVectorDB:
         if not candidates:
             return []
 
-        context_key = self.extract_context_key(buffer_context)
+        context_keys = self.extract_context_keys(buffer_context)
         full_commands = [
             self.normalize_command(f"{buffer_context}{suffix}") for suffix in candidates
         ]
@@ -553,23 +563,31 @@ class CommandVectorDB:
                     else:
                         global_counts[suffix] = int(doc.fields.get("accept_count", 0) or 0)
 
-                if context_key:
+                for suffix in candidates:
+                    context_counts[suffix] = 0
+
+                for context_key in context_keys:
                     stat_ids = [self.context_stat_doc_id(context_key, suffix) for suffix in candidates]
                     stat_docs = self.feedback_collection.fetch(stat_ids)
                     for suffix, stat_id in zip(candidates, stat_ids):
                         doc = stat_docs.get(stat_id)
-                        if doc is None:
-                            context_counts[suffix] = 0
-                        else:
-                            context_counts[suffix] = int(doc.fields.get("accept_count", 0) or 0)
+                        if doc is not None:
+                            context_counts[suffix] += int(doc.fields.get("accept_count", 0) or 0)
 
-            return self.rerank_suffixes_from_counts(
+            reranked = self.rerank_suffixes_from_counts(
                 candidates=candidates,
                 global_counts=global_counts,
                 context_counts=context_counts,
                 alpha=self.SCORE_ALPHA,
                 beta=self.SCORE_BETA,
             )
+            if any(context_counts.values()) or any(global_counts.values()):
+                preview = ", ".join(
+                    f"{suffix.strip() or '<empty>'}(ctx={context_counts.get(suffix, 0)},glob={global_counts.get(suffix, 0)})"
+                    for suffix in reranked[:3]
+                )
+                logger.info(f"Feedback rerank for '{self.normalize_command(buffer_context)}': {preview}")
+            return reranked
         except Exception as exc:
             logger.warning(f"Falling back to vector order; reranking failed: {exc}")
             return list(candidates)
@@ -646,13 +664,15 @@ class CommandVectorDB:
         if not full_command:
             return
 
-        context_key = self.extract_context_key(buffer_context)
+        # Store both 1-token and 2-token contexts derived from the finalized command.
+        context_keys = self.extract_context_keys(full_command)
         now_ts = int(time.time())
 
         try:
             with self._io_lock:
                 self._increment_command_feedback(full_command, now_ts)
-                self._increment_context_feedback(context_key, accepted_suggestion, now_ts)
+                for context_key in context_keys:
+                    self._increment_context_feedback(context_key, accepted_suggestion, now_ts)
         except Exception as exc:
             logger.warning(f"Failed to record feedback in zvec: {exc}")
 
