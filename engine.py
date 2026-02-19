@@ -253,7 +253,12 @@ class SuggestionEngine:
         ]
         return "\n".join(lines)
 
-    async def get_suggestions(self, config: dict, ctx: RequestContext) -> tuple[list[str], list[str]]:
+    async def get_suggestions(
+        self,
+        config: dict,
+        ctx: RequestContext,
+        allow_ai: bool = True,
+    ) -> tuple[list[str], list[str], bool]:
         """
         New paradigm:
         1. Get top 20 exact prefix matches from vector DB
@@ -284,9 +289,16 @@ class SuggestionEngine:
                 pool.append("")
             
             logger.info(f"Vector DB returned {len(vector_candidates)} matches")
-            return (suggestions, pool)
-        
+            return (suggestions, pool, False)
+
         # If no vector matches, this is a new/unknown command - invoke AI
+        if not allow_ai:
+            suggestions = ["", "", ""]
+            pool = suggestions[:]
+            while len(pool) < 20:
+                pool.append("")
+            return (suggestions, pool, False)
+
         logger.info("No vector matches found, invoking AI for new command")
         
         model = config.get("model", "gpt-5-mini")
@@ -400,7 +412,7 @@ class SuggestionEngine:
         while len(pool) < 20:
             pool.append("")
 
-        return (suggestions[:3], pool)
+        return (suggestions[:3], pool, True)
 
     def log_feedback(self, buffer: str, accepted: str):
         if not buffer:

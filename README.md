@@ -14,34 +14,34 @@ GhostShell now uses a **vector database** (zvec) to store and retrieve your comm
 
 ### How It Works
 
-1. **Type a command** → GhostShell waits 0.2s for you to pause
-2. **Pause detected** → Searches vector DB for top 20 matching commands
-3. **Shows ghost text** → Displays the best match as you type
-4. **Keep typing** → Filters the 20 suggestions in real-time (no API calls!)
-5. **No matches?** → Only then does it invoke AI for suggestions
+1. **Type a command segment** and press `Space`
+2. **Vector DB first** → Searches history for top matches
+3. **No DB match?** → Invokes AI fallback suggestion
+4. **Keep typing** → Filters suggestion pool locally
+5. **Next segment** → New auto fetch only on the next `Space`
 
 ### Example Flow
 
 ```bash
 $ doc█
-# [0.2s pause]
-# Vector DB returns 20 docker commands
+# press space after `doc`
+# Vector DB returns matching docker commands
 $ docker ps█  # ← ghost text appears
 # You type: "docker st"
 # Filters pool to: docker start, docker stop, docker stats
 $ docker start █container-id  # ← filtered ghost text
-# No API calls after initial fetch!
+# LLM fallback only when vector DB has no match
 ```
 
 ## Features
 
 - 🎯 **Smart Suggestions**: Semantic search finds related commands
-- ⌨️ **No Trigger Characters**: Removed space, dot, slash triggers
-- ⏱️ **Pause Detection**: 0.2s pause triggers suggestions
+- ⌨️ **Space-Gated Fetching**: Auto fetch only on `Space`
+- 🧮 **LLM Budgeting**: Max 4 auto AI calls per command line
 - 🎨 **Ghost Text**: Subtle gray text shows completions
 - 🔄 **Cycle Options**: Ctrl+P/N to cycle through suggestions
 - 📊 **Pool Management**: Keeps 20 suggestions in memory
-- 🤖 **AI Fallback**: Uses LLM only for unknown commands
+- 🤖 **AI Fallback**: Uses LLM only for unknown command segments
 
 ## Installation
 
@@ -114,11 +114,11 @@ Create `~/.ghostshell/config.json`:
 
 ### Basic Usage
 
-Just start typing! After a 0.2s pause, suggestions appear:
+Just start typing and press `Space` after each command segment:
 
 ```bash
 $ git█
-# [pause]
+$ git 
 $ git status█  # ← ghost text appears
 ```
 
@@ -127,15 +127,17 @@ $ git status█  # ← ghost text appears
 - **Tab** - Accept current suggestion
 - **Ctrl+P** - Previous suggestion
 - **Ctrl+N** - Next suggestion  
-- **Ctrl+Space** - Manual trigger (force fetch)
+- **Ctrl+Space** - Manual trigger (bypasses auto LLM budget cap)
 - **Option+→** - Accept first word only
 - **Enter** - Execute command (logs to vector DB)
 
 ### How Suggestions Work
 
 1. **Vector DB First**: Searches your history for similar commands
-2. **Real-time Filtering**: As you type, filters the 20 suggestions
-3. **AI Fallback**: Only invoked when no history matches exist
+2. **Space Triggering**: Auto requests only on `Space`
+3. **Real-time Filtering**: As you type, filters the 20 suggestions
+4. **AI Fallback**: Only invoked when no history matches exist
+5. **Per-Command Budget**: At most 4 automatic AI fallbacks; use `Ctrl+Space` for manual fetch after cap
 
 This means:
 - ✅ Most suggestions are instant (from vector DB)
@@ -146,7 +148,7 @@ This means:
 
 ```
 ┌─────────────────┐
-│  ghostshell.zsh │  ← Shell plugin (pause detection, filtering)
+│  ghostshell.zsh │  ← Shell plugin (space-trigger, filtering)
 └────────┬────────┘
          │ HTTP
          ▼
@@ -183,11 +185,13 @@ This means:
 - **Deduplication**: Deterministic command IDs (SHA-256)
 - **Max query**: 1024 results (zvec limitation)
 
-### Pause Detection
+### Triggering Model
 
-- **Method**: Background timer + SIGUSR1 signal
-- **Delay**: 0.2 seconds
-- **Cancellation**: Timer cancelled on new input
+- **Auto trigger**: `Space` key only
+- **First AI fallback**: Requires at least one typed `Space`
+- **Auto AI budget**: Max 4 per command line
+- **Overflow hint**: `To trigger new LLM suggestions press ctrl + space`
+- **Manual override**: `Ctrl+Space` always fetches
 
 ### Suggestion Pool
 
@@ -254,7 +258,7 @@ Contributions welcome! Areas for improvement:
 
 - [ ] Support for bash (currently zsh only)
 - [ ] Better history parsing (handle multiline commands)
-- [ ] Configurable pause delay
+- [ ] Configurable auto AI call budget
 - [ ] Vector DB compression/optimization
 - [ ] More AI providers
 

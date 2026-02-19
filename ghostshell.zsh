@@ -1,10 +1,15 @@
-# GhostShell Zsh Plugin - New Paradigm
-# Uses vector DB for suggestions, triggers on 0.2s pause, no trigger chars
+# GhostShell Zsh Plugin - Space-triggered LLM fallback model
 
 typeset -g -a GHOSTSHELL_SUGGESTIONS
 GHOSTSHELL_SUGGESTIONS=()
 typeset -g GHOSTSHELL_SUGGESTION_INDEX=1
 typeset -g GHOSTSHELL_STATUS_PREFIX="__GHOSTSHELL_STATUS__:"
+typeset -g GHOSTSHELL_MAX_AUTO_AI_CALLS=4
+typeset -g GHOSTSHELL_CTRL_SPACE_HINT="To trigger new LLM suggestions press Ctrl + Space"
+typeset -g GHOSTSHELL_LINE_AUTO_AI_CALLS=0
+typeset -g GHOSTSHELL_LINE_HAS_SPACE=0
+typeset -g GHOSTSHELL_SHOW_CTRL_SPACE_HINT=0
+typeset -g GHOSTSHELL_LAST_FETCH_USED_AI=0
 
 # Timer for pause detection
 typeset -g GHOSTSHELL_TIMER_PID=""
@@ -17,8 +22,10 @@ typeset -g GHOSTSHELL_HOOKS_REGISTERED=0
 # ======================================================
 
 _ghostshell_fetch_suggestions() {
+    local allow_ai="${1:-1}"
     local buffer_content="$BUFFER"
     local cwd="$PWD"
+    GHOSTSHELL_LAST_FETCH_USED_AI=0
     
     # Don't fetch if buffer is too short
     if [[ ${#buffer_content} -lt 2 ]]; then
@@ -31,11 +38,18 @@ _ghostshell_fetch_suggestions() {
     
     local response=$(python3 -c "
 import urllib.request, json, sys
-data = {'command_buffer': '''$escaped_buffer''', 'cursor_position': ${CURSOR}, 'working_directory': '''$cwd''', 'shell': 'zsh'}
+data = {
+    'command_buffer': '''$escaped_buffer''',
+    'cursor_position': ${CURSOR},
+    'working_directory': '''$cwd''',
+    'shell': 'zsh',
+    'allow_ai': bool(int('${allow_ai}')),
+}
 try:
     req = urllib.request.Request('http://127.0.0.1:22000/predict', data=json.dumps(data).encode('utf-8'), headers={'Content-Type': 'application/json'})
     with urllib.request.urlopen(req, timeout=1.5) as r:
         result = json.load(r)
+        used_ai = bool(result.get('used_ai', False))
         # Get the pool of suggestions (usually 20)
         pool = result.get('pool', result.get('suggestions', []))
         bootstrap = result.get('bootstrap', {})
@@ -50,14 +64,24 @@ try:
         # return a non-actionable status ghost text.
         if not clean_pool and bootstrap.get('running'):
             clean_pool = ['__GHOSTSHELL_STATUS__: ** Index is still loading, suggestions coming in a few seconds **']
-        print('|'.join(clean_pool[:20]))
+        print(('1' if used_ai else '0') + '\n' + '|'.join(clean_pool[:20]))
 except Exception as e:
-    print('')
+    print('0')
 " 2>/dev/null)
     
-    # Parse response into GHOSTSHELL_SUGGESTIONS array
-    if [[ -n "$response" ]]; then
-        GHOSTSHELL_SUGGESTIONS=("${(@s:|:)response}")
+    # Parse response into GHOSTSHELL_SUGGESTIONS array and used_ai flag.
+    local used_ai_line="${response%%$'\n'*}"
+    local pool_line=""
+    if [[ "$response" == *$'\n'* ]]; then
+        pool_line="${response#*$'\n'}"
+    fi
+
+    if [[ "$used_ai_line" == "1" ]]; then
+        GHOSTSHELL_LAST_FETCH_USED_AI=1
+    fi
+
+    if [[ -n "$pool_line" ]]; then
+        GHOSTSHELL_SUGGESTIONS=("${(@s:|:)pool_line}")
     else
         GHOSTSHELL_SUGGESTIONS=()
     fi
@@ -68,6 +92,17 @@ except Exception as e:
 _ghostshell_is_status_suggestion() {
     local value="$1"
     [[ "$value" == "$GHOSTSHELL_STATUS_PREFIX"* ]]
+}
+
+_ghostshell_set_status_message() {
+    local message="$1"
+    if [[ -z "$message" ]]; then
+        GHOSTSHELL_SUGGESTIONS=()
+        GHOSTSHELL_SUGGESTION_INDEX=1
+        return
+    fi
+    GHOSTSHELL_SUGGESTIONS=("${GHOSTSHELL_STATUS_PREFIX}${message}")
+    GHOSTSHELL_SUGGESTION_INDEX=1
 }
 
 _ghostshell_filter_pool() {
@@ -95,10 +130,9 @@ _ghostshell_filter_pool() {
         GHOSTSHELL_SUGGESTION_INDEX=1
         _ghostshell_update_display
     else
-        # Pool exhausted, clear and wait for next pause
+        # Pool exhausted; wait for the next explicit trigger.
         GHOSTSHELL_SUGGESTIONS=()
         _ghostshell_update_display
-        _ghostshell_start_timer
     fi
 }
 
@@ -244,6 +278,50 @@ _ghostshell_precmd_hook() {
     _ghostshell_log_command "$cmd" "$exit_code" "runtime"
 }
 
+_ghostshell_reset_line_state() {
+    GHOSTSHELL_LINE_AUTO_AI_CALLS=0
+    GHOSTSHELL_LINE_HAS_SPACE=0
+    GHOSTSHELL_SHOW_CTRL_SPACE_HINT=0
+    GHOSTSHELL_LAST_FETCH_USED_AI=0
+}
+
+_ghostshell_maybe_reset_line_state_for_empty_buffer() {
+    if [[ -z "$BUFFER" ]]; then
+        _ghostshell_reset_line_state
+    fi
+}
+
+_ghostshell_try_fetch_on_space() {
+    local allow_ai=1
+    local is_manual="${1:-0}"
+    local manual_allow_ai="${2:-1}"
+
+    if [[ "$is_manual" == "1" ]]; then
+        allow_ai="$manual_allow_ai"
+    else
+        if (( GHOSTSHELL_LINE_AUTO_AI_CALLS >= GHOSTSHELL_MAX_AUTO_AI_CALLS )); then
+            allow_ai=0
+        fi
+    fi
+
+    GHOSTSHELL_LAST_BUFFER="$BUFFER"
+    _ghostshell_fetch_suggestions "$allow_ai"
+
+    if [[ "$is_manual" != "1" ]]; then
+        if (( GHOSTSHELL_LAST_FETCH_USED_AI == 1 )); then
+            GHOSTSHELL_LINE_AUTO_AI_CALLS=$((GHOSTSHELL_LINE_AUTO_AI_CALLS + 1))
+        fi
+        if (( allow_ai == 0 && ${#GHOSTSHELL_SUGGESTIONS[@]} == 0 )); then
+            GHOSTSHELL_SHOW_CTRL_SPACE_HINT=1
+            _ghostshell_set_status_message "$GHOSTSHELL_CTRL_SPACE_HINT"
+        elif [[ "${GHOSTSHELL_SUGGESTIONS[1]}" != "${GHOSTSHELL_STATUS_PREFIX}${GHOSTSHELL_CTRL_SPACE_HINT}" ]]; then
+            GHOSTSHELL_SHOW_CTRL_SPACE_HINT=0
+        fi
+    else
+        GHOSTSHELL_SHOW_CTRL_SPACE_HINT=0
+    fi
+}
+
 _ghostshell_update_display() {
     local current="${GHOSTSHELL_SUGGESTIONS[$GHOSTSHELL_SUGGESTION_INDEX]}"
     if _ghostshell_is_status_suggestion "$current"; then
@@ -343,30 +421,38 @@ _ghostshell_clear_suggestions() {
 }
 
 _ghostshell_self_insert() {
+    local inserted_key="$KEYS"
     zle .self-insert
-    
+
+    _ghostshell_maybe_reset_line_state_for_empty_buffer
+
     # Filter existing pool if we have one
     if [[ ${#GHOSTSHELL_SUGGESTIONS[@]} -gt 0 ]]; then
         _ghostshell_filter_pool
         _ghostshell_update_display
         zle -R
     fi
-    
-    # If pool is exhausted and buffer is long enough, start timer for AI
-    if [[ ${#GHOSTSHELL_SUGGESTIONS[@]} -eq 0 && ${#BUFFER} -ge 2 ]]; then
-        _ghostshell_start_timer
+
+    # Auto fetch only when user presses space (new command segment boundary).
+    if [[ "$inserted_key" == " " && ${#BUFFER} -ge 2 ]]; then
+        GHOSTSHELL_LINE_HAS_SPACE=1
+        _ghostshell_try_fetch_on_space 0
+        _ghostshell_update_display
+        zle -R
     fi
 }
 
 _ghostshell_backward_delete_char() {
     zle .backward-delete-char
-    
+
     # Clear suggestions and pool on delete
     _ghostshell_clear_suggestions
+    _ghostshell_maybe_reset_line_state_for_empty_buffer
 }
 
 _ghostshell_interrupt() {
     _ghostshell_clear_suggestions
+    _ghostshell_reset_line_state
     zle .send-break
 }
 
@@ -375,6 +461,7 @@ autoload -Uz bracketed-paste-magic
 _ghostshell_paste() {
     _ghostshell_clear_suggestions
     zle .bracketed-paste
+    _ghostshell_maybe_reset_line_state_for_empty_buffer
 }
 
 # --- Accept Suggestion ---
@@ -454,8 +541,11 @@ _ghostshell_cycle_prev() {
 # --- Manual Trigger (Ctrl+Space) ---
 _ghostshell_manual_trigger() {
     if [[ ${#BUFFER} -ge 2 ]]; then
-        GHOSTSHELL_LAST_BUFFER="$BUFFER"
-        _ghostshell_fetch_suggestions
+        local manual_allow_ai=0
+        if [[ "$BUFFER" == *[[:space:]]* ]]; then
+            manual_allow_ai=1
+        fi
+        _ghostshell_try_fetch_on_space 1 "$manual_allow_ai"
         _ghostshell_update_display
         zle -R
     fi
@@ -464,6 +554,7 @@ _ghostshell_manual_trigger() {
 # --- Accept Line (Execute Command) ---
 _ghostshell_accept_line() {
     _ghostshell_clear_suggestions
+    _ghostshell_reset_line_state
     zle .accept-line
 }
 

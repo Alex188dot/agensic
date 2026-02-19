@@ -63,6 +63,7 @@ class Context(BaseModel):
     cursor_position: int
     working_directory: str
     shell: str
+    allow_ai: bool = True
 
 class Feedback(BaseModel):
     command_buffer: str
@@ -84,7 +85,7 @@ def get_history_file(shell: str) -> str:
 async def predict_completion(ctx: Context):
     # Quick filter: empty buffer
     if not ctx.command_buffer.strip():
-        return {"suggestions": ["", "", ""], "pool": []}
+        return {"suggestions": ["", "", ""], "pool": [], "used_ai": False}
 
     config = load_config()
     
@@ -95,11 +96,20 @@ async def predict_completion(ctx: Context):
         shell=ctx.shell
     )
 
-    suggestions, pool = await engine.get_suggestions(config, req_context)
+    suggestions, pool, used_ai = await engine.get_suggestions(
+        config,
+        req_context,
+        allow_ai=ctx.allow_ai,
+    )
     bootstrap = engine.get_bootstrap_status()
     
     logger.info(f"Req: '{ctx.command_buffer}' -> Sug: {suggestions}")
-    return {"suggestions": suggestions, "pool": pool, "bootstrap": bootstrap}
+    return {
+        "suggestions": suggestions,
+        "pool": pool,
+        "bootstrap": bootstrap,
+        "used_ai": used_ai,
+    }
 
 @app.post("/feedback")
 def log_feedback(fb: Feedback, background_tasks: BackgroundTasks):

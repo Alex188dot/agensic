@@ -154,7 +154,7 @@ class EngineAISafetyTests(unittest.IsolatedAsyncioTestCase):
             choices = [_Choice()]
 
         with patch("engine.acompletion", return_value=_Resp()):
-            suggestions, pool = await engine.get_suggestions(
+            suggestions, pool, used_ai = await engine.get_suggestions(
                 {"provider": "openai", "model": "gpt-5-mini"},
                 RequestContext(history_file="", cwd="/tmp", buffer="e", shell="zsh"),
             )
@@ -163,6 +163,46 @@ class EngineAISafetyTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(suggestions[1], "")
         self.assertEqual(suggestions[2], "")
         self.assertEqual(len(pool), 20)
+        self.assertTrue(used_ai)
+
+    async def test_no_vector_match_with_allow_ai_false_skips_llm(self):
+        engine = SuggestionEngine.__new__(SuggestionEngine)
+        engine.vector_db = None
+        engine._get_vector_candidates = lambda ctx: []
+
+        with patch("engine.acompletion") as mocked_completion:
+            suggestions, pool, used_ai = await engine.get_suggestions(
+                {"provider": "openai", "model": "gpt-5-mini"},
+                RequestContext(history_file="", cwd="/tmp", buffer="ros2 ", shell="zsh"),
+                allow_ai=False,
+            )
+
+        mocked_completion.assert_not_called()
+        self.assertEqual(suggestions, ["", "", ""])
+        self.assertEqual(len(pool), 20)
+        self.assertTrue(all(item == "" for item in pool))
+        self.assertFalse(used_ai)
+
+    async def test_vector_match_ignores_allow_ai_and_skips_llm(self):
+        engine = SuggestionEngine.__new__(SuggestionEngine)
+        engine.vector_db = None
+        engine._get_vector_candidates = lambda ctx: [" status", " stash"]
+        engine._filter_blocked_candidates = lambda buffer, candidates: candidates
+        engine.build_prompt_context = lambda ctx: ""
+
+        with patch("engine.acompletion") as mocked_completion:
+            suggestions, pool, used_ai = await engine.get_suggestions(
+                {"provider": "openai", "model": "gpt-5-mini"},
+                RequestContext(history_file="", cwd="/tmp", buffer="git", shell="zsh"),
+                allow_ai=False,
+            )
+
+        mocked_completion.assert_not_called()
+        self.assertEqual(suggestions[0], " status")
+        self.assertEqual(suggestions[1], " stash")
+        self.assertEqual(suggestions[2], "")
+        self.assertEqual(len(pool), 20)
+        self.assertFalse(used_ai)
 
 
 if __name__ == "__main__":
