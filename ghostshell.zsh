@@ -16,6 +16,11 @@ typeset -g GHOSTSHELL_LAST_NL_COMMAND=""
 typeset -g GHOSTSHELL_LAST_NL_EXPLANATION=""
 typeset -g GHOSTSHELL_LAST_NL_ALTERNATIVES=""
 typeset -g GHOSTSHELL_LAST_NL_ASSIST=""
+typeset -g GHOSTSHELL_LAST_NL_QUESTION=""
+typeset -g -a GHOSTSHELL_INTENT_OPTIONS
+GHOSTSHELL_INTENT_OPTIONS=()
+typeset -g GHOSTSHELL_INTENT_OPTION_INDEX=1
+typeset -g GHOSTSHELL_INTENT_ACTIVE=0
 
 # Timer for pause detection
 typeset -g GHOSTSHELL_TIMER_PID=""
@@ -124,14 +129,25 @@ _ghostshell_buffer_has_hash() {
 }
 
 _ghostshell_print_intent_preview() {
-    local command="$1"
-    local explanation="$2"
-    local alternatives="$3"
-    local copy_block="$4"
+    local question="$1"
+    local command="$2"
+    local explanation="$3"
+    local alternatives="$4"
+    local copy_block="$5"
+    local green=$'\033[32m'
+    local light_blue=$'\033[94m'
+    local reset=$'\033[0m'
 
     zle -I
     print -r -- ""
     print -r -- "GhostShell command mode (#)"
+    print -r -- "Question: $question"
+    print -r -- ""
+    print -r -- "Copy-ready command:"
+    print -r -- '```bash'
+    print -r -- "${green}${copy_block}${reset}"
+    print -r -- '```'
+    print -r -- ""
     if [[ -n "$explanation" ]]; then
         print -r -- "$explanation"
     fi
@@ -139,17 +155,67 @@ _ghostshell_print_intent_preview() {
         local -a alt_items
         alt_items=("${(@s:|||:)alternatives}")
         if [[ ${#alt_items[@]} -gt 0 ]]; then
+            print -r -- ""
             print -r -- "Alternatives:"
             local alt
             for alt in "${alt_items[@]}"; do
-                [[ -n "$alt" ]] && print -r -- "- $alt"
+                [[ -n "$alt" ]] && print -r -- "${light_blue}- $alt${reset}"
             done
         fi
     fi
-    print -r -- "Copy-ready command:"
-    print -r -- '```bash'
-    print -r -- "$copy_block"
-    print -r -- '```'
+}
+
+_ghostshell_print_intent_refusal() {
+    local question="$1"
+    local explanation="$2"
+    zle -I
+    print -r -- ""
+    print -r -- "GhostShell command mode (#)"
+    print -r -- "Question: $question"
+    print -r -- ""
+    print -r -- "${explanation:-I can only help with terminal commands. Use '##' for general questions.}"
+}
+
+_ghostshell_reset_intent_state() {
+    GHOSTSHELL_INTENT_ACTIVE=0
+    GHOSTSHELL_INTENT_OPTIONS=()
+    GHOSTSHELL_INTENT_OPTION_INDEX=1
+}
+
+_ghostshell_activate_intent_options() {
+    local primary="$1"
+    local alternatives="$2"
+    _ghostshell_reset_intent_state
+    if [[ -n "$primary" ]]; then
+        GHOSTSHELL_INTENT_OPTIONS+=("$primary")
+    fi
+    if [[ -n "$alternatives" ]]; then
+        local -a alt_items
+        alt_items=("${(@s:|||:)alternatives}")
+        local alt
+        for alt in "${alt_items[@]}"; do
+            if [[ -n "$alt" ]]; then
+                GHOSTSHELL_INTENT_OPTIONS+=("$alt")
+            fi
+        done
+    fi
+    if [[ ${#GHOSTSHELL_INTENT_OPTIONS[@]} -gt 0 ]]; then
+        GHOSTSHELL_INTENT_ACTIVE=1
+        GHOSTSHELL_INTENT_OPTION_INDEX=1
+    fi
+}
+
+_ghostshell_update_intent_hint() {
+    if (( GHOSTSHELL_INTENT_ACTIVE == 1 )); then
+        local count=${#GHOSTSHELL_INTENT_OPTIONS[@]}
+        if (( count > 1 )); then
+            POSTDISPLAY="  (Option $GHOSTSHELL_INTENT_OPTION_INDEX/$count, Ctrl+P/N)"
+            region_highlight=("${#BUFFER} $((${#BUFFER} + ${#POSTDISPLAY})) fg=242")
+            return
+        fi
+    fi
+    POSTDISPLAY=""
+    region_highlight=()
 }
 
 _ghostshell_print_assist_reply() {
@@ -168,8 +234,8 @@ _ghostshell_resolve_intent_command() {
     done
 
     if [[ -z "$body" ]]; then
-        _ghostshell_set_status_message "Add a terminal request after '#'."
-        _ghostshell_update_display
+        _ghostshell_print_intent_refusal "" "Add a terminal request after '#'."
+        _ghostshell_reset_intent_state
         zle -R
         return 1
     fi
@@ -177,7 +243,9 @@ _ghostshell_resolve_intent_command() {
     if [[ "$GHOSTSHELL_LAST_NL_KIND" == "intent" && "$GHOSTSHELL_LAST_NL_INPUT" == "$raw" && -n "$GHOSTSHELL_LAST_NL_COMMAND" ]]; then
         BUFFER="$GHOSTSHELL_LAST_NL_COMMAND"
         CURSOR=${#BUFFER}
-        _ghostshell_print_intent_preview "$GHOSTSHELL_LAST_NL_COMMAND" "$GHOSTSHELL_LAST_NL_EXPLANATION" "$GHOSTSHELL_LAST_NL_ALTERNATIVES" "$GHOSTSHELL_LAST_NL_COMMAND"
+        _ghostshell_activate_intent_options "$GHOSTSHELL_LAST_NL_COMMAND" "$GHOSTSHELL_LAST_NL_ALTERNATIVES"
+        _ghostshell_print_intent_preview "$GHOSTSHELL_LAST_NL_QUESTION" "$GHOSTSHELL_LAST_NL_COMMAND" "$GHOSTSHELL_LAST_NL_EXPLANATION" "$GHOSTSHELL_LAST_NL_ALTERNATIVES" "$GHOSTSHELL_LAST_NL_COMMAND"
+        _ghostshell_update_intent_hint
         return 0
     fi
 
@@ -239,8 +307,8 @@ print('copy_block=' + shlex.quote(copy_block))
     eval "$response"
 
     if [[ "$nl_status" != "ok" || -z "$nl_primary" ]]; then
-        _ghostshell_set_status_message "${nl_explanation:-No command generated.}"
-        _ghostshell_update_display
+        _ghostshell_print_intent_refusal "$body" "${nl_explanation:-No command generated.}"
+        _ghostshell_reset_intent_state
         zle -R
         return 1
     fi
@@ -249,10 +317,13 @@ print('copy_block=' + shlex.quote(copy_block))
     CURSOR=${#BUFFER}
     GHOSTSHELL_LAST_NL_INPUT="$raw"
     GHOSTSHELL_LAST_NL_KIND="intent"
+    GHOSTSHELL_LAST_NL_QUESTION="$body"
     GHOSTSHELL_LAST_NL_COMMAND="$nl_primary"
     GHOSTSHELL_LAST_NL_EXPLANATION="$nl_explanation"
     GHOSTSHELL_LAST_NL_ALTERNATIVES="$nl_alternatives"
-    _ghostshell_print_intent_preview "$nl_primary" "$nl_explanation" "$nl_alternatives" "${nl_copy_block:-$nl_primary}"
+    _ghostshell_activate_intent_options "$nl_primary" "$nl_alternatives"
+    _ghostshell_print_intent_preview "$body" "$nl_primary" "$nl_explanation" "$nl_alternatives" "${nl_copy_block:-$nl_primary}"
+    _ghostshell_update_intent_hint
     return 0
 }
 
@@ -639,6 +710,7 @@ _ghostshell_clear_suggestions() {
         region_highlight=()
     fi
     GHOSTSHELL_SUGGESTIONS=()
+    _ghostshell_reset_intent_state
     _ghostshell_stop_timer
 }
 
@@ -647,6 +719,7 @@ _ghostshell_self_insert() {
     zle .self-insert
 
     _ghostshell_maybe_reset_line_state_for_empty_buffer
+    _ghostshell_reset_intent_state
 
     if _ghostshell_buffer_has_hash; then
         _ghostshell_clear_suggestions
@@ -675,6 +748,7 @@ _ghostshell_backward_delete_char() {
     zle .backward-delete-char
 
     # Clear suggestions and pool on delete
+    _ghostshell_reset_intent_state
     _ghostshell_clear_suggestions
     _ghostshell_maybe_reset_line_state_for_empty_buffer
 }
@@ -688,6 +762,7 @@ _ghostshell_interrupt() {
 # --- Paste Handling ---
 autoload -Uz bracketed-paste-magic
 _ghostshell_paste() {
+    _ghostshell_reset_intent_state
     _ghostshell_clear_suggestions
     zle .bracketed-paste
     _ghostshell_maybe_reset_line_state_for_empty_buffer
@@ -758,6 +833,16 @@ _ghostshell_partial_accept() {
 
 # --- Cycle Suggestions ---
 _ghostshell_cycle_next() {
+    if (( GHOSTSHELL_INTENT_ACTIVE == 1 && ${#GHOSTSHELL_INTENT_OPTIONS[@]} > 0 )); then
+        local count=${#GHOSTSHELL_INTENT_OPTIONS[@]}
+        GHOSTSHELL_INTENT_OPTION_INDEX=$(( GHOSTSHELL_INTENT_OPTION_INDEX % count + 1 ))
+        BUFFER="${GHOSTSHELL_INTENT_OPTIONS[$GHOSTSHELL_INTENT_OPTION_INDEX]}"
+        CURSOR=${#BUFFER}
+        _ghostshell_update_intent_hint
+        zle -R
+        return
+    fi
+
     local count=${#GHOSTSHELL_SUGGESTIONS[@]}
     if [[ $count -gt 0 ]]; then
         GHOSTSHELL_SUGGESTION_INDEX=$(( GHOSTSHELL_SUGGESTION_INDEX % count + 1 ))
@@ -769,6 +854,16 @@ _ghostshell_cycle_next() {
 }
 
 _ghostshell_cycle_prev() {
+    if (( GHOSTSHELL_INTENT_ACTIVE == 1 && ${#GHOSTSHELL_INTENT_OPTIONS[@]} > 0 )); then
+        local count=${#GHOSTSHELL_INTENT_OPTIONS[@]}
+        GHOSTSHELL_INTENT_OPTION_INDEX=$(( (GHOSTSHELL_INTENT_OPTION_INDEX + count - 2) % count + 1 ))
+        BUFFER="${GHOSTSHELL_INTENT_OPTIONS[$GHOSTSHELL_INTENT_OPTION_INDEX]}"
+        CURSOR=${#BUFFER}
+        _ghostshell_update_intent_hint
+        zle -R
+        return
+    fi
+
     local count=${#GHOSTSHELL_SUGGESTIONS[@]}
     if [[ $count -gt 0 ]]; then
         GHOSTSHELL_SUGGESTION_INDEX=$(( (GHOSTSHELL_SUGGESTION_INDEX + count - 2) % count + 1 ))
