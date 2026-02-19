@@ -205,5 +205,94 @@ class EngineAISafetyTests(unittest.IsolatedAsyncioTestCase):
         self.assertFalse(used_ai)
 
 
+class EngineIntentModeTests(unittest.IsolatedAsyncioTestCase):
+    async def test_intent_prompt_includes_environment_context(self):
+        engine = SuggestionEngine()
+        captured = {}
+
+        class _Msg:
+            content = '{"status":"ok","primary_command":"docker ps","explanation":"Lists containers.","alternatives":["docker container ls"]}'
+
+        class _Choice:
+            message = _Msg()
+
+        class _Resp:
+            choices = [_Choice()]
+
+        async def _fake_completion(**kwargs):
+            captured["kwargs"] = kwargs
+            return _Resp()
+
+        with patch("engine.acompletion", side_effect=_fake_completion):
+            result = await engine.get_intent_command(
+                {"provider": "openai", "model": "gpt-5-mini"},
+                RequestContext(
+                    history_file="",
+                    cwd="/tmp/work",
+                    buffer="",
+                    shell="zsh",
+                    terminal="xterm-256color",
+                    platform_name="Darwin",
+                ),
+                "show running docker containers",
+            )
+
+        self.assertEqual(result["status"], "ok")
+        self.assertEqual(result["primary_command"], "docker ps")
+        user_message = captured["kwargs"]["messages"][1]["content"]
+        self.assertIn("terminal: xterm-256color", user_message)
+        self.assertIn("shell: zsh", user_message)
+        self.assertIn("cwd: /tmp/work", user_message)
+
+    async def test_intent_blocks_destructive_command(self):
+        engine = SuggestionEngine()
+
+        class _Msg:
+            content = '{"status":"ok","primary_command":"rm -rf /tmp/x","explanation":"Deletes files.","alternatives":[]}'
+
+        class _Choice:
+            message = _Msg()
+
+        class _Resp:
+            choices = [_Choice()]
+
+        with patch("engine.acompletion", return_value=_Resp()):
+            result = await engine.get_intent_command(
+                {"provider": "openai", "model": "gpt-5-mini"},
+                RequestContext(history_file="", cwd="/tmp", buffer="", shell="zsh"),
+                "delete temporary files",
+            )
+
+        self.assertEqual(result["status"], "refusal")
+        self.assertEqual(result["primary_command"], "")
+
+    async def test_general_assistant_uses_exact_system_prompt(self):
+        engine = SuggestionEngine()
+        captured = {}
+
+        class _Msg:
+            content = "Recursion is when a function calls itself."
+
+        class _Choice:
+            message = _Msg()
+
+        class _Resp:
+            choices = [_Choice()]
+
+        async def _fake_completion(**kwargs):
+            captured["kwargs"] = kwargs
+            return _Resp()
+
+        with patch("engine.acompletion", side_effect=_fake_completion):
+            answer = await engine.get_general_assistant_reply(
+                {"provider": "openai", "model": "gpt-5-mini"},
+                RequestContext(history_file="", cwd="/tmp", buffer="", shell="zsh"),
+                "Explain recursion simply.",
+            )
+
+        self.assertIn("Recursion", answer)
+        self.assertEqual(captured["kwargs"]["messages"][0]["content"], "You are a helpful assistant.")
+
+
 if __name__ == "__main__":
     unittest.main()

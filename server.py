@@ -65,6 +65,20 @@ class Context(BaseModel):
     shell: str
     allow_ai: bool = True
 
+class IntentContext(BaseModel):
+    intent_text: str
+    working_directory: str
+    shell: str
+    terminal: str | None = None
+    platform: str | None = None
+
+class AssistContext(BaseModel):
+    prompt_text: str
+    working_directory: str
+    shell: str
+    terminal: str | None = None
+    platform: str | None = None
+
 class Feedback(BaseModel):
     command_buffer: str
     accepted_suggestion: str
@@ -93,7 +107,7 @@ async def predict_completion(ctx: Context):
         history_file=get_history_file(ctx.shell),
         cwd=ctx.working_directory,
         buffer=ctx.command_buffer,
-        shell=ctx.shell
+        shell=ctx.shell,
     )
 
     suggestions, pool, used_ai = await engine.get_suggestions(
@@ -110,6 +124,34 @@ async def predict_completion(ctx: Context):
         "bootstrap": bootstrap,
         "used_ai": used_ai,
     }
+
+@app.post("/intent")
+async def resolve_intent(ctx: IntentContext):
+    config = load_config()
+    req_context = RequestContext(
+        history_file=get_history_file(ctx.shell),
+        cwd=ctx.working_directory,
+        buffer="",
+        shell=ctx.shell,
+        terminal=ctx.terminal,
+        platform_name=ctx.platform,
+    )
+    result = await engine.get_intent_command(config, req_context, ctx.intent_text)
+    return result
+
+@app.post("/assist")
+async def resolve_assist(ctx: AssistContext):
+    config = load_config()
+    req_context = RequestContext(
+        history_file=get_history_file(ctx.shell),
+        cwd=ctx.working_directory,
+        buffer="",
+        shell=ctx.shell,
+        terminal=ctx.terminal,
+        platform_name=ctx.platform,
+    )
+    answer = await engine.get_general_assistant_reply(config, req_context, ctx.prompt_text)
+    return {"answer": answer}
 
 @app.post("/feedback")
 def log_feedback(fb: Feedback, background_tasks: BackgroundTasks):

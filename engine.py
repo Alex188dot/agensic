@@ -4,6 +4,7 @@ import json
 import re
 import shutil
 import threading
+import platform
 from pathlib import Path
 from litellm import acompletion
 
@@ -15,11 +16,21 @@ class Settings:
     max_packages_context: int = 40
 
 class RequestContext:
-    def __init__(self, history_file: str, cwd: str, buffer: str, shell: str):
+    def __init__(
+        self,
+        history_file: str,
+        cwd: str,
+        buffer: str,
+        shell: str,
+        terminal: str | None = None,
+        platform_name: str | None = None,
+    ):
         self.history_file = history_file
         self.cwd = cwd
         self.buffer = buffer
         self.shell = shell
+        self.terminal = terminal or os.environ.get("TERM", "")
+        self.platform_name = platform_name or platform.system()
 
 class SystemInventory:
     def __init__(self):
@@ -253,6 +264,37 @@ class SuggestionEngine:
         ]
         return "\n".join(lines)
 
+    @staticmethod
+    def _parse_json_payload(raw: str) -> dict | None:
+        parsed = None
+        try:
+            parsed = json.loads(raw)
+        except json.JSONDecodeError:
+            match = re.search(r"\{.*\}", raw, flags=re.DOTALL)
+            if match:
+                try:
+                    parsed = json.loads(match.group(0))
+                except Exception:
+                    parsed = None
+        return parsed if isinstance(parsed, dict) else None
+
+    @staticmethod
+    def _sanitize_single_line(value: str) -> str:
+        cleaned = str(value or "").replace("```", "").replace("\r", " ").replace("\n", " ").strip()
+        while "  " in cleaned:
+            cleaned = cleaned.replace("  ", " ")
+        return cleaned
+
+    def _collect_env_context(self, ctx: RequestContext) -> dict[str, str]:
+        return {
+            "os_name": platform.system() or "unknown",
+            "os_version": platform.release() or "unknown",
+            "shell": ctx.shell or "unknown",
+            "terminal": (ctx.terminal or os.environ.get("TERM", "") or "unknown"),
+            "cwd": ctx.cwd or "unknown",
+            "platform": ctx.platform_name or platform.platform(),
+        }
+
     async def get_suggestions(
         self,
         config: dict,
@@ -413,6 +455,222 @@ class SuggestionEngine:
             pool.append("")
 
         return (suggestions[:3], pool, True)
+
+    async def get_intent_command(self, config: dict, ctx: RequestContext, intent_text: str) -> dict:
+        text = (intent_text or "").strip()
+        if not text:
+            return {
+                "status": "empty",
+                "primary_command": "",
+                "explanation": "Please add a terminal-related request after '#'.",
+                "alternatives": [],
+                "copy_block": "",
+            }
+
+        env_ctx = self._collect_env_context(ctx)
+        system_prompt = (
+            "You are a command-line intent translator. "
+            "Answer ONLY terminal-command related requests. "
+            "If the user asks for non-terminal topics, refuse briefly and suggest using '##'. "
+            "Prefer safe, non-destructive commands unless destructive behavior is explicitly requested. "
+            "Return valid JSON with keys: status, primary_command, explanation, alternatives. "
+            "status must be one of: ok, refusal. "
+            "primary_command must be a single copy-ready shell command when status=ok, otherwise empty. "
+            "explanation must be brief (max 2 sentences). "
+            "alternatives must be an array of up to 2 single-line commands."
+        )
+        user_prompt = (
+            f"Environment:\n"
+            f"- os_name: {env_ctx['os_name']}\n"
+            f"- os_version: {env_ctx['os_version']}\n"
+            f"- platform: {env_ctx['platform']}\n"
+            f"- shell: {env_ctx['shell']}\n"
+            f"- terminal: {env_ctx['terminal']}\n"
+            f"- cwd: {env_ctx['cwd']}\n\n"
+            f"User request:\n{text}"
+        )
+
+        model = config.get("model", "gpt-5-mini")
+        provider = config.get("provider", "openai")
+        api_key = config.get("api_key", None)
+        base_url = config.get("base_url", None)
+        result = {
+            "status": "refusal",
+            "primary_command": "",
+            "explanation": "I can only help with terminal commands in '#' mode. Use '##' for general questions.",
+            "alternatives": [],
+            "copy_block": "",
+        }
+
+        if provider == "groq":
+            if not model.startswith("groq/") and not model.startswith("groq/openai/"):
+                model = f"groq/{model}"
+        elif provider == "ollama":
+            if not model.startswith("ollama/"):
+                model = f"ollama/{model}"
+            if not base_url:
+                base_url = "http://localhost:11434"
+        elif provider == "anthropic":
+            if not model.startswith("claude"):
+                model = "claude-3-5-sonnet-20241022"
+        elif provider == "gemini":
+            if not model.startswith("gemini/"):
+                model = f"gemini/{model}"
+
+        try:
+            kwargs = {
+                "model": model,
+                "messages": [
+                    {"role": "system", "content": system_prompt},
+                    {"role": "user", "content": user_prompt},
+                ],
+                "temperature": 0.2,
+                "response_format": {"type": "json_object"},
+            }
+            if api_key:
+                if provider == "groq":
+                    os.environ["GROQ_API_KEY"] = api_key
+                elif provider == "openai":
+                    os.environ["OPENAI_API_KEY"] = api_key
+                elif provider == "anthropic":
+                    os.environ["ANTHROPIC_API_KEY"] = api_key
+                elif provider == "gemini":
+                    os.environ["GEMINI_API_KEY"] = api_key
+                else:
+                    kwargs["api_key"] = api_key
+            if base_url:
+                kwargs["api_base"] = base_url
+
+            try:
+                response = await acompletion(**kwargs)
+            except Exception as first_error:
+                if "response_format" not in str(first_error).lower():
+                    raise
+                kwargs.pop("response_format", None)
+                response = await acompletion(**kwargs)
+
+            raw = (response.choices[0].message.content or "").strip()
+            parsed = self._parse_json_payload(raw)
+            if not parsed:
+                return result
+
+            status = str(parsed.get("status", "refusal")).strip().lower()
+            primary = self._sanitize_single_line(parsed.get("primary_command", ""))
+            explanation = self._sanitize_single_line(parsed.get("explanation", ""))
+            alternatives = parsed.get("alternatives", [])
+            if not isinstance(alternatives, list):
+                alternatives = []
+
+            safe_alternatives: list[str] = []
+            for alt in alternatives:
+                clean_alt = self._sanitize_single_line(alt)
+                if not clean_alt:
+                    continue
+                if self._is_blocked_command(clean_alt):
+                    continue
+                if clean_alt not in safe_alternatives:
+                    safe_alternatives.append(clean_alt)
+                if len(safe_alternatives) >= 2:
+                    break
+
+            if primary and self._is_blocked_command(primary):
+                status = "refusal"
+                primary = ""
+                if not explanation:
+                    explanation = "I won't suggest unsafe destructive commands in '#' mode."
+
+            if status != "ok" or not primary:
+                return {
+                    "status": "refusal",
+                    "primary_command": "",
+                    "explanation": explanation or "I can only help with terminal commands in '#' mode. Use '##' for general questions.",
+                    "alternatives": [],
+                    "copy_block": "",
+                }
+
+            return {
+                "status": "ok",
+                "primary_command": primary,
+                "explanation": explanation or "Here is a command you can run.",
+                "alternatives": safe_alternatives,
+                "copy_block": primary,
+            }
+        except Exception as e:
+            logger.error(f"Intent LLM Error: {e}")
+            return {
+                "status": "error",
+                "primary_command": "",
+                "explanation": "I couldn't generate a command right now. Try again.",
+                "alternatives": [],
+                "copy_block": "",
+            }
+
+    async def get_general_assistant_reply(self, config: dict, ctx: RequestContext, prompt_text: str) -> str:
+        text = (prompt_text or "").strip()
+        if not text:
+            return "Please add a question after '##'."
+
+        env_ctx = self._collect_env_context(ctx)
+        user_prompt = (
+            f"Environment:\n"
+            f"- os_name: {env_ctx['os_name']}\n"
+            f"- os_version: {env_ctx['os_version']}\n"
+            f"- platform: {env_ctx['platform']}\n"
+            f"- shell: {env_ctx['shell']}\n"
+            f"- terminal: {env_ctx['terminal']}\n"
+            f"- cwd: {env_ctx['cwd']}\n\n"
+            f"User request:\n{text}"
+        )
+
+        model = config.get("model", "gpt-5-mini")
+        provider = config.get("provider", "openai")
+        api_key = config.get("api_key", None)
+        base_url = config.get("base_url", None)
+
+        if provider == "groq":
+            if not model.startswith("groq/") and not model.startswith("groq/openai/"):
+                model = f"groq/{model}"
+        elif provider == "ollama":
+            if not model.startswith("ollama/"):
+                model = f"ollama/{model}"
+            if not base_url:
+                base_url = "http://localhost:11434"
+        elif provider == "anthropic":
+            if not model.startswith("claude"):
+                model = "claude-3-5-sonnet-20241022"
+        elif provider == "gemini":
+            if not model.startswith("gemini/"):
+                model = f"gemini/{model}"
+
+        try:
+            kwargs = {
+                "model": model,
+                "messages": [
+                    {"role": "system", "content": "You are a helpful assistant."},
+                    {"role": "user", "content": user_prompt},
+                ],
+                "temperature": 0.7,
+            }
+            if api_key:
+                if provider == "groq":
+                    os.environ["GROQ_API_KEY"] = api_key
+                elif provider == "openai":
+                    os.environ["OPENAI_API_KEY"] = api_key
+                elif provider == "anthropic":
+                    os.environ["ANTHROPIC_API_KEY"] = api_key
+                elif provider == "gemini":
+                    os.environ["GEMINI_API_KEY"] = api_key
+                else:
+                    kwargs["api_key"] = api_key
+            if base_url:
+                kwargs["api_base"] = base_url
+
+            response = await acompletion(**kwargs)
+            content = (response.choices[0].message.content or "").strip()
+            return content or "I couldn't generate a response."
+        except Exception as e:
+            logger.error(f"General assistant LLM Error: {e}")
+            return "I couldn't generate a response right now. Try again."
 
     def log_feedback(self, buffer: str, accepted: str):
         if not buffer:

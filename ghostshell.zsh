@@ -10,6 +10,12 @@ typeset -g GHOSTSHELL_LINE_AUTO_AI_CALLS=0
 typeset -g GHOSTSHELL_LINE_HAS_SPACE=0
 typeset -g GHOSTSHELL_SHOW_CTRL_SPACE_HINT=0
 typeset -g GHOSTSHELL_LAST_FETCH_USED_AI=0
+typeset -g GHOSTSHELL_LAST_NL_INPUT=""
+typeset -g GHOSTSHELL_LAST_NL_KIND=""
+typeset -g GHOSTSHELL_LAST_NL_COMMAND=""
+typeset -g GHOSTSHELL_LAST_NL_EXPLANATION=""
+typeset -g GHOSTSHELL_LAST_NL_ALTERNATIVES=""
+typeset -g GHOSTSHELL_LAST_NL_ASSIST=""
 
 # Timer for pause detection
 typeset -g GHOSTSHELL_TIMER_PID=""
@@ -103,6 +109,210 @@ _ghostshell_set_status_message() {
     fi
     GHOSTSHELL_SUGGESTIONS=("${GHOSTSHELL_STATUS_PREFIX}${message}")
     GHOSTSHELL_SUGGESTION_INDEX=1
+}
+
+_ghostshell_is_double_hash_assist() {
+    [[ "$BUFFER" == '##'* ]]
+}
+
+_ghostshell_is_single_hash_intent() {
+    [[ "$BUFFER" == '#'* && "$BUFFER" != '##'* ]]
+}
+
+_ghostshell_buffer_has_hash() {
+    [[ "$BUFFER" == *"#"* ]]
+}
+
+_ghostshell_print_intent_preview() {
+    local command="$1"
+    local explanation="$2"
+    local alternatives="$3"
+    local copy_block="$4"
+
+    zle -I
+    print -r -- ""
+    print -r -- "GhostShell command mode (#)"
+    if [[ -n "$explanation" ]]; then
+        print -r -- "$explanation"
+    fi
+    if [[ -n "$alternatives" ]]; then
+        local -a alt_items
+        alt_items=("${(@s:|||:)alternatives}")
+        if [[ ${#alt_items[@]} -gt 0 ]]; then
+            print -r -- "Alternatives:"
+            local alt
+            for alt in "${alt_items[@]}"; do
+                [[ -n "$alt" ]] && print -r -- "- $alt"
+            done
+        fi
+    fi
+    print -r -- "Copy-ready command:"
+    print -r -- '```bash'
+    print -r -- "$copy_block"
+    print -r -- '```'
+}
+
+_ghostshell_print_assist_reply() {
+    local answer="$1"
+    zle -I
+    print -r -- ""
+    print -r -- "GhostShell assistant (##)"
+    print -r -- "$answer"
+}
+
+_ghostshell_resolve_intent_command() {
+    local raw="$1"
+    local body="${raw#\#}"
+    while [[ "$body" == [[:space:]]* ]]; do
+        body="${body# }"
+    done
+
+    if [[ -z "$body" ]]; then
+        _ghostshell_set_status_message "Add a terminal request after '#'."
+        _ghostshell_update_display
+        zle -R
+        return 1
+    fi
+
+    if [[ "$GHOSTSHELL_LAST_NL_KIND" == "intent" && "$GHOSTSHELL_LAST_NL_INPUT" == "$raw" && -n "$GHOSTSHELL_LAST_NL_COMMAND" ]]; then
+        BUFFER="$GHOSTSHELL_LAST_NL_COMMAND"
+        CURSOR=${#BUFFER}
+        _ghostshell_print_intent_preview "$GHOSTSHELL_LAST_NL_COMMAND" "$GHOSTSHELL_LAST_NL_EXPLANATION" "$GHOSTSHELL_LAST_NL_ALTERNATIVES" "$GHOSTSHELL_LAST_NL_COMMAND"
+        return 0
+    fi
+
+    local escaped_body="${body//\'/\'\\\'\'}"
+    local escaped_pwd="${PWD//\'/\'\\\'\'}"
+    local escaped_term="${TERM//\'/\'\\\'\'}"
+    local platform_name="$(uname -s 2>/dev/null || echo unknown)"
+    local escaped_platform="${platform_name//\'/\'\\\'\'}"
+    local response
+    response=$(python3 -c "
+import urllib.request, json, shlex
+
+def safe_line(v):
+    return str(v or '').replace('\\r', ' ').replace('\\n', ' ').strip()
+
+payload = {
+    'intent_text': '''$escaped_body''',
+    'working_directory': '''$escaped_pwd''',
+    'shell': 'zsh',
+    'terminal': '''$escaped_term''',
+    'platform': '''$escaped_platform''',
+}
+try:
+    req = urllib.request.Request('http://127.0.0.1:22000/intent', data=json.dumps(payload).encode('utf-8'), headers={'Content-Type': 'application/json'})
+    with urllib.request.urlopen(req, timeout=3.0) as r:
+        result = json.load(r)
+    status = safe_line(result.get('status', 'error'))
+    primary = safe_line(result.get('primary_command', ''))
+    explanation = safe_line(result.get('explanation', ''))
+    alternatives = result.get('alternatives', [])
+    if not isinstance(alternatives, list):
+        alternatives = []
+    alternatives = [safe_line(item) for item in alternatives if safe_line(item)]
+    alternatives_blob = '|||'.join(alternatives[:2])
+    copy_block = safe_line(result.get('copy_block', primary))
+except Exception:
+    status = 'error'
+    primary = ''
+    explanation = 'Could not resolve command mode right now.'
+    alternatives_blob = ''
+    copy_block = ''
+print('status=' + shlex.quote(status))
+print('primary=' + shlex.quote(primary))
+print('explanation=' + shlex.quote(explanation))
+print('alternatives=' + shlex.quote(alternatives_blob))
+print('copy_block=' + shlex.quote(copy_block))
+" 2>/dev/null)
+
+    local nl_status=""
+    local nl_primary=""
+    local nl_explanation=""
+    local nl_alternatives=""
+    local nl_copy_block=""
+    response="${response//status=/nl_status=}"
+    response="${response//primary=/nl_primary=}"
+    response="${response//explanation=/nl_explanation=}"
+    response="${response//alternatives=/nl_alternatives=}"
+    response="${response//copy_block=/nl_copy_block=}"
+    eval "$response"
+
+    if [[ "$nl_status" != "ok" || -z "$nl_primary" ]]; then
+        _ghostshell_set_status_message "${nl_explanation:-No command generated.}"
+        _ghostshell_update_display
+        zle -R
+        return 1
+    fi
+
+    BUFFER="$nl_primary"
+    CURSOR=${#BUFFER}
+    GHOSTSHELL_LAST_NL_INPUT="$raw"
+    GHOSTSHELL_LAST_NL_KIND="intent"
+    GHOSTSHELL_LAST_NL_COMMAND="$nl_primary"
+    GHOSTSHELL_LAST_NL_EXPLANATION="$nl_explanation"
+    GHOSTSHELL_LAST_NL_ALTERNATIVES="$nl_alternatives"
+    _ghostshell_print_intent_preview "$nl_primary" "$nl_explanation" "$nl_alternatives" "${nl_copy_block:-$nl_primary}"
+    return 0
+}
+
+_ghostshell_resolve_general_assist() {
+    local raw="$1"
+    local body="${raw#\#\#}"
+    while [[ "$body" == [[:space:]]* ]]; do
+        body="${body# }"
+    done
+
+    if [[ -z "$body" ]]; then
+        _ghostshell_set_status_message "Add a question after '##'."
+        _ghostshell_update_display
+        zle -R
+        return 1
+    fi
+
+    if [[ "$GHOSTSHELL_LAST_NL_KIND" == "assist" && "$GHOSTSHELL_LAST_NL_INPUT" == "$raw" && -n "$GHOSTSHELL_LAST_NL_ASSIST" ]]; then
+        _ghostshell_print_assist_reply "$GHOSTSHELL_LAST_NL_ASSIST"
+        BUFFER=""
+        CURSOR=0
+        return 0
+    fi
+
+    local escaped_body="${body//\'/\'\\\'\'}"
+    local escaped_pwd="${PWD//\'/\'\\\'\'}"
+    local escaped_term="${TERM//\'/\'\\\'\'}"
+    local platform_name="$(uname -s 2>/dev/null || echo unknown)"
+    local escaped_platform="${platform_name//\'/\'\\\'\'}"
+    local answer
+    answer=$(python3 -c "
+import urllib.request, json
+payload = {
+    'prompt_text': '''$escaped_body''',
+    'working_directory': '''$escaped_pwd''',
+    'shell': 'zsh',
+    'terminal': '''$escaped_term''',
+    'platform': '''$escaped_platform''',
+}
+try:
+    req = urllib.request.Request('http://127.0.0.1:22000/assist', data=json.dumps(payload).encode('utf-8'), headers={'Content-Type': 'application/json'})
+    with urllib.request.urlopen(req, timeout=4.0) as r:
+        result = json.load(r)
+    answer = str(result.get('answer', '') or '').replace('\\r', ' ').strip()
+except Exception:
+    answer = 'Could not fetch assistant reply right now.'
+print(answer)
+" 2>/dev/null)
+
+    if [[ -z "$answer" ]]; then
+        answer="No response."
+    fi
+
+    GHOSTSHELL_LAST_NL_INPUT="$raw"
+    GHOSTSHELL_LAST_NL_KIND="assist"
+    GHOSTSHELL_LAST_NL_ASSIST="$answer"
+    _ghostshell_print_assist_reply "$answer"
+    BUFFER=""
+    CURSOR=0
+    return 0
 }
 
 _ghostshell_filter_pool() {
@@ -292,6 +502,11 @@ _ghostshell_maybe_reset_line_state_for_empty_buffer() {
 }
 
 _ghostshell_try_fetch_on_space() {
+    if _ghostshell_buffer_has_hash; then
+        _ghostshell_clear_suggestions
+        return
+    fi
+
     local allow_ai=1
     local is_manual="${1:-0}"
     local manual_allow_ai="${2:-1}"
@@ -385,6 +600,13 @@ _ghostshell_stop_timer() {
 _ghostshell_on_timer_trigger() {
     # This is called when the 0.2s timer expires
     GHOSTSHELL_TIMER_PID=""
+
+    if _ghostshell_buffer_has_hash; then
+        _ghostshell_clear_suggestions
+        _ghostshell_update_display
+        zle -R
+        return
+    fi
     
     # Only fetch if buffer has changed and is long enough
     if [[ "$BUFFER" != "$GHOSTSHELL_LAST_BUFFER" && ${#BUFFER} -ge 2 ]]; then
@@ -426,6 +648,13 @@ _ghostshell_self_insert() {
 
     _ghostshell_maybe_reset_line_state_for_empty_buffer
 
+    if _ghostshell_buffer_has_hash; then
+        _ghostshell_clear_suggestions
+        _ghostshell_update_display
+        zle -R
+        return
+    fi
+
     # Filter existing pool if we have one
     if [[ ${#GHOSTSHELL_SUGGESTIONS[@]} -gt 0 ]]; then
         _ghostshell_filter_pool
@@ -466,6 +695,18 @@ _ghostshell_paste() {
 
 # --- Accept Suggestion ---
 _ghostshell_accept_widget() {
+    if _ghostshell_is_single_hash_intent; then
+        _ghostshell_clear_suggestions
+        _ghostshell_resolve_intent_command "$BUFFER"
+        zle -R
+        return
+    fi
+
+    if _ghostshell_is_double_hash_assist; then
+        zle expand-or-complete
+        return
+    fi
+
     local current="${GHOSTSHELL_SUGGESTIONS[$GHOSTSHELL_SUGGESTION_INDEX]}"
     if _ghostshell_is_status_suggestion "$current"; then
         zle expand-or-complete
@@ -553,6 +794,20 @@ _ghostshell_manual_trigger() {
 
 # --- Accept Line (Execute Command) ---
 _ghostshell_accept_line() {
+    if _ghostshell_is_double_hash_assist; then
+        _ghostshell_clear_suggestions
+        _ghostshell_resolve_general_assist "$BUFFER"
+        zle -R
+        return
+    fi
+
+    if _ghostshell_is_single_hash_intent; then
+        _ghostshell_clear_suggestions
+        _ghostshell_resolve_intent_command "$BUFFER"
+        zle -R
+        return
+    fi
+
     _ghostshell_clear_suggestions
     _ghostshell_reset_line_state
     zle .accept-line

@@ -122,6 +122,42 @@ $ git
 $ git status█  # ← ghost text appears
 ```
 
+### Natural-language modes: `#` and `##`
+
+GhostShell supports two explicit NL modes:
+
+- `# ...` command mode (guardrailed):
+  - Use this when you want a terminal command from natural language.
+  - The model is instructed to answer only terminal/CLI requests.
+  - GhostShell sends environment context (`os_name`, `os_version`, `shell`, `terminal`, `cwd`).
+  - On `Enter`: GhostShell inserts the generated command into your prompt and does **not** execute it.
+  - On `Tab`: GhostShell resolves and inserts the command (same non-executing behavior).
+  - Output includes a short explanation, optional alternatives, and a copy-ready plain block.
+
+- `## ...` assistant mode (free text):
+  - System prompt is exactly: `You are a helpful assistant.`
+  - Use this for any general question, not just terminal topics.
+  - On `Enter`: GhostShell prints the assistant text reply and does **not** execute any command.
+  - `Tab` keeps default terminal completion behavior.
+
+Examples:
+
+```bash
+# tell me how to start a container in docker
+```
+
+GhostShell inserts something like:
+
+```bash
+docker run -d --name myapp -p 8080:80 nginx:latest
+```
+
+```bash
+## explain recursion simply
+```
+
+GhostShell prints a normal text explanation in the terminal.
+
 ### Keyboard Shortcuts
 
 - **Tab** - Accept current suggestion
