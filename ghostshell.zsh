@@ -37,6 +37,7 @@ _ghostshell_fetch_suggestions() {
     local trigger_source="${2:-unknown}"
     local buffer_content="$BUFFER"
     local cwd="$PWD"
+    local sep=$'\x1f'
     GHOSTSHELL_LAST_FETCH_USED_AI=0
     
     # Don't fetch if buffer is too short
@@ -77,7 +78,7 @@ try:
         # return a non-actionable status ghost text.
         if not clean_pool and bootstrap.get('running'):
             clean_pool = ['__GHOSTSHELL_STATUS__: ** Index is still loading, suggestions coming in a few seconds **']
-        print(('1' if used_ai else '0') + '\n' + '|'.join(clean_pool[:20]))
+        print(('1' if used_ai else '0') + '\n' + '\x1f'.join(clean_pool[:20]))
 except Exception as e:
     print('0')
 " 2>/dev/null)
@@ -94,7 +95,10 @@ except Exception as e:
     fi
 
     if [[ -n "$pool_line" ]]; then
-        GHOSTSHELL_SUGGESTIONS=("${(@s:|:)pool_line}")
+        GHOSTSHELL_SUGGESTIONS=("${(ps:$sep:)pool_line}")
+        if (( ${#GHOSTSHELL_SUGGESTIONS[@]} > 20 )); then
+            GHOSTSHELL_SUGGESTIONS=("${GHOSTSHELL_SUGGESTIONS[@][1,20]}")
+        fi
     else
         GHOSTSHELL_SUGGESTIONS=()
     fi
