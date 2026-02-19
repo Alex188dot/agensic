@@ -27,6 +27,8 @@ typeset -g GHOSTSHELL_TIMER_PID=""
 typeset -g GHOSTSHELL_LAST_BUFFER=""
 typeset -g GHOSTSHELL_LAST_EXECUTED_CMD=""
 typeset -g GHOSTSHELL_HOOKS_REGISTERED=0
+typeset -gA GHOSTSHELL_NATIVE_ESC_WIDGET
+GHOSTSHELL_NATIVE_ESC_WIDGET=()
 
 # ======================================================
 # 1. CORE LOGIC (Fetch, Display, Feedback)
@@ -652,6 +654,26 @@ _ghostshell_update_display() {
     fi
 }
 
+_ghostshell_has_visible_suggestion() {
+    local current="${GHOSTSHELL_SUGGESTIONS[$GHOSTSHELL_SUGGESTION_INDEX]}"
+
+    if _ghostshell_is_status_suggestion "$current"; then
+        return 0
+    fi
+
+    if [[ -z "$current" ]]; then
+        return 1
+    fi
+
+    local typed_since_fetch="${BUFFER#$GHOSTSHELL_LAST_BUFFER}"
+    local display_sugg="${current#$typed_since_fetch}"
+    display_sugg="$(_ghostshell_merge_suffix "$BUFFER" "$display_sugg")"
+    display_sugg="${display_sugg//$'\n'/}"
+    display_sugg="${display_sugg//$'\r'/}"
+
+    [[ -n "$display_sugg" ]]
+}
+
 # ======================================================
 # 2. PAUSE DETECTION (0.2s timer)
 # ======================================================
@@ -714,7 +736,7 @@ TRAPUSR1() {
 # ======================================================
 
 _ghostshell_clear_suggestions() {
-    if [[ -n "$WIDGET" ]]; then
+    if zle; then
         POSTDISPLAY=""
         region_highlight=()
     fi
@@ -775,6 +797,28 @@ _ghostshell_interrupt() {
     _ghostshell_clear_suggestions
     _ghostshell_reset_line_state
     zle .send-break
+}
+
+_ghostshell_escape() {
+    if _ghostshell_has_visible_suggestion; then
+        _ghostshell_clear_suggestions
+        _ghostshell_update_display
+        zle -R
+        return
+    fi
+
+    local keymap="${KEYMAP:-emacs}"
+    case "$keymap" in
+        main) keymap="emacs" ;;
+        viopp|visual) keymap="vicmd" ;;
+    esac
+
+    local native_widget="${GHOSTSHELL_NATIVE_ESC_WIDGET[$keymap]}"
+    if [[ -n "$native_widget" && "$native_widget" != "_ghostshell_escape" ]]; then
+        zle "$native_widget"
+    else
+        zle .undefined-key
+    fi
 }
 
 # --- Paste Handling ---
@@ -940,6 +984,7 @@ zle -N _ghostshell_accept_line
 zle -N self-insert _ghostshell_self_insert
 zle -N backward-delete-char _ghostshell_backward_delete_char
 zle -N _ghostshell_interrupt
+zle -N _ghostshell_escape
 zle -N bracketed-paste _ghostshell_paste
 
 # ======================================================
@@ -957,12 +1002,44 @@ _ghostshell_bind_widget() {
     fi
 }
 
+_ghostshell_default_escape_widget() {
+    local keymap="$1"
+    case "$keymap" in
+        viins) print -r -- "vi-cmd-mode" ;;
+        *) print -r -- "undefined-key" ;;
+    esac
+}
+
+_ghostshell_capture_native_escape_binding() {
+    local keymap="$1"
+    local binding
+    local widget
+
+    binding="$(bindkey -M "$keymap" '^[' 2>/dev/null)"
+    widget="${binding##* }"
+
+    if [[ -z "$widget" || "$widget" == "$binding" || "$widget" == "_ghostshell_escape" ]]; then
+        widget="$(_ghostshell_default_escape_widget "$keymap")"
+    fi
+
+    if [[ -n "$widget" && "$widget" != "undefined-key" ]]; then
+        GHOSTSHELL_NATIVE_ESC_WIDGET[$keymap]="$widget"
+    else
+        GHOSTSHELL_NATIVE_ESC_WIDGET[$keymap]=""
+    fi
+}
+
+_ghostshell_capture_native_escape_binding emacs
+_ghostshell_capture_native_escape_binding viins
+_ghostshell_capture_native_escape_binding vicmd
+
 # --- Core Controls ---
 _ghostshell_bind_widget '^@' _ghostshell_manual_trigger    # Ctrl+Space (manual trigger)
 _ghostshell_bind_widget '^I' _ghostshell_accept_widget     # Tab
 _ghostshell_bind_widget '^P' _ghostshell_cycle_prev
 _ghostshell_bind_widget '^N' _ghostshell_cycle_next
 _ghostshell_bind_widget '^C' _ghostshell_interrupt
+_ghostshell_bind_widget '^[' _ghostshell_escape
 _ghostshell_bind_widget '^M' _ghostshell_accept_line       # Enter
 
 # --- Partial Accept (Option+Right) ---

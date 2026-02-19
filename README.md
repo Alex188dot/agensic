@@ -2,46 +2,56 @@
 
 An intelligent terminal autocomplete powered by vector databases and AI.
 
-## What's New: Vector DB Paradigm 2.0
+## Features
 
-GhostShell now uses a **vector database** (zvec) to store and retrieve your command history with semantic similarity search. This means:
+- 🎯 **Smart Suggestions**: Semantic search finds related commands
+- 🎨 **Ghost Text**: Subtle gray text shows completions
+- 🔄 **Cycle Options**: Ctrl+P/N to cycle through suggestions
+- 📊 **Pool Management**: Keeps up to 20 suggestions in memory for current buffer
+- 🤖 **AI Fallback**: Uses LLM only for unknown command segments with auto fetch on `Space`
+- 🧮 **LLM Budgeting**: Max 4 auto AI calls per command line
 
-- ⚡ **Lightning fast** suggestions from your history
-- 🧠 **Smart matching** using AI embeddings
-- 🔄 **No duplicates** - commands are automatically deduplicated
-- 📚 **Learns continuously** - every command you run is added to the database
-- 💰 **Cost efficient** - AI is only invoked for truly new commands
+## Vector DB
+
+GhostShell uses a **vector database** (`zvec`) to store command history and retrieve matches with semantic similarity search.
+
+- ⚡ **Low-latency retrieval** from indexed command history
+- 🧠 **Embedding-based matching** for semantically related commands
+- 🔄 **Automatic deduplication** of stored commands
+- 📚 **Continuous ingestion** of executed commands
+- 💰 **AI on demand** when no vector match is available
 
 ### How It Works
 
-1. **Type a command segment** and press `Space`
-2. **Vector DB first** → Searches history for top matches
-3. **No DB match?** → Invokes AI fallback suggestion
-4. **Keep typing** → Filters suggestion pool locally
-5. **Next segment** → New auto fetch only on the next `Space`
+1. **Type continuously** → suggestions appear after a `200ms` pause
+2. **Vector DB first** → top semantic matches are loaded from history
+3. **Keep typing** → current suggestion pool is filtered locally
+4. **Press `Space`** → fetches the next-segment pool using the updated buffer
+5. **No vector match** → AI fallback is used automatically
+6. **Press `Ctrl+Space`** → explicitly request an AI suggestion
 
 ### Example Flow
 
 ```bash
-$ doc█
-# press space after `doc`
-# Vector DB returns matching docker commands
-$ docker ps█  # ← ghost text appears
-# You type: "docker st"
-# Filters pool to: docker start, docker stop, docker stats
-$ docker start █container-id  # ← filtered ghost text
-# LLM fallback only when vector DB has no match
+$ dock█
+# pause ~200ms
+# suggestions appear from the current pool: docker ps, docker stop, docker logs
+$ docker st█
+# pause ~200ms
+# pool is filtered locally: docker start, docker stop, docker stats
+$ docker start █container-id
 ```
 
-## Features
+```bash
+$ qztool █
+# Space triggers segment fetch for buffer "qztool" (no vector hits)
+# AI fallback returns a suggestion for this unrecognized command
+$ qztool --help█
 
-- 🎯 **Smart Suggestions**: Semantic search finds related commands
-- ⌨️ **Space-Gated Fetching**: Auto fetch only on `Space`
-- 🧮 **LLM Budgeting**: Max 4 auto AI calls per command line
-- 🎨 **Ghost Text**: Subtle gray text shows completions
-- 🔄 **Cycle Options**: Ctrl+P/N to cycle through suggestions
-- 📊 **Pool Management**: Keeps 20 suggestions in memory
-- 🤖 **AI Fallback**: Uses LLM only for unknown command segments
+# Need AI immediately for the current buffer?
+$ qztool --ver█
+# press Ctrl+Space to force an AI suggestion
+```
 
 ## Installation
 
@@ -88,8 +98,6 @@ The first time you use GhostShell, it will:
 - Generate embeddings (this may take a few seconds)
 - Create an HNSW index for fast search
 
-Subsequent runs are instant!
-
 ## Configuration
 
 Create `~/.ghostshell/config.json`:
@@ -104,11 +112,11 @@ Create `~/.ghostshell/config.json`:
 
 ### Supported Providers
 
-- **OpenAI**: `gpt-4o-mini`, `gpt-4o`, etc.
-- **Groq**: Fast inference with `llama-3.1-70b-versatile`
-- **Anthropic**: `claude-3-5-sonnet-20241022`
-- **Ollama**: Local models (set `base_url`)
-- **Gemini**: Google's models
+- **OpenAI**
+- **Groq**
+- **Anthropic**
+- **Ollama**
+- **Gemini**
 
 ## Usage
 
@@ -164,6 +172,7 @@ GhostShell prints a normal text explanation in the terminal.
 - **Ctrl+P** - Previous suggestion
 - **Ctrl+N** - Next suggestion  
 - **Ctrl+Space** - Manual trigger (bypasses auto LLM budget cap)
+- **Esc** - Clear visible ghost suggestion and keep your typed buffer
 - **Option+→** - Accept first word only
 - **Enter** - Execute command (logs to vector DB)
 
@@ -323,4 +332,4 @@ Built with:
 
 ---
 
-**GhostShell** - Your terminal's new best friend 👻
+**GhostShell** - Your terminal's new best friend 👻✨
