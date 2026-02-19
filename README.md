@@ -209,6 +209,7 @@ This means:
 - **vector_db.py**: Manages zvec database, embeddings, search
 - **engine.py**: Suggestion logic, AI integration
 - **server.py**: HTTP API endpoints
+- **privacy_guard.py**: Sanitization and fail-closed privacy checks before LLM egress
 - **ghostshell.zsh**: Shell integration, UI, keyboard handling
 
 ## Technical Details
@@ -234,6 +235,16 @@ This means:
 - **Size**: Up to 20 suggestions from vector DB
 - **Filtering**: Client-side (zsh) as you type
 - **Refresh**: Only when pool is exhausted
+
+### Privacy Boundary (LLM + Logs)
+
+- **Hard boundary before LLM**: every outbound `messages` payload is sanitized in `engine.py` via `privacy_guard.py`
+- **Redaction scope**: env assignments, known secret names (`*_KEY`, `*_TOKEN`, `AWS_*`, provider keys), high-entropy tokens (JWT/long hex/base64-like), dotenv lines, URL credentials
+- **Value policy**: raw secret values are replaced with placeholders like `<REDACTED_SECRET>`
+- **Bounded history to LLM**: command history is capped (last 12 lines + length limits), sanitized, and never sent as full history
+- **Fail-closed behavior**: if sanitization/check fails, the LLM call is blocked and GhostShell returns a safe fallback
+- **Log safety**: request buffer and error text are sanitized before logging, and logs include redaction metadata (`redactions=N`)
+
 
 ## Performance
 

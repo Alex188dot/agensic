@@ -7,11 +7,13 @@ import threading
 import platform
 from pathlib import Path
 from litellm import acompletion
+from privacy_guard import PrivacyGuard, PrivacyGuardError
 
 logger = logging.getLogger("ghostshell.engine")
 
 class Settings:
     history_lines: int = 50
+    llm_history_lines: int = 12
     max_commands_context: int = 40
     max_packages_context: int = 40
 
@@ -41,6 +43,9 @@ class SystemInventory:
 class SuggestionEngine:
     def __init__(self):
         self.inventory = self._get_simple_inventory()
+        self.privacy_guard = PrivacyGuard(
+            history_max_lines=Settings.llm_history_lines,
+        )
         self.vector_db = None
         self._vector_db_lock = threading.Lock()
         self._vector_db_ready = threading.Event()
@@ -68,7 +73,10 @@ class SuggestionEngine:
                 vector_db.initialize_from_history(history_file)
             logger.info("Background history sync complete")
         except Exception as e:
-            logger.error(f"Background history sync failed: {e}")
+            logger.error(
+                "Background history sync failed: %s",
+                self.privacy_guard.sanitize_for_log(str(e)),
+            )
         finally:
             with self._bootstrap_lock:
                 self._bootstrap_completed_for = history_file
@@ -200,7 +208,10 @@ class SuggestionEngine:
             # Pull a wider prefix candidate set, then rerank with usage/context signals.
             matches = self.vector_db.get_exact_prefix_matches(prefix, topk=100)
         except Exception as e:
-            logger.error(f"Vector DB lookup failed: {e}")
+            logger.error(
+                "Vector DB lookup failed: %s",
+                self.privacy_guard.sanitize_for_log(str(e)),
+            )
             return []
         
         # Return only the suffix part (what comes after the prefix)
@@ -248,22 +259,34 @@ class SuggestionEngine:
     def build_prompt_context(self, request: RequestContext) -> str:
         history = self._safe_tail(request.history_file, Settings.history_lines)
         cwd_items = self._list_working_dir(request.cwd)
-        
+
+        sanitized_history, _ = self.privacy_guard.sanitize_history_lines(history)
+        shell_value = self.privacy_guard.sanitize_text(request.shell, context="prompt_shell").text
+        cwd_value = self.privacy_guard.sanitize_text(request.cwd, context="prompt_cwd").text
+        buffer_value = self.privacy_guard.sanitize_text(request.buffer, context="prompt_buffer").text
+
+        sanitized_items: list[str] = []
+        for item in cwd_items:
+            clean_item = self.privacy_guard.sanitize_text(item, context="prompt_cwd_item").text
+            if clean_item:
+                sanitized_items.append(clean_item)
+
         lines: list[str] = [
-            f"Shell: {request.shell}",
-            f"CWD: {request.cwd}",
-            f"Buffer: {request.buffer}",
+            f"Shell: {shell_value}",
+            f"CWD: {cwd_value}",
+            f"Buffer: {buffer_value}",
             "",
             "Relevant Executables:",
             ", ".join(self.inventory.commands[:20]) if self.inventory.commands else "(none)",
             "",
             "Recent History:",
-            "\n".join(history[-15:]) if history else "(none)",
+            "\n".join(sanitized_history) if sanitized_history else "(none)",
             "",
             "Files in CWD:",
-            ", ".join(cwd_items) if cwd_items else "(none)",
+            ", ".join(sanitized_items) if sanitized_items else "(none)",
         ]
-        return "\n".join(lines)
+        context = "\n".join(lines)
+        return self.privacy_guard.sanitize_text(context, context="prompt_context").text
 
     @staticmethod
     def _parse_json_payload(raw: str) -> dict | None:
@@ -287,7 +310,7 @@ class SuggestionEngine:
         return cleaned
 
     def _collect_env_context(self, ctx: RequestContext) -> dict[str, str]:
-        return {
+        raw = {
             "os_name": platform.system() or "unknown",
             "os_version": platform.release() or "unknown",
             "shell": ctx.shell or "unknown",
@@ -295,6 +318,75 @@ class SuggestionEngine:
             "cwd": ctx.cwd or "unknown",
             "platform": ctx.platform_name or platform.platform(),
         }
+        sanitized: dict[str, str] = {}
+        for key, value in raw.items():
+            clean_value = self.privacy_guard.sanitize_text(str(value), context=f"env_{key}").text
+            sanitized[key] = clean_value[:200]
+        return sanitized
+
+    def _sanitize_messages_with_stats(self, messages: list[dict]) -> tuple[list[dict], int, list[str]]:
+        sanitized_messages = self.privacy_guard.sanitize_messages(messages)
+        total_redactions = 0
+        flags: set[str] = set()
+        for idx, msg in enumerate(messages or []):
+            if not isinstance(msg, dict):
+                continue
+            clean_msg = sanitized_messages[idx] if idx < len(sanitized_messages) else dict(msg)
+            content = msg.get("content")
+            if isinstance(content, str):
+                result = self.privacy_guard.sanitize_text(content, context="message")
+                clean_msg["content"] = result.text
+                total_redactions += result.redaction_count
+                flags.update(result.flags)
+            elif isinstance(content, list):
+                clean_parts = []
+                for part in content:
+                    if isinstance(part, dict) and isinstance(part.get("text"), str):
+                        part_copy = dict(part)
+                        result = self.privacy_guard.sanitize_text(part_copy["text"], context="message")
+                        part_copy["text"] = result.text
+                        total_redactions += result.redaction_count
+                        flags.update(result.flags)
+                        clean_parts.append(part_copy)
+                    else:
+                        clean_parts.append(part)
+                clean_msg["content"] = clean_parts
+            if idx < len(sanitized_messages):
+                sanitized_messages[idx] = clean_msg
+        return (sanitized_messages, total_redactions, sorted(flags))
+
+    async def _privacy_checked_acompletion(
+        self,
+        kwargs: dict,
+        request_type: str,
+    ) -> tuple[object, dict[str, object]]:
+        safe_kwargs = dict(kwargs)
+        try:
+            messages = safe_kwargs.get("messages", [])
+            sanitized_messages, redactions, flags = self._sanitize_messages_with_stats(messages)
+            for msg in sanitized_messages:
+                if isinstance(msg, dict):
+                    content = msg.get("content")
+                    if isinstance(content, str):
+                        self.privacy_guard.assert_safe_or_raise(content)
+                    elif isinstance(content, list):
+                        for part in content:
+                            if isinstance(part, dict) and isinstance(part.get("text"), str):
+                                self.privacy_guard.assert_safe_or_raise(part["text"])
+            safe_kwargs["messages"] = sanitized_messages
+        except Exception as exc:
+            raise PrivacyGuardError(f"Sanitization failed for {request_type}") from exc
+
+        try:
+            response = await acompletion(**safe_kwargs)
+            return (response, {"redactions": redactions, "flags": flags})
+        except Exception as first_error:
+            if "response_format" not in str(first_error).lower() or "response_format" not in safe_kwargs:
+                raise
+            retry_kwargs = dict(safe_kwargs)
+            retry_kwargs.pop("response_format", None)
+            response = await acompletion(**retry_kwargs)
+            return (response, {"redactions": redactions, "flags": flags})
 
     async def get_suggestions(
         self,
@@ -343,14 +435,15 @@ class SuggestionEngine:
             return (suggestions, pool, False)
 
         logger.info("No vector matches found, invoking AI for new command")
-        
+
         model = config.get("model", "gpt-5-mini")
         provider = config.get("provider", "openai")
         api_key = config.get("api_key", None)
         base_url = config.get("base_url", None)
-        
+
         context_str = self.build_prompt_context(ctx)
-        
+        buffer_for_prompt = self.privacy_guard.sanitize_text(ctx.buffer, context="prompt_buffer").text
+
         system_prompt = (
             "You are a CLI autocomplete engine. "
             "Context provided below (History, CWD). "
@@ -378,6 +471,7 @@ class SuggestionEngine:
                 model = f"gemini/{model}"
 
         suggestions = ["", "", ""]
+        privacy_blocked = False
 
         try:
             model_for_temp = model.split("/")[-1]
@@ -386,7 +480,7 @@ class SuggestionEngine:
                 "model": model,
                 "messages": [
                     {"role": "system", "content": system_prompt},
-                    {"role": "user", "content": f"Buffer: {ctx.buffer}"}
+                    {"role": "user", "content": f"Buffer: {buffer_for_prompt}"}
                 ],
                 "temperature": temperature,
                 "response_format": {"type": "json_object"},
@@ -401,12 +495,15 @@ class SuggestionEngine:
             
             if base_url: kwargs["api_base"] = base_url
 
-            try:
-                response = await acompletion(**kwargs)
-            except Exception as first_error:
-                if "response_format" not in str(first_error).lower(): raise
-                kwargs.pop("response_format", None)
-                response = await acompletion(**kwargs)
+            response, privacy_meta = await self._privacy_checked_acompletion(
+                kwargs,
+                request_type="suggestions",
+            )
+            logger.info(
+                "LLM request [suggestions] sanitized redactions=%s flags=%s",
+                privacy_meta.get("redactions", 0),
+                ",".join(privacy_meta.get("flags", [])),
+            )
 
             raw = (response.choices[0].message.content or "").strip()
             
@@ -442,8 +539,18 @@ class SuggestionEngine:
 
             suggestions = self._filter_blocked_candidates(ctx.buffer, clean)
 
+        except PrivacyGuardError as e:
+            logger.warning(
+                "LLM request [suggestions] blocked by privacy guard: %s",
+                self.privacy_guard.sanitize_for_log(str(e)),
+            )
+            privacy_blocked = True
+            suggestions = []
         except Exception as e:
-            logger.error(f"LLM Error: {e}")
+            logger.error(
+                "LLM Error: %s",
+                self.privacy_guard.sanitize_for_log(str(e)),
+            )
             suggestions = []
 
         # Pad to 3
@@ -455,7 +562,7 @@ class SuggestionEngine:
         while len(pool) < 20:
             pool.append("")
 
-        return (suggestions[:3], pool, True)
+        return (suggestions[:3], pool, not privacy_blocked)
 
     async def get_intent_command(self, config: dict, ctx: RequestContext, intent_text: str) -> dict:
         text = (intent_text or "").strip()
@@ -469,6 +576,7 @@ class SuggestionEngine:
             }
 
         env_ctx = self._collect_env_context(ctx)
+        safe_user_text = self.privacy_guard.sanitize_text(text, context="intent_user").text
         system_prompt = (
             "You are a command-line intent translator. "
             "Answer ONLY terminal-command related requests. "
@@ -488,7 +596,7 @@ class SuggestionEngine:
             f"- shell: {env_ctx['shell']}\n"
             f"- terminal: {env_ctx['terminal']}\n"
             f"- cwd: {env_ctx['cwd']}\n\n"
-            f"User request:\n{text}"
+            f"User request:\n{safe_user_text}"
         )
 
         model = config.get("model", "gpt-5-mini")
@@ -542,13 +650,15 @@ class SuggestionEngine:
             if base_url:
                 kwargs["api_base"] = base_url
 
-            try:
-                response = await acompletion(**kwargs)
-            except Exception as first_error:
-                if "response_format" not in str(first_error).lower():
-                    raise
-                kwargs.pop("response_format", None)
-                response = await acompletion(**kwargs)
+            response, privacy_meta = await self._privacy_checked_acompletion(
+                kwargs,
+                request_type="intent",
+            )
+            logger.info(
+                "LLM request [intent] sanitized redactions=%s flags=%s",
+                privacy_meta.get("redactions", 0),
+                ",".join(privacy_meta.get("flags", [])),
+            )
 
             raw = (response.choices[0].message.content or "").strip()
             parsed = self._parse_json_payload(raw)
@@ -596,8 +706,23 @@ class SuggestionEngine:
                 "alternatives": safe_alternatives,
                 "copy_block": primary,
             }
+        except PrivacyGuardError as e:
+            logger.warning(
+                "LLM request [intent] blocked by privacy guard: %s",
+                self.privacy_guard.sanitize_for_log(str(e)),
+            )
+            return {
+                "status": "error",
+                "primary_command": "",
+                "explanation": "Request blocked by privacy guard. Try a less sensitive prompt.",
+                "alternatives": [],
+                "copy_block": "",
+            }
         except Exception as e:
-            logger.error(f"Intent LLM Error: {e}")
+            logger.error(
+                "Intent LLM Error: %s",
+                self.privacy_guard.sanitize_for_log(str(e)),
+            )
             return {
                 "status": "error",
                 "primary_command": "",
@@ -612,6 +737,7 @@ class SuggestionEngine:
             return "Please add a question after '##'."
 
         env_ctx = self._collect_env_context(ctx)
+        safe_text = self.privacy_guard.sanitize_text(text, context="assist_user").text
         user_prompt = (
             f"Environment:\n"
             f"- os_name: {env_ctx['os_name']}\n"
@@ -620,7 +746,7 @@ class SuggestionEngine:
             f"- shell: {env_ctx['shell']}\n"
             f"- terminal: {env_ctx['terminal']}\n"
             f"- cwd: {env_ctx['cwd']}\n\n"
-            f"User request:\n{text}"
+            f"User request:\n{safe_text}"
         )
 
         model = config.get("model", "gpt-5-mini")
@@ -666,11 +792,28 @@ class SuggestionEngine:
             if base_url:
                 kwargs["api_base"] = base_url
 
-            response = await acompletion(**kwargs)
+            response, privacy_meta = await self._privacy_checked_acompletion(
+                kwargs,
+                request_type="assist",
+            )
+            logger.info(
+                "LLM request [assist] sanitized redactions=%s flags=%s",
+                privacy_meta.get("redactions", 0),
+                ",".join(privacy_meta.get("flags", [])),
+            )
             content = (response.choices[0].message.content or "").strip()
             return content or "I couldn't generate a response."
+        except PrivacyGuardError as e:
+            logger.warning(
+                "LLM request [assist] blocked by privacy guard: %s",
+                self.privacy_guard.sanitize_for_log(str(e)),
+            )
+            return "Request blocked by privacy guard. Try a less sensitive prompt."
         except Exception as e:
-            logger.error(f"General assistant LLM Error: {e}")
+            logger.error(
+                "General assistant LLM Error: %s",
+                self.privacy_guard.sanitize_for_log(str(e)),
+            )
             return "I couldn't generate a response right now. Try again."
 
     def log_feedback(self, buffer: str, accepted: str):
@@ -681,9 +824,17 @@ class SuggestionEngine:
             vector_db.record_feedback(buffer, accepted)
             full_command = f"{buffer}{accepted}".replace("\n", " ").replace("\r", " ").strip()
             if full_command:
-                logger.info(f"Feedback recorded for: {full_command}")
+                sanitized = self.privacy_guard.sanitize_text(full_command, context="log_feedback")
+                logger.info(
+                    "Feedback recorded for: %s (redactions=%d)",
+                    sanitized.text,
+                    sanitized.redaction_count,
+                )
         except Exception as e:
-            logger.error(f"Failed to log feedback to vector DB: {e}")
+            logger.error(
+                "Failed to log feedback to vector DB: %s",
+                self.privacy_guard.sanitize_for_log(str(e)),
+            )
     
     def log_executed_command(self, command: str, exit_code: int | None = None, source: str = "unknown"):
         """
@@ -706,7 +857,10 @@ class SuggestionEngine:
                 return
             vector_db.insert_command(normalized_command)
         except Exception as e:
-            logger.error(f"Failed to log command to vector DB: {e}")
+            logger.error(
+                "Failed to log command to vector DB: %s",
+                self.privacy_guard.sanitize_for_log(str(e)),
+            )
     
     def close(self):
         """Clean up resources."""

@@ -18,6 +18,7 @@ from contextlib import asynccontextmanager
 from fastapi import FastAPI, BackgroundTasks
 from pydantic import BaseModel
 from engine import SuggestionEngine, RequestContext
+from privacy_guard import PrivacyGuard
 
 # ==========================================
 # SETUP
@@ -42,6 +43,7 @@ CONFIG_DIR = os.path.expanduser("~/.ghostshell")
 CONFIG_FILE = os.path.join(CONFIG_DIR, "config.json")
 
 engine = SuggestionEngine()
+privacy_guard = PrivacyGuard()
 uvicorn_server = None
 
 @asynccontextmanager
@@ -128,9 +130,15 @@ async def predict_completion(ctx: Context):
         display_pool_count += 1
         if display_pool_count >= 20:
             break
+    sanitized_buffer = privacy_guard.sanitize_text(ctx.command_buffer, context="server_predict")
     logger.info(
-        f"Req[{source}] allow_ai={ctx.allow_ai} used_ai={used_ai} "
-        f"suggestions={display_pool_count} buffer='{ctx.command_buffer}'"
+        "Req[%s] allow_ai=%s used_ai=%s suggestions=%s buffer='%s' redactions=%d",
+        source,
+        ctx.allow_ai,
+        used_ai,
+        display_pool_count,
+        privacy_guard.sanitize_for_log(sanitized_buffer.text),
+        sanitized_buffer.redaction_count,
     )
     return {
         "suggestions": suggestions,
