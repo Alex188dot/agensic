@@ -197,7 +197,8 @@ class SuggestionEngine:
             return []
 
         try:
-            matches = self.vector_db.get_exact_prefix_matches(prefix, topk=20)
+            # Pull a wider prefix candidate set, then rerank with usage/context signals.
+            matches = self.vector_db.get_exact_prefix_matches(prefix, topk=100)
         except Exception as e:
             logger.error(f"Vector DB lookup failed: {e}")
             return []

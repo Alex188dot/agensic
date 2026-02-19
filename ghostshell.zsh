@@ -34,6 +34,7 @@ typeset -g GHOSTSHELL_HOOKS_REGISTERED=0
 
 _ghostshell_fetch_suggestions() {
     local allow_ai="${1:-1}"
+    local trigger_source="${2:-unknown}"
     local buffer_content="$BUFFER"
     local cwd="$PWD"
     GHOSTSHELL_LAST_FETCH_USED_AI=0
@@ -55,6 +56,7 @@ data = {
     'working_directory': '''$cwd''',
     'shell': 'zsh',
     'allow_ai': bool(int('${allow_ai}')),
+    'trigger_source': '''$trigger_source''',
 }
 try:
     req = urllib.request.Request('http://127.0.0.1:22000/predict', data=json.dumps(data).encode('utf-8'), headers={'Content-Type': 'application/json'})
@@ -581,9 +583,11 @@ _ghostshell_try_fetch_on_space() {
     local allow_ai=1
     local is_manual="${1:-0}"
     local manual_allow_ai="${2:-1}"
+    local trigger_source="space_auto"
 
     if [[ "$is_manual" == "1" ]]; then
         allow_ai="$manual_allow_ai"
+        trigger_source="manual_ctrl_space"
     else
         if (( GHOSTSHELL_LINE_AUTO_AI_CALLS >= GHOSTSHELL_MAX_AUTO_AI_CALLS )); then
             allow_ai=0
@@ -591,7 +595,7 @@ _ghostshell_try_fetch_on_space() {
     fi
 
     GHOSTSHELL_LAST_BUFFER="$BUFFER"
-    _ghostshell_fetch_suggestions "$allow_ai"
+    _ghostshell_fetch_suggestions "$allow_ai" "$trigger_source"
 
     if [[ "$is_manual" != "1" ]]; then
         if (( GHOSTSHELL_LAST_FETCH_USED_AI == 1 )); then
@@ -682,7 +686,8 @@ _ghostshell_on_timer_trigger() {
     # Only fetch if buffer has changed and is long enough
     if [[ "$BUFFER" != "$GHOSTSHELL_LAST_BUFFER" && ${#BUFFER} -ge 2 ]]; then
         GHOSTSHELL_LAST_BUFFER="$BUFFER"
-        _ghostshell_fetch_suggestions
+        # Timer-based fetch is vector-store only (no LLM).
+        _ghostshell_fetch_suggestions 0 "pause_timer"
         _ghostshell_update_display
         zle -R
     fi
@@ -737,10 +742,19 @@ _ghostshell_self_insert() {
 
     # Auto fetch only when user presses space (new command segment boundary).
     if [[ "$inserted_key" == " " && ${#BUFFER} -ge 2 ]]; then
+        _ghostshell_stop_timer
         GHOSTSHELL_LINE_HAS_SPACE=1
         _ghostshell_try_fetch_on_space 0
         _ghostshell_update_display
         zle -R
+        return
+    fi
+
+    # Non-space typing uses 0.2s pause detection; fetch stays vector-only there.
+    if [[ ${#BUFFER} -ge 2 ]]; then
+        _ghostshell_start_timer
+    else
+        _ghostshell_stop_timer
     fi
 }
 

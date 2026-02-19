@@ -8,6 +8,7 @@ import shlex
 import shutil
 import threading
 import time
+from collections import defaultdict
 from pathlib import Path
 from typing import Dict, List, Optional, Tuple
 
@@ -38,6 +39,7 @@ class CommandVectorDB:
     SCORE_EXECUTE = 0.20
     SCORE_HISTORY = 0.10
     BLOCKED_EXECUTABLES = {"rm"}
+    PREFIX_SCAN_LIMIT = 2000
 
     def __init__(self, db_path: str = None, model_name: str = "all-MiniLM-L6-v2"):
         if db_path is None:
@@ -60,11 +62,76 @@ class CommandVectorDB:
         self.model = self._load_model()
         self.collection = self._init_command_collection(self.db_path)
         self.feedback_collection = self._init_feedback_collection(self.feedback_db_path)
+        self.command_cache: set[str] = set()
+        self.command_cache_by_exec: Dict[str, set[str]] = defaultdict(set)
+        self._history_cache_warmed_for: set[str] = set()
         self.inserted_commands = self._load_existing_commands(limit=1024)
+        self._register_commands(self.inserted_commands)
 
     @staticmethod
     def normalize_command(command: str) -> str:
         return (command or "").strip()
+
+    @staticmethod
+    def _prefix_exec_key(command: str) -> str:
+        tokens = CommandVectorDB.tokenize_command(command)
+        executable = CommandVectorDB.extract_executable(tokens)
+        if not executable:
+            return ""
+        return os.path.basename(executable).strip().lower()
+
+    def _register_commands(self, commands: List[str] | set[str]):
+        if not commands:
+            return
+        for raw in commands:
+            normalized = self.normalize_command(raw)
+            if not normalized:
+                continue
+            if self.is_blocked_command(normalized):
+                continue
+            self.command_cache.add(normalized)
+            exec_key = self._prefix_exec_key(normalized)
+            if exec_key:
+                self.command_cache_by_exec[exec_key].add(normalized)
+
+    def _get_lexical_prefix_matches(self, prefix: str, topk: int) -> List[str]:
+        normalized_prefix = self.normalize_command(prefix)
+        if not normalized_prefix:
+            return []
+
+        exec_key = self._prefix_exec_key(normalized_prefix)
+        source = self.command_cache
+        if exec_key and exec_key in self.command_cache_by_exec:
+            source = self.command_cache_by_exec[exec_key]
+
+        # Bound scan cost on very large command sets.
+        if len(source) > self.PREFIX_SCAN_LIMIT:
+            base_candidates = sorted(source)[: self.PREFIX_SCAN_LIMIT]
+        else:
+            base_candidates = sorted(source)
+
+        matches = [cmd for cmd in base_candidates if cmd.startswith(normalized_prefix)]
+        return matches[:topk]
+
+    def _warm_prefix_cache_from_history(self, history_path: Path):
+        key = str(history_path)
+        if key in self._history_cache_warmed_for:
+            return
+        if not history_path.exists() or not history_path.is_file():
+            return
+
+        commands: set[str] = set()
+        try:
+            with open(history_path, "r", encoding="utf-8", errors="ignore") as f:
+                for line in f:
+                    cmd = self.normalize_command(self._parse_history_line(line))
+                    if cmd:
+                        commands.add(cmd)
+            self._register_commands(commands)
+            self._history_cache_warmed_for.add(key)
+            logger.info(f"Warmed lexical prefix cache with {len(commands)} commands from history")
+        except Exception as exc:
+            logger.warning(f"Could not warm lexical prefix cache from history: {exc}")
 
     @staticmethod
     def tokenize_command(command: str) -> List[str]:
@@ -543,6 +610,7 @@ class CommandVectorDB:
             return
 
         logger.info(f"Syncing database from history: {history_file}")
+        self._warm_prefix_cache_from_history(history_path)
 
         try:
             stat = history_path.stat()
@@ -627,6 +695,8 @@ class CommandVectorDB:
             seen.add(normalized)
             normalized_unique.append(normalized)
 
+        self._register_commands(normalized_unique)
+
         if not normalized_unique:
             logger.debug("No new commands to insert")
             return 0
@@ -684,6 +754,7 @@ class CommandVectorDB:
         if self.is_blocked_command(normalized):
             logger.debug("Skipping blocked command execute_count update")
             return
+        self._register_commands([normalized])
         self._increment_execute_count(normalized)
 
     def upsert_history_commands(self, command_counts: Dict[str, int]) -> int:
@@ -706,6 +777,7 @@ class CommandVectorDB:
         if not normalized_counts:
             return 0
 
+        self._register_commands(normalized_counts.keys())
         commands = list(normalized_counts.keys())
         command_ids = [self.command_doc_id(command) for command in commands]
         timestamp = int(time.time())
@@ -791,12 +863,29 @@ class CommandVectorDB:
         if not prefix:
             return []
 
-        candidates = self.search(prefix, topk=topk * 2)
-        matches = [
-            command
-            for command, _ in candidates
-            if command.startswith(prefix) and not self.is_blocked_command(command)
-        ]
+        normalized_prefix = self.normalize_command(prefix)
+        if not normalized_prefix:
+            return []
+
+        lexical_matches = self._get_lexical_prefix_matches(normalized_prefix, topk=topk)
+        if len(lexical_matches) >= topk:
+            return lexical_matches[:topk]
+
+        # Semantic fallback augments lexical results when cache is sparse.
+        candidates = self.search(normalized_prefix, topk=max(topk * 5, 40))
+        seen = set(lexical_matches)
+        matches = list(lexical_matches)
+        for command, _ in candidates:
+            if command in seen:
+                continue
+            if not command.startswith(normalized_prefix):
+                continue
+            if self.is_blocked_command(command):
+                continue
+            matches.append(command)
+            seen.add(command)
+            if len(matches) >= topk:
+                break
         return matches[:topk]
 
     def rerank_candidates(self, buffer_context: str, candidates: List[str]) -> List[str]:
@@ -911,6 +1000,7 @@ class CommandVectorDB:
             )
         )
         self.inserted_commands.add(full_command)
+        self._register_commands([full_command])
 
     def _increment_execute_count(self, full_command: str):
         command_id = self.command_doc_id(full_command)
@@ -944,6 +1034,7 @@ class CommandVectorDB:
                 )
             )
             self.inserted_commands.add(full_command)
+            self._register_commands([full_command])
         except Exception as exc:
             logger.error(f"Failed to increment execute_count for '{full_command}': {exc}")
 
@@ -1014,6 +1105,9 @@ class CommandVectorDB:
                 self.collection = None
                 self.feedback_collection = None
                 self.inserted_commands.clear()
+                self.command_cache.clear()
+                self.command_cache_by_exec.clear()
+                self._history_cache_warmed_for.clear()
 
             self.model = None
             gc.collect()

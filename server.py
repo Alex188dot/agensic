@@ -64,6 +64,7 @@ class Context(BaseModel):
     working_directory: str
     shell: str
     allow_ai: bool = True
+    trigger_source: str | None = None
 
 class IntentContext(BaseModel):
     intent_text: str
@@ -117,7 +118,12 @@ async def predict_completion(ctx: Context):
     )
     bootstrap = engine.get_bootstrap_status()
     
-    logger.info(f"Req: '{ctx.command_buffer}' -> Sug: {suggestions}")
+    source = (ctx.trigger_source or "unknown").strip() or "unknown"
+    non_empty_suggestions = [s for s in suggestions if s]
+    logger.info(
+        f"Req[{source}] allow_ai={ctx.allow_ai} used_ai={used_ai} "
+        f"suggestions={len(non_empty_suggestions)} buffer='{ctx.command_buffer}'"
+    )
     return {
         "suggestions": suggestions,
         "pool": pool,
