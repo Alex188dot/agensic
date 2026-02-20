@@ -110,13 +110,51 @@ Create `~/.ghostshell/config.json`:
 }
 ```
 
+LM Studio example:
+
+```json
+{
+  "provider": "lm_studio",
+  "model": "qwen3-8b",
+  "base_url": "http://localhost:1234/v1"
+}
+```
+
+Custom OpenAI-compatible endpoint example:
+
+```json
+{
+  "provider": "custom",
+  "model": "openai/my-model",
+  "api_key": "your-api-key-here",
+  "base_url": "https://your-endpoint.example.com/v1",
+  "headers": {
+    "X-Custom-Header": "value"
+  },
+  "timeout": 30,
+  "api_version": "2024-10-01-preview",
+  "extra_body": {
+    "reasoning_effort": "medium"
+  }
+}
+```
+
 ### Supported Providers
 
 - **OpenAI**
 - **Groq**
 - **Anthropic**
 - **Ollama**
+- **LM Studio**
+- **Custom (OpenAI-compatible endpoint)**
 - **Gemini**
+
+### Reasoning Controls
+
+- **Ollama**: GhostShell sets `think: false` on requests.
+- **Ollama**: Thinking traces (`<think>...</think>`) are stripped before parsing/displaying output.
+- **Ollama**: API key is optional in `aiterminal setup`.
+- **LM Studio**: GhostShell uses LM Studio REST (`/api/v1/chat`) with `reasoning: "off"`.
 
 ## Usage
 

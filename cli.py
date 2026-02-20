@@ -120,7 +120,7 @@ def setup():
 
     provider = questionary.select(
         "Select Provider:",
-        choices=["openai", "groq", "ollama", "lm_studio", "gemini", "anthropic", "azure"],
+        choices=["openai", "groq", "ollama", "lm_studio", "custom", "gemini", "anthropic", "azure"],
         pointer="👉"
     ).ask()
 
@@ -129,9 +129,11 @@ def setup():
     if provider == "groq": 
         default_model = "openai/gpt-oss-20b"  # Don't include groq/ prefix here
     elif provider == "ollama": 
-        default_model = "qwen3:8b"
+        default_model = "sam860/LFM2:1.2b"
     elif provider == "lm_studio": 
-        default_model = "local-model"
+        default_model = "qwen/qwen3-4b"
+    elif provider == "custom":
+        default_model = "your-custom-model-name
     elif provider == "gemini": 
         default_model = "gemini-3-flash-preview"
     elif provider == "anthropic": 
@@ -142,15 +144,70 @@ def setup():
     model = questionary.text("Enter Model Name:", default=default_model).ask()
 
     api_key = ""
-    if provider not in ["ollama", "lm_studio"]:
-        api_key = questionary.password("Enter API Key:").ask()
+    if provider == "lm_studio":
+        if questionary.confirm("Set an API key for LM Studio?").ask():
+            api_key = questionary.password("Enter API Key:").ask() or ""
+    elif provider == "ollama":
+        if questionary.confirm("Set an API key for Ollama?").ask():
+            api_key = questionary.password("Enter API Key:").ask() or ""
+    else:
+        api_key = questionary.password("Enter API Key (leave blank if not required):").ask() or ""
     
     base_url = ""
-    if provider in ["ollama", "lm_studio"]:
-        default_url = "http://localhost:11434" if provider == "ollama" else "http://localhost:1234"
+    if provider in ["ollama", "lm_studio", "custom"]:
+        if provider == "ollama":
+            default_url = "http://localhost:11434"
+        elif provider == "lm_studio":
+            default_url = "http://localhost:1234/v1"
+        else:
+            default_url = "https://api.openai.com/v1"
         base_url = questionary.text("Enter Base URL:", default=default_url).ask()
 
     config = {"provider": provider, "model": model, "api_key": api_key, "base_url": base_url}
+    if provider == "custom":
+        headers_raw = questionary.text(
+            "Optional headers as JSON (e.g. {\"X-API-Key\": \"...\"}):",
+            default="",
+        ).ask() or ""
+        if headers_raw.strip():
+            try:
+                parsed_headers = json.loads(headers_raw)
+                if isinstance(parsed_headers, dict):
+                    config["headers"] = parsed_headers
+                else:
+                    console.print("[yellow]Ignoring headers: JSON must be an object.[/yellow]")
+            except json.JSONDecodeError:
+                console.print("[yellow]Ignoring headers: invalid JSON.[/yellow]")
+
+        timeout_raw = questionary.text("Optional timeout in seconds:", default="").ask() or ""
+        if timeout_raw.strip():
+            try:
+                timeout_value = float(timeout_raw)
+                if timeout_value > 0:
+                    config["timeout"] = timeout_value
+                else:
+                    console.print("[yellow]Ignoring timeout: must be > 0.[/yellow]")
+            except ValueError:
+                console.print("[yellow]Ignoring timeout: invalid number.[/yellow]")
+
+        api_version = questionary.text("Optional API version:", default="").ask() or ""
+        if api_version.strip():
+            config["api_version"] = api_version.strip()
+
+        extra_body_raw = questionary.text(
+            "Optional extra body as JSON:",
+            default="",
+        ).ask() or ""
+        if extra_body_raw.strip():
+            try:
+                parsed_body = json.loads(extra_body_raw)
+                if isinstance(parsed_body, dict):
+                    config["extra_body"] = parsed_body
+                else:
+                    console.print("[yellow]Ignoring extra_body: JSON must be an object.[/yellow]")
+            except json.JSONDecodeError:
+                console.print("[yellow]Ignoring extra_body: invalid JSON.[/yellow]")
+
     with open(CONFIG_FILE, "w") as f: json.dump(config, f, indent=4)
     console.print("[green]✓ Configuration saved![/green]")
     console.print(f"[dim]Provider: {provider}, Model: {model}[/dim]")

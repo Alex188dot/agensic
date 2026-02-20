@@ -5,8 +5,10 @@ import re
 import shutil
 import threading
 import platform
+import asyncio
 from pathlib import Path
 from litellm import acompletion
+import requests
 from privacy_guard import PrivacyGuard, PrivacyGuardError
 
 logger = logging.getLogger("ghostshell.engine")
@@ -324,6 +326,240 @@ class SuggestionEngine:
             sanitized[key] = clean_value[:200]
         return sanitized
 
+    @staticmethod
+    def _parse_optional_dict(value: object, field_name: str) -> dict | None:
+        if value is None:
+            return None
+        if isinstance(value, dict):
+            return value
+        if isinstance(value, str):
+            stripped = value.strip()
+            if not stripped:
+                return None
+            try:
+                parsed = json.loads(stripped)
+            except Exception:
+                logger.warning("Ignoring invalid JSON for %s", field_name)
+                return None
+            if isinstance(parsed, dict):
+                return parsed
+        logger.warning("Ignoring non-dict value for %s", field_name)
+        return None
+
+    @staticmethod
+    def _parse_optional_float(value: object, field_name: str) -> float | None:
+        if value is None:
+            return None
+        try:
+            return float(value)
+        except (TypeError, ValueError):
+            logger.warning("Ignoring invalid numeric value for %s", field_name)
+            return None
+
+    @staticmethod
+    def _strip_thinking_artifacts(raw: str) -> str:
+        text = str(raw or "")
+        closing_tag_matches = list(re.finditer(r"</think\s*>", text, flags=re.IGNORECASE))
+        if closing_tag_matches:
+            text = text[closing_tag_matches[-1].end():]
+        text = re.sub(r"<think\b[^>]*>.*?</think\s*>", "", text, flags=re.IGNORECASE | re.DOTALL)
+        text = re.sub(r"</?think\b[^>]*>", "", text, flags=re.IGNORECASE)
+        return text.strip()
+
+    def _build_llm_kwargs(
+        self,
+        config: dict,
+        messages: list[dict],
+        temperature: float,
+        include_json_response_format: bool = False,
+    ) -> dict:
+        provider = str(config.get("provider", "openai") or "openai").strip().lower()
+        model = str(config.get("model", "gpt-5-mini") or "gpt-5-mini").strip()
+        api_key = config.get("api_key", None)
+        base_url = config.get("base_url", None)
+
+        if provider == "groq":
+            if not model.startswith("groq/") and not model.startswith("groq/openai/"):
+                model = f"groq/{model}"
+        elif provider == "ollama":
+            if not model.startswith("ollama/"):
+                model = f"ollama/{model}"
+            if not base_url:
+                base_url = "http://localhost:11434"
+        elif provider == "lm_studio":
+            if not model.startswith("lm_studio/"):
+                model = f"lm_studio/{model}"
+            if not base_url:
+                base_url = "http://localhost:1234/v1"
+        elif provider == "anthropic":
+            if not model.startswith("claude"):
+                model = "claude-3-5-sonnet-20241022"
+        elif provider == "gemini":
+            if not model.startswith("gemini/"):
+                model = f"gemini/{model}"
+        elif provider == "custom":
+            # OpenAI-compatible custom endpoints typically use openai/<model>.
+            if "/" not in model:
+                model = f"openai/{model}"
+
+        kwargs = {
+            "model": model,
+            "messages": messages,
+            "temperature": temperature,
+        }
+        if include_json_response_format:
+            kwargs["response_format"] = {"type": "json_object"}
+
+        if api_key:
+            if provider == "groq":
+                os.environ["GROQ_API_KEY"] = str(api_key)
+            elif provider == "openai":
+                os.environ["OPENAI_API_KEY"] = str(api_key)
+            elif provider == "anthropic":
+                os.environ["ANTHROPIC_API_KEY"] = str(api_key)
+            elif provider == "gemini":
+                os.environ["GEMINI_API_KEY"] = str(api_key)
+            else:
+                kwargs["api_key"] = api_key
+
+        if base_url:
+            kwargs["api_base"] = str(base_url).strip()
+
+        headers = self._parse_optional_dict(config.get("headers"), "headers")
+        if headers:
+            kwargs["headers"] = headers
+
+        extra_body = self._parse_optional_dict(config.get("extra_body"), "extra_body")
+        if extra_body:
+            kwargs["extra_body"] = extra_body
+
+        timeout = self._parse_optional_float(config.get("timeout"), "timeout")
+        if timeout is not None and timeout > 0:
+            kwargs["timeout"] = timeout
+
+        api_version = config.get("api_version", None)
+        if api_version:
+            kwargs["api_version"] = str(api_version).strip()
+
+        if provider == "ollama":
+            kwargs["think"] = False
+
+        return kwargs
+
+    @staticmethod
+    def _is_provider(config: dict, provider_name: str) -> bool:
+        return str(config.get("provider", "openai") or "openai").strip().lower() == provider_name
+
+    def _build_lm_studio_rest_endpoint(self, config: dict) -> str:
+        base_url = str(config.get("base_url", "") or "").strip()
+        if not base_url:
+            return "http://localhost:1234/api/v1/chat"
+
+        normalized = base_url.rstrip("/")
+        for suffix in ("/v1/chat/completions", "/v1/responses", "/api/v1/chat", "/api/v1", "/v1"):
+            if normalized.endswith(suffix):
+                normalized = normalized[: -len(suffix)]
+                break
+        return f"{normalized}/api/v1/chat"
+
+    async def _privacy_checked_lm_studio_chat(
+        self,
+        config: dict,
+        messages: list[dict],
+        temperature: float,
+        request_type: str,
+    ) -> tuple[str, dict[str, object]]:
+        sanitized_messages, redactions, flags = self._sanitize_messages_with_stats(messages)
+        try:
+            for msg in sanitized_messages:
+                if isinstance(msg, dict):
+                    content = msg.get("content")
+                    if isinstance(content, str):
+                        self.privacy_guard.assert_safe_or_raise(content)
+        except Exception as exc:
+            raise PrivacyGuardError(f"Sanitization failed for {request_type}") from exc
+
+        system_prompt = ""
+        text_inputs: list[str] = []
+        for msg in sanitized_messages:
+            if not isinstance(msg, dict):
+                continue
+            role = str(msg.get("role", "")).strip().lower()
+            content = msg.get("content")
+            if not isinstance(content, str):
+                continue
+            if role == "system":
+                if system_prompt:
+                    system_prompt = f"{system_prompt}\n{content}"
+                else:
+                    system_prompt = content
+            elif role in {"user", "assistant"}:
+                text_inputs.append(content)
+
+        model = str(config.get("model", "local-model") or "local-model").strip()
+        if model.startswith("lm_studio/"):
+            model = model.split("/", 1)[1]
+
+        payload: dict[str, object] = {
+            "model": model,
+            "input": "\n".join(text_inputs).strip() if text_inputs else "",
+            "temperature": temperature,
+            "stream": False,
+            "reasoning": "off",
+        }
+        if system_prompt:
+            payload["system_prompt"] = system_prompt
+
+        headers = {"Content-Type": "application/json"}
+        api_key = str(config.get("api_key", "") or "").strip()
+        if api_key:
+            headers["Authorization"] = f"Bearer {api_key}"
+
+        extra_headers = self._parse_optional_dict(config.get("headers"), "headers")
+        if extra_headers:
+            for key, value in extra_headers.items():
+                headers[str(key)] = str(value)
+
+        timeout = self._parse_optional_float(config.get("timeout"), "timeout")
+        request_timeout = timeout if timeout is not None and timeout > 0 else 60.0
+        endpoint = self._build_lm_studio_rest_endpoint(config)
+
+        def _do_request() -> requests.Response:
+            return requests.post(endpoint, headers=headers, json=payload, timeout=request_timeout)
+
+        response = await asyncio.to_thread(_do_request)
+        try:
+            response.raise_for_status()
+        except requests.RequestException as exc:
+            error_text = self.privacy_guard.sanitize_for_log(response.text[:400])
+            raise Exception(f"LM Studio REST error: {error_text}") from exc
+
+        try:
+            data = response.json()
+        except ValueError as exc:
+            text = self.privacy_guard.sanitize_for_log(response.text[:400])
+            raise Exception(f"LM Studio REST returned non-JSON response: {text}") from exc
+
+        output = data.get("output", [])
+        content_parts: list[str] = []
+        if isinstance(output, list):
+            for item in output:
+                if not isinstance(item, dict):
+                    continue
+                if item.get("type") == "message" and isinstance(item.get("content"), str):
+                    content_parts.append(item["content"])
+        content = "\n".join([part for part in content_parts if part]).strip()
+
+        # Fallbacks in case the server returns an OpenAI-like shape.
+        if not content and isinstance(data.get("choices"), list) and data["choices"]:
+            first = data["choices"][0]
+            if isinstance(first, dict) and isinstance(first.get("message"), dict):
+                maybe = first["message"].get("content")
+                if isinstance(maybe, str):
+                    content = maybe.strip()
+
+        return content, {"redactions": redactions, "flags": flags}
+
     def _sanitize_messages_with_stats(self, messages: list[dict]) -> tuple[list[dict], int, list[str]]:
         sanitized_messages = self.privacy_guard.sanitize_messages(messages)
         total_redactions = 0
@@ -436,11 +672,6 @@ class SuggestionEngine:
 
         logger.info("No vector matches found, invoking AI for new command")
 
-        model = config.get("model", "gpt-5-mini")
-        provider = config.get("provider", "openai")
-        api_key = config.get("api_key", None)
-        base_url = config.get("base_url", None)
-
         context_str = self.build_prompt_context(ctx)
         buffer_for_prompt = self.privacy_guard.sanitize_text(ctx.buffer, context="prompt_buffer").text
 
@@ -454,58 +685,43 @@ class SuggestionEngine:
             f"\n--- CONTEXT ---\n{context_str}"
         )
 
-        # Provider specific adjustments
-        if provider == "groq":
-            if not model.startswith("groq/") and not model.startswith("groq/openai/"):
-                model = f"groq/{model}"
-        elif provider == "ollama":
-            if not model.startswith("ollama/"):
-                model = f"ollama/{model}"
-            if not base_url:
-                base_url = "http://localhost:11434"
-        elif provider == "anthropic":
-            if not model.startswith("claude"):
-                model = "claude-3-5-sonnet-20241022"
-        elif provider == "gemini":
-            if not model.startswith("gemini/"):
-                model = f"gemini/{model}"
-
         suggestions = ["", "", ""]
         privacy_blocked = False
 
         try:
-            model_for_temp = model.split("/")[-1]
+            raw_model = str(config.get("model", "gpt-5-mini") or "gpt-5-mini")
+            model_for_temp = raw_model.split("/")[-1]
             temperature = 1 if model_for_temp.startswith("gpt-5") else 0.3
-            kwargs = {
-                "model": model,
-                "messages": [
-                    {"role": "system", "content": system_prompt},
-                    {"role": "user", "content": f"Buffer: {buffer_for_prompt}"}
-                ],
-                "temperature": temperature,
-                "response_format": {"type": "json_object"},
-            }
-
-            if api_key:
-                if provider == "groq": os.environ["GROQ_API_KEY"] = api_key
-                elif provider == "openai": os.environ["OPENAI_API_KEY"] = api_key
-                elif provider == "anthropic": os.environ["ANTHROPIC_API_KEY"] = api_key
-                elif provider == "gemini": os.environ["GEMINI_API_KEY"] = api_key
-                else: kwargs["api_key"] = api_key
-            
-            if base_url: kwargs["api_base"] = base_url
-
-            response, privacy_meta = await self._privacy_checked_acompletion(
-                kwargs,
-                request_type="suggestions",
-            )
+            request_messages = [
+                {"role": "system", "content": system_prompt},
+                {"role": "user", "content": f"Buffer: {buffer_for_prompt}"},
+            ]
+            if self._is_provider(config, "lm_studio"):
+                raw, privacy_meta = await self._privacy_checked_lm_studio_chat(
+                    config,
+                    request_messages,
+                    temperature=temperature,
+                    request_type="suggestions",
+                )
+            else:
+                kwargs = self._build_llm_kwargs(
+                    config,
+                    request_messages,
+                    temperature=temperature,
+                    include_json_response_format=True,
+                )
+                response, privacy_meta = await self._privacy_checked_acompletion(
+                    kwargs,
+                    request_type="suggestions",
+                )
+                raw = (response.choices[0].message.content or "").strip()
+            if self._is_provider(config, "ollama"):
+                raw = self._strip_thinking_artifacts(raw)
             logger.info(
                 "LLM request [suggestions] sanitized redactions=%s flags=%s",
                 privacy_meta.get("redactions", 0),
                 ",".join(privacy_meta.get("flags", [])),
             )
-
-            raw = (response.choices[0].message.content or "").strip()
             
             # Parsing logic
             parsed = None
@@ -599,10 +815,6 @@ class SuggestionEngine:
             f"User request:\n{safe_user_text}"
         )
 
-        model = config.get("model", "gpt-5-mini")
-        provider = config.get("provider", "openai")
-        api_key = config.get("api_key", None)
-        base_url = config.get("base_url", None)
         result = {
             "status": "refusal",
             "primary_command": "",
@@ -611,56 +823,37 @@ class SuggestionEngine:
             "copy_block": "",
         }
 
-        if provider == "groq":
-            if not model.startswith("groq/") and not model.startswith("groq/openai/"):
-                model = f"groq/{model}"
-        elif provider == "ollama":
-            if not model.startswith("ollama/"):
-                model = f"ollama/{model}"
-            if not base_url:
-                base_url = "http://localhost:11434"
-        elif provider == "anthropic":
-            if not model.startswith("claude"):
-                model = "claude-3-5-sonnet-20241022"
-        elif provider == "gemini":
-            if not model.startswith("gemini/"):
-                model = f"gemini/{model}"
-
         try:
-            kwargs = {
-                "model": model,
-                "messages": [
-                    {"role": "system", "content": system_prompt},
-                    {"role": "user", "content": user_prompt},
-                ],
-                "temperature": 0.2,
-                "response_format": {"type": "json_object"},
-            }
-            if api_key:
-                if provider == "groq":
-                    os.environ["GROQ_API_KEY"] = api_key
-                elif provider == "openai":
-                    os.environ["OPENAI_API_KEY"] = api_key
-                elif provider == "anthropic":
-                    os.environ["ANTHROPIC_API_KEY"] = api_key
-                elif provider == "gemini":
-                    os.environ["GEMINI_API_KEY"] = api_key
-                else:
-                    kwargs["api_key"] = api_key
-            if base_url:
-                kwargs["api_base"] = base_url
-
-            response, privacy_meta = await self._privacy_checked_acompletion(
-                kwargs,
-                request_type="intent",
-            )
+            request_messages = [
+                {"role": "system", "content": system_prompt},
+                {"role": "user", "content": user_prompt},
+            ]
+            if self._is_provider(config, "lm_studio"):
+                raw, privacy_meta = await self._privacy_checked_lm_studio_chat(
+                    config,
+                    request_messages,
+                    temperature=0.2,
+                    request_type="intent",
+                )
+            else:
+                kwargs = self._build_llm_kwargs(
+                    config,
+                    request_messages,
+                    temperature=0.2,
+                    include_json_response_format=True,
+                )
+                response, privacy_meta = await self._privacy_checked_acompletion(
+                    kwargs,
+                    request_type="intent",
+                )
+                raw = (response.choices[0].message.content or "").strip()
+            if self._is_provider(config, "ollama"):
+                raw = self._strip_thinking_artifacts(raw)
             logger.info(
                 "LLM request [intent] sanitized redactions=%s flags=%s",
                 privacy_meta.get("redactions", 0),
                 ",".join(privacy_meta.get("flags", [])),
             )
-
-            raw = (response.choices[0].message.content or "").strip()
             parsed = self._parse_json_payload(raw)
             if not parsed:
                 return result
@@ -749,59 +942,36 @@ class SuggestionEngine:
             f"User request:\n{safe_text}"
         )
 
-        model = config.get("model", "gpt-5-mini")
-        provider = config.get("provider", "openai")
-        api_key = config.get("api_key", None)
-        base_url = config.get("base_url", None)
-
-        if provider == "groq":
-            if not model.startswith("groq/") and not model.startswith("groq/openai/"):
-                model = f"groq/{model}"
-        elif provider == "ollama":
-            if not model.startswith("ollama/"):
-                model = f"ollama/{model}"
-            if not base_url:
-                base_url = "http://localhost:11434"
-        elif provider == "anthropic":
-            if not model.startswith("claude"):
-                model = "claude-3-5-sonnet-20241022"
-        elif provider == "gemini":
-            if not model.startswith("gemini/"):
-                model = f"gemini/{model}"
-
         try:
-            kwargs = {
-                "model": model,
-                "messages": [
-                    {"role": "system", "content": "You are a helpful assistant."},
-                    {"role": "user", "content": user_prompt},
-                ],
-                "temperature": 0.7,
-            }
-            if api_key:
-                if provider == "groq":
-                    os.environ["GROQ_API_KEY"] = api_key
-                elif provider == "openai":
-                    os.environ["OPENAI_API_KEY"] = api_key
-                elif provider == "anthropic":
-                    os.environ["ANTHROPIC_API_KEY"] = api_key
-                elif provider == "gemini":
-                    os.environ["GEMINI_API_KEY"] = api_key
-                else:
-                    kwargs["api_key"] = api_key
-            if base_url:
-                kwargs["api_base"] = base_url
-
-            response, privacy_meta = await self._privacy_checked_acompletion(
-                kwargs,
-                request_type="assist",
-            )
+            request_messages = [
+                {"role": "system", "content": "You are a helpful assistant."},
+                {"role": "user", "content": user_prompt},
+            ]
+            if self._is_provider(config, "lm_studio"):
+                content, privacy_meta = await self._privacy_checked_lm_studio_chat(
+                    config,
+                    request_messages,
+                    temperature=0.7,
+                    request_type="assist",
+                )
+            else:
+                kwargs = self._build_llm_kwargs(
+                    config,
+                    request_messages,
+                    temperature=0.7,
+                )
+                response, privacy_meta = await self._privacy_checked_acompletion(
+                    kwargs,
+                    request_type="assist",
+                )
+                content = (response.choices[0].message.content or "").strip()
+            if self._is_provider(config, "ollama"):
+                content = self._strip_thinking_artifacts(content)
             logger.info(
                 "LLM request [assist] sanitized redactions=%s flags=%s",
                 privacy_meta.get("redactions", 0),
                 ",".join(privacy_meta.get("flags", [])),
             )
-            content = (response.choices[0].message.content or "").strip()
             return content or "I couldn't generate a response."
         except PrivacyGuardError as e:
             logger.warning(
