@@ -8,7 +8,7 @@ An intelligent terminal autocomplete powered by vector databases and AI.
 - 🎨 **Ghost Text**: Subtle gray text shows completions
 - 🔄 **Cycle Options**: Ctrl+P/N to cycle through suggestions
 - 📊 **Pool Management**: Keeps up to 20 suggestions in memory for current buffer
-- 🤖 **AI Fallback**: Uses LLM only for unknown command segments with auto fetch on `Space`
+- 🤖 **AI Fallback**: Uses LLM only when vectors return no suggestions
 - 🧮 **LLM Budgeting**: Max 4 auto AI calls per command line
 
 ## Vector DB
@@ -27,8 +27,10 @@ GhostShell uses a **vector database** (`zvec`) to store command history and retr
 2. **Vector DB first** → top semantic matches are loaded from history
 3. **Keep typing** → current suggestion pool is filtered locally
 4. **Press `Space`** → fetches the next-segment pool using the updated buffer
-5. **No vector match** → AI fallback is used automatically
-6. **Press `Ctrl+Space`** → explicitly request an AI suggestion
+5. **Prefix miss** → vector top candidates are re-ranked with RapidFuzz
+6. **Typo recovery** (e.g. `dokcer`) → RapidFuzz can trigger `Maybe you meant: ...`
+7. **No vector suggestions at all** → AI fallback is used automatically
+8. **Press `Ctrl+Space`** → explicitly request an AI suggestion
 
 ### Example Flow
 
@@ -65,6 +67,7 @@ This will install:
 - `zvec` - Vector database
 - `sentence-transformers` - For embeddings
 - `torch` - ML framework
+- `rapidfuzz` - Fast typo + command similarity reranking
 - `fastapi`, `uvicorn` - Server
 - `litellm` - Multi-provider AI support
 
@@ -106,9 +109,28 @@ Create `~/.ghostshell/config.json`:
 {
   "provider": "openai",
   "model": "gpt-4o-mini",
-  "api_key": "your-api-key-here"
+  "api_key": "your-api-key-here",
+  "disabled_command_patterns": ["ros2", "kubectl"]
 }
 ```
+
+`disabled_command_patterns` is optional. When set, GhostShell is fully suppressed for matching command families (including in-progress prefixes like `ro` for `ros2`).
+
+### Setup Menu
+
+Run:
+
+```bash
+aiterminal setup
+```
+
+First screen:
+- `Manage GhostShell command patterns`
+- `Choose AI provider`
+
+Pattern controls:
+- `Disable GhostShell for a specific pattern`
+- `Re-enable GhostShell for a specific pattern`
 
 LM Studio example:
 
@@ -219,8 +241,28 @@ GhostShell prints a normal text explanation in the terminal.
 1. **Vector DB First**: Searches your history for similar commands
 2. **Space Triggering**: Auto requests only on `Space`
 3. **Real-time Filtering**: As you type, filters the 20 suggestions
-4. **AI Fallback**: Only invoked when no history matches exist
-5. **Per-Command Budget**: At most 4 automatic AI fallbacks; use `Ctrl+Space` for manual fetch after cap
+4. **Retrieve & Re-rank**: Prefix miss uses vector top-N recall, then RapidFuzz reranking
+5. **Typo Recovery**: RapidFuzz executable similarity enables `Maybe you meant` replacement
+6. **AI Fallback**: Only invoked when vectors return no suggestions
+7. **Per-Command Budget**: At most 4 automatic AI fallbacks; use `Ctrl+Space` for manual fetch after cap
+
+When typo recovery is active, the first ghost suggestion is shown as:
+
+```text
+Maybe you meant:  docker start 7b567d2835e3
+```
+
+Pressing `Tab` accepts the full command and replaces the full line, except in native-completion contexts where GhostShell intentionally does not steal `Tab`:
+- path-heavy commands (`cd`, `ls`, `cat`, `vim`, etc.)
+- script/file argument contexts (`python script.py`, `node app.js`, `bash foo.sh`)
+- tokens that look like paths/files (`/`, `./`, `../`, `~`, or extension-like tokens such as `.py`, `.sh`, `.json`)
+
+Semantic intent examples (same executable scope):
+
+```text
+aiterminal records  ->  aiterminal logs
+aiterminal halt     ->  aiterminal stop
+```
 
 This means:
 - ✅ Most suggestions are instant (from vector DB)

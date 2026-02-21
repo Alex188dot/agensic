@@ -7,6 +7,7 @@ import requests
 import questionary
 import socket
 import signal
+import shlex
 from rich.console import Console
 from rich.panel import Panel
 
@@ -21,6 +22,290 @@ PLIST_PATH = os.path.expanduser("~/Library/LaunchAgents/com.ghostshell.daemon.pl
 
 def ensure_config_dir():
     if not os.path.exists(CONFIG_DIR): os.makedirs(CONFIG_DIR)
+
+def _load_config() -> dict:
+    if not os.path.exists(CONFIG_FILE):
+        return {}
+    try:
+        with open(CONFIG_FILE, "r", encoding="utf-8") as f:
+            payload = json.load(f)
+        if isinstance(payload, dict):
+            return payload
+    except Exception:
+        pass
+    return {}
+
+def _save_config(config: dict):
+    with open(CONFIG_FILE, "w", encoding="utf-8") as f:
+        json.dump(config, f, indent=4)
+
+def _normalize_command_pattern(raw: str) -> str:
+    value = str(raw or "").strip()
+    if not value:
+        return ""
+    try:
+        tokens = shlex.split(value, posix=True)
+    except Exception:
+        tokens = value.split()
+    if not tokens:
+        return ""
+    token = os.path.basename(tokens[0]).strip().lower()
+    return token
+
+def _extract_executable_token(command: str) -> str:
+    raw = str(command or "").strip()
+    if not raw:
+        return ""
+    try:
+        tokens = shlex.split(raw, posix=True)
+    except Exception:
+        tokens = raw.split()
+    if not tokens:
+        return ""
+
+    i = 0
+    n = len(tokens)
+    while i < n:
+        token = (tokens[i] or "").strip()
+        if not token:
+            i += 1
+            continue
+        if token in {"sudo", "command"}:
+            i += 1
+            continue
+        if token in {"env", "/usr/bin/env"}:
+            i += 1
+            while i < n:
+                env_token = (tokens[i] or "").strip()
+                if not env_token or env_token.startswith("-") or ("=" in env_token and not env_token.startswith("=")):
+                    i += 1
+                    continue
+                break
+            continue
+        if token.startswith("-"):
+            i += 1
+            continue
+        if "=" in token and not token.startswith("="):
+            i += 1
+            continue
+        return os.path.basename(token).strip().lower()
+    return ""
+
+def _command_matches_disabled_patterns(command: str, patterns: list[str]) -> bool:
+    exe = _extract_executable_token(command)
+    if not exe:
+        return False
+    for pattern in patterns:
+        if exe.startswith(pattern) or pattern.startswith(exe):
+            return True
+    return False
+
+def _sanitize_disabled_patterns(values) -> list[str]:
+    if not isinstance(values, list):
+        return []
+    clean: list[str] = []
+    seen: set[str] = set()
+    for value in values:
+        normalized = _normalize_command_pattern(str(value))
+        if not normalized or normalized in seen:
+            continue
+        seen.add(normalized)
+        clean.append(normalized)
+    return clean
+
+def _get_disabled_patterns(config: dict) -> list[str]:
+    return _sanitize_disabled_patterns(config.get("disabled_command_patterns", []))
+
+def _with_disabled_patterns(config: dict, patterns: list[str]) -> dict:
+    updated = dict(config or {})
+    updated["disabled_command_patterns"] = _sanitize_disabled_patterns(patterns)
+    return updated
+
+def _disable_pattern_in_config(config: dict, raw_pattern: str) -> tuple[dict, str, bool]:
+    normalized = _normalize_command_pattern(raw_pattern)
+    if not normalized:
+        return (dict(config or {}), "", False)
+
+    patterns = _get_disabled_patterns(config)
+    changed = normalized not in patterns
+    if changed:
+        patterns.append(normalized)
+    return (_with_disabled_patterns(config, patterns), normalized, changed)
+
+def _enable_pattern_in_config(config: dict, raw_pattern: str) -> tuple[dict, bool]:
+    normalized = _normalize_command_pattern(raw_pattern)
+    patterns = _get_disabled_patterns(config)
+    filtered = [pattern for pattern in patterns if pattern != normalized]
+    changed = len(filtered) != len(patterns)
+    return (_with_disabled_patterns(config, filtered), changed)
+
+def _default_model_for_provider(provider: str) -> str:
+    if provider == "groq":
+        return "openai/gpt-oss-20b"
+    if provider == "ollama":
+        return "sam860/LFM2:1.2b"
+    if provider == "lm_studio":
+        return "qwen/qwen3-4b"
+    if provider == "custom":
+        return "your-custom-model-name"
+    if provider == "gemini":
+        return "gemini-3-flash-preview"
+    if provider == "anthropic":
+        return "claude-3-7-sonnet-20250219"
+    if provider == "azure":
+        return "gpt-5-mini"
+    return "gpt-5-mini"
+
+def _manage_pattern_controls(existing_config: dict):
+    patterns = _get_disabled_patterns(existing_config)
+    action = questionary.select(
+        "Pattern controls:",
+        choices=[
+            "Disable GhostShell for a specific pattern",
+            "Re-enable GhostShell for a specific pattern",
+        ],
+        pointer="👉",
+    ).ask()
+    if not action:
+        return
+
+    if action.startswith("Disable"):
+        raw_pattern = questionary.text(
+            "Enter pattern (command family) to disable, e.g. docker:"
+        ).ask() or ""
+        updated, normalized, changed = _disable_pattern_in_config(existing_config, raw_pattern)
+        if not normalized:
+            console.print("[yellow]No valid pattern provided. Nothing changed.[/yellow]")
+            return
+        _save_config(updated)
+        if changed:
+            console.print(f"[green]✓ Disabled GhostShell for '{normalized}'.[/green]")
+        else:
+            console.print(f"[yellow]Pattern '{normalized}' was already disabled.[/yellow]")
+        return
+
+    if not patterns:
+        console.print("[yellow]No disabled patterns found. Nothing to re-enable.[/yellow]")
+        return
+
+    selected = questionary.select(
+        "Select a pattern to re-enable:",
+        choices=patterns,
+        pointer="👉",
+    ).ask()
+    if not selected:
+        return
+    updated, changed = _enable_pattern_in_config(existing_config, selected)
+    if not changed:
+        console.print("[yellow]Pattern not found. Nothing changed.[/yellow]")
+        return
+    _save_config(updated)
+    console.print(f"[green]✓ Re-enabled GhostShell for '{selected}'.[/green]")
+
+def _configure_provider(existing_config: dict):
+    provider = questionary.select(
+        "Select Provider:",
+        choices=["openai", "groq", "ollama", "lm_studio", "custom", "gemini", "anthropic", "azure"],
+        pointer="👉",
+    ).ask()
+    if not provider:
+        return
+
+    model = questionary.text(
+        "Enter Model Name:",
+        default=_default_model_for_provider(provider),
+    ).ask()
+    if not model:
+        return
+
+    api_key = ""
+    if provider == "lm_studio":
+        if questionary.confirm("Set an API key for LM Studio?").ask():
+            api_key = questionary.password("Enter API Key:").ask() or ""
+    elif provider == "ollama":
+        if questionary.confirm("Set an API key for Ollama?").ask():
+            api_key = questionary.password("Enter API Key:").ask() or ""
+    else:
+        api_key = questionary.password("Enter API Key (leave blank if not required):").ask() or ""
+
+    base_url = ""
+    if provider in ["ollama", "lm_studio", "custom"]:
+        if provider == "ollama":
+            default_url = "http://localhost:11434"
+        elif provider == "lm_studio":
+            default_url = "http://localhost:1234/v1"
+        else:
+            default_url = "https://api.openai.com/v1"
+        base_url = questionary.text("Enter Base URL:", default=default_url).ask() or ""
+
+    config = dict(existing_config or {})
+    config["provider"] = provider
+    config["model"] = model
+    config["api_key"] = api_key
+    config["base_url"] = base_url
+    if "disabled_command_patterns" in existing_config:
+        config["disabled_command_patterns"] = _get_disabled_patterns(existing_config)
+
+    if provider == "custom":
+        headers_raw = questionary.text(
+            "Optional headers as JSON (e.g. {\"X-API-Key\": \"...\"}):",
+            default="",
+        ).ask() or ""
+        if headers_raw.strip():
+            try:
+                parsed_headers = json.loads(headers_raw)
+                if isinstance(parsed_headers, dict):
+                    config["headers"] = parsed_headers
+                else:
+                    console.print("[yellow]Ignoring headers: JSON must be an object.[/yellow]")
+            except json.JSONDecodeError:
+                console.print("[yellow]Ignoring headers: invalid JSON.[/yellow]")
+
+        timeout_raw = questionary.text("Optional timeout in seconds:", default="").ask() or ""
+        if timeout_raw.strip():
+            try:
+                timeout_value = float(timeout_raw)
+                if timeout_value > 0:
+                    config["timeout"] = timeout_value
+                else:
+                    console.print("[yellow]Ignoring timeout: must be > 0.[/yellow]")
+            except ValueError:
+                console.print("[yellow]Ignoring timeout: invalid number.[/yellow]")
+
+        api_version = questionary.text("Optional API version:", default="").ask() or ""
+        if api_version.strip():
+            config["api_version"] = api_version.strip()
+
+        extra_body_raw = questionary.text(
+            "Optional extra body as JSON:",
+            default="",
+        ).ask() or ""
+        if extra_body_raw.strip():
+            try:
+                parsed_body = json.loads(extra_body_raw)
+                if isinstance(parsed_body, dict):
+                    config["extra_body"] = parsed_body
+                else:
+                    console.print("[yellow]Ignoring extra_body: JSON must be an object.[/yellow]")
+            except json.JSONDecodeError:
+                console.print("[yellow]Ignoring extra_body: invalid JSON.[/yellow]")
+    else:
+        config.pop("headers", None)
+        config.pop("timeout", None)
+        config.pop("api_version", None)
+        config.pop("extra_body", None)
+
+    _save_config(config)
+    console.print("[green]✓ Configuration saved![/green]")
+    console.print(f"[dim]Provider: {provider}, Model: {model}[/dim]")
+
+    start_enabled = False
+    if questionary.confirm("Enable start on boot (Recommended)?").ask():
+        enable_startup()
+        start_enabled = True
+
+    if not start_enabled and questionary.confirm("Start daemon now?").ask():
+        start()
 
 def is_port_open(host: str = "127.0.0.1", port: int = 22000) -> bool:
     """Return True if something is already listening on host:port."""
@@ -117,109 +402,21 @@ def _wait_for_bootstrap_ready(timeout_seconds: float = 20.0) -> tuple[bool, int]
 def setup():
     ensure_config_dir()
     console.print(Panel.fit("[bold cyan]GhostShell Configuration[/bold cyan]"))
-
-    provider = questionary.select(
-        "Select Provider:",
-        choices=["openai", "groq", "ollama", "lm_studio", "custom", "gemini", "anthropic", "azure"],
-        pointer="👉"
+    existing_config = _load_config()
+    action = questionary.select(
+        "Choose one:",
+        choices=[
+            "Manage GhostShell command patterns",
+            "Choose AI provider",
+        ],
+        pointer="👉",
     ).ask()
-
-    # Set proper default models for each provider
-    default_model = "gpt-5-mini"
-    if provider == "groq": 
-        default_model = "openai/gpt-oss-20b"  # Don't include groq/ prefix here
-    elif provider == "ollama": 
-        default_model = "sam860/LFM2:1.2b"
-    elif provider == "lm_studio": 
-        default_model = "qwen/qwen3-4b"
-    elif provider == "custom":
-        default_model = "your-custom-model-name
-    elif provider == "gemini": 
-        default_model = "gemini-3-flash-preview"
-    elif provider == "anthropic": 
-        default_model = "claude-3-7-sonnet-20250219"
-    elif provider == "azure": 
-        default_model = "gpt-5-mini"
-    
-    model = questionary.text("Enter Model Name:", default=default_model).ask()
-
-    api_key = ""
-    if provider == "lm_studio":
-        if questionary.confirm("Set an API key for LM Studio?").ask():
-            api_key = questionary.password("Enter API Key:").ask() or ""
-    elif provider == "ollama":
-        if questionary.confirm("Set an API key for Ollama?").ask():
-            api_key = questionary.password("Enter API Key:").ask() or ""
-    else:
-        api_key = questionary.password("Enter API Key (leave blank if not required):").ask() or ""
-    
-    base_url = ""
-    if provider in ["ollama", "lm_studio", "custom"]:
-        if provider == "ollama":
-            default_url = "http://localhost:11434"
-        elif provider == "lm_studio":
-            default_url = "http://localhost:1234/v1"
-        else:
-            default_url = "https://api.openai.com/v1"
-        base_url = questionary.text("Enter Base URL:", default=default_url).ask()
-
-    config = {"provider": provider, "model": model, "api_key": api_key, "base_url": base_url}
-    if provider == "custom":
-        headers_raw = questionary.text(
-            "Optional headers as JSON (e.g. {\"X-API-Key\": \"...\"}):",
-            default="",
-        ).ask() or ""
-        if headers_raw.strip():
-            try:
-                parsed_headers = json.loads(headers_raw)
-                if isinstance(parsed_headers, dict):
-                    config["headers"] = parsed_headers
-                else:
-                    console.print("[yellow]Ignoring headers: JSON must be an object.[/yellow]")
-            except json.JSONDecodeError:
-                console.print("[yellow]Ignoring headers: invalid JSON.[/yellow]")
-
-        timeout_raw = questionary.text("Optional timeout in seconds:", default="").ask() or ""
-        if timeout_raw.strip():
-            try:
-                timeout_value = float(timeout_raw)
-                if timeout_value > 0:
-                    config["timeout"] = timeout_value
-                else:
-                    console.print("[yellow]Ignoring timeout: must be > 0.[/yellow]")
-            except ValueError:
-                console.print("[yellow]Ignoring timeout: invalid number.[/yellow]")
-
-        api_version = questionary.text("Optional API version:", default="").ask() or ""
-        if api_version.strip():
-            config["api_version"] = api_version.strip()
-
-        extra_body_raw = questionary.text(
-            "Optional extra body as JSON:",
-            default="",
-        ).ask() or ""
-        if extra_body_raw.strip():
-            try:
-                parsed_body = json.loads(extra_body_raw)
-                if isinstance(parsed_body, dict):
-                    config["extra_body"] = parsed_body
-                else:
-                    console.print("[yellow]Ignoring extra_body: JSON must be an object.[/yellow]")
-            except json.JSONDecodeError:
-                console.print("[yellow]Ignoring extra_body: invalid JSON.[/yellow]")
-
-    with open(CONFIG_FILE, "w") as f: json.dump(config, f, indent=4)
-    console.print("[green]✓ Configuration saved![/green]")
-    console.print(f"[dim]Provider: {provider}, Model: {model}[/dim]")
-    
-    start_enabled = False
-    if questionary.confirm("Enable start on boot (Recommended)?").ask():
-        enable_startup()
-        start_enabled = True
-
-    # If launchd was enabled we already load/start it in enable_startup().
-    if not start_enabled and questionary.confirm("Start daemon now?").ask():
-        start()
+    if not action:
+        return
+    if action == "Manage GhostShell command patterns":
+        _manage_pattern_controls(existing_config)
+        return
+    _configure_provider(existing_config)
 
 @app.command()
 def enable_startup():
@@ -421,7 +618,7 @@ def main(
 def show_shortcuts():
     """Display the shortcuts help panel."""
     rows = [
-        ("Accept inline suggestion", "Tab", "-", "Accept full suggestion"),
+        ("Accept inline suggestion", "Tab", "-", "Accept full suggestion (native completion in path/script contexts)"),
         ("Trigger suggestion", "Ctrl+Space", "-", "Manual trigger"),
         ("Partial accept (word)", "Option+Right", "-", "Accept next word"),
         ("Cycle suggestions", "Ctrl+N / Ctrl+P", "-", "Next / previous"),

@@ -12,6 +12,7 @@ os.environ.setdefault(
 
 import logging
 import json
+import shlex
 import warnings
 import uvicorn
 from contextlib import asynccontextmanager
@@ -85,6 +86,7 @@ class AssistContext(BaseModel):
 class Feedback(BaseModel):
     command_buffer: str
     accepted_suggestion: str
+    accept_mode: str = "suffix_append"
 
 def load_config():
     if not os.path.exists(CONFIG_FILE):
@@ -98,11 +100,85 @@ def get_history_file(shell: str) -> str:
     elif "bash" in shell: return os.path.join(home, ".bash_history")
     return ""
 
+def _normalize_pattern_token(value: str) -> str:
+    raw = str(value or "").strip()
+    if not raw:
+        return ""
+    try:
+        parts = shlex.split(raw, posix=True)
+    except Exception:
+        parts = raw.split()
+    if not parts:
+        return ""
+    return os.path.basename(parts[0]).strip().lower()
+
+def _extract_executable_token(command: str) -> str:
+    raw = str(command or "").strip()
+    if not raw:
+        return ""
+    try:
+        tokens = shlex.split(raw, posix=True)
+    except Exception:
+        tokens = raw.split()
+    if not tokens:
+        return ""
+
+    i = 0
+    n = len(tokens)
+    while i < n:
+        token = (tokens[i] or "").strip()
+        if not token:
+            i += 1
+            continue
+        if token in {"sudo", "command"}:
+            i += 1
+            continue
+        if token in {"env", "/usr/bin/env"}:
+            i += 1
+            while i < n:
+                env_token = (tokens[i] or "").strip()
+                if not env_token or env_token.startswith("-") or ("=" in env_token and not env_token.startswith("=")):
+                    i += 1
+                    continue
+                break
+            continue
+        if token.startswith("-"):
+            i += 1
+            continue
+        if "=" in token and not token.startswith("="):
+            i += 1
+            continue
+        return os.path.basename(token).strip().lower()
+    return ""
+
+def _disabled_patterns_from_config(config: dict) -> list[str]:
+    values = config.get("disabled_command_patterns", [])
+    if not isinstance(values, list):
+        return []
+    clean: list[str] = []
+    seen: set[str] = set()
+    for value in values:
+        normalized = _normalize_pattern_token(str(value))
+        if not normalized or normalized in seen:
+            continue
+        seen.add(normalized)
+        clean.append(normalized)
+    return clean
+
+def _command_matches_disabled_pattern(command: str, patterns: list[str]) -> bool:
+    exe = _extract_executable_token(command)
+    if not exe:
+        return False
+    for pattern in patterns:
+        if exe.startswith(pattern) or pattern.startswith(exe):
+            return True
+    return False
+
 @app.post("/predict")
 async def predict_completion(ctx: Context):
     # Quick filter: empty buffer
     if not ctx.command_buffer.strip():
-        return {"suggestions": ["", "", ""], "pool": [], "used_ai": False}
+        return {"suggestions": ["", "", ""], "pool": [], "pool_meta": [], "used_ai": False}
 
     config = load_config()
     
@@ -113,7 +189,7 @@ async def predict_completion(ctx: Context):
         shell=ctx.shell,
     )
 
-    suggestions, pool, used_ai = await engine.get_suggestions(
+    suggestions, pool, pool_meta, used_ai = await engine.get_suggestions(
         config,
         req_context,
         allow_ai=ctx.allow_ai,
@@ -143,6 +219,7 @@ async def predict_completion(ctx: Context):
     return {
         "suggestions": suggestions,
         "pool": pool,
+        "pool_meta": pool_meta,
         "bootstrap": bootstrap,
         "used_ai": used_ai,
     }
@@ -181,7 +258,12 @@ def log_feedback(fb: Feedback, background_tasks: BackgroundTasks):
     Endpoint for the shell to report accepted suggestions.
     Processed in background to avoid latency.
     """
-    background_tasks.add_task(engine.log_feedback, fb.command_buffer, fb.accepted_suggestion)
+    background_tasks.add_task(
+        engine.log_feedback,
+        fb.command_buffer,
+        fb.accepted_suggestion,
+        fb.accept_mode,
+    )
     return {"status": "ok"}
 
 @app.post("/log_command")
@@ -204,6 +286,10 @@ def log_command(data: dict, background_tasks: BackgroundTasks):
     source = str(data.get("source", "unknown") or "unknown").strip().lower()
     if source not in {"runtime", "history", "unknown"}:
         return {"status": "ignored", "reason": "invalid_source"}
+    config = load_config()
+    patterns = _disabled_patterns_from_config(config)
+    if _command_matches_disabled_pattern(command, patterns):
+        return {"status": "ignored", "reason": "disabled_pattern"}
 
     background_tasks.add_task(engine.log_executed_command, command, exit_code, source)
     return {"status": "ok"}

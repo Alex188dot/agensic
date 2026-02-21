@@ -2,6 +2,12 @@
 
 typeset -g -a GHOSTSHELL_SUGGESTIONS
 GHOSTSHELL_SUGGESTIONS=()
+typeset -g -a GHOSTSHELL_DISPLAY_TEXTS
+GHOSTSHELL_DISPLAY_TEXTS=()
+typeset -g -a GHOSTSHELL_ACCEPT_MODES
+GHOSTSHELL_ACCEPT_MODES=()
+typeset -g -a GHOSTSHELL_SUGGESTION_KINDS
+GHOSTSHELL_SUGGESTION_KINDS=()
 typeset -g GHOSTSHELL_SUGGESTION_INDEX=1
 typeset -g GHOSTSHELL_STATUS_PREFIX="__GHOSTSHELL_STATUS__:"
 typeset -g GHOSTSHELL_MAX_AUTO_AI_CALLS=4
@@ -29,6 +35,233 @@ typeset -g GHOSTSHELL_LAST_EXECUTED_CMD=""
 typeset -g GHOSTSHELL_HOOKS_REGISTERED=0
 typeset -gA GHOSTSHELL_NATIVE_ESC_WIDGET
 GHOSTSHELL_NATIVE_ESC_WIDGET=()
+typeset -g -a GHOSTSHELL_DISABLED_PATTERNS
+GHOSTSHELL_DISABLED_PATTERNS=()
+typeset -g GHOSTSHELL_CONFIG_PATH="${HOME}/.ghostshell/config.json"
+typeset -g GHOSTSHELL_CONFIG_MTIME=""
+typeset -g -a GHOSTSHELL_PATH_HEAVY_EXECUTABLES
+GHOSTSHELL_PATH_HEAVY_EXECUTABLES=(cd ls cat less more head tail vi vim nvim nano code open source cp mv mkdir rmdir touch find grep rg sed awk bat)
+typeset -g -a GHOSTSHELL_SCRIPT_EXECUTABLES
+GHOSTSHELL_SCRIPT_EXECUTABLES=(python python3 python3.11 python3.12 node bash sh zsh ruby perl php lua)
+
+_ghostshell_value_in_array() {
+    local needle="$1"
+    shift
+    local item
+    for item in "$@"; do
+        if [[ "$needle" == "$item" ]]; then
+            return 0
+        fi
+    done
+    return 1
+}
+
+_ghostshell_extract_executable_token() {
+    local command="$1"
+    local -a tokens
+    local token=""
+    local exe=""
+    local i=1
+
+    tokens=(${(z)command})
+    if (( ${#tokens[@]} == 0 )); then
+        return 1
+    fi
+
+    while (( i <= ${#tokens[@]} )); do
+        token="${tokens[$i]}"
+        if [[ -z "$token" ]]; then
+            (( i++ ))
+            continue
+        fi
+
+        case "$token" in
+            sudo|command)
+                (( i++ ))
+                continue
+                ;;
+            env|/usr/bin/env)
+                (( i++ ))
+                while (( i <= ${#tokens[@]} )); do
+                    token="${tokens[$i]}"
+                    if [[ -z "$token" || "$token" == -* || "$token" == *=* ]]; then
+                        (( i++ ))
+                        continue
+                    fi
+                    break
+                done
+                continue
+                ;;
+            -*|*=*)
+                (( i++ ))
+                continue
+                ;;
+            *)
+                exe="$token"
+                break
+                ;;
+        esac
+    done
+
+    if [[ -z "$exe" ]]; then
+        return 1
+    fi
+
+    exe="${exe:t}"
+    print -r -- "${(L)exe}"
+    return 0
+}
+
+_ghostshell_normalize_pattern_token() {
+    local raw="$1"
+    local -a tokens
+    local token=""
+
+    tokens=(${(z)raw})
+    if (( ${#tokens[@]} == 0 )); then
+        print -r -- ""
+        return
+    fi
+    token="${tokens[1]}"
+    token="${token:t}"
+    print -r -- "${(L)token}"
+}
+
+_ghostshell_get_config_mtime() {
+    if [[ ! -f "$GHOSTSHELL_CONFIG_PATH" ]]; then
+        print -r -- ""
+        return
+    fi
+    local mtime
+    mtime="$(stat -f '%m' "$GHOSTSHELL_CONFIG_PATH" 2>/dev/null)"
+    print -r -- "$mtime"
+}
+
+_ghostshell_reload_disabled_patterns_if_needed() {
+    local current_mtime
+    current_mtime="$(_ghostshell_get_config_mtime)"
+    if [[ "$current_mtime" == "$GHOSTSHELL_CONFIG_MTIME" ]]; then
+        return
+    fi
+    GHOSTSHELL_CONFIG_MTIME="$current_mtime"
+    GHOSTSHELL_DISABLED_PATTERNS=()
+
+    if [[ -z "$current_mtime" ]]; then
+        return
+    fi
+
+    local escaped_path="${GHOSTSHELL_CONFIG_PATH//\'/\'\\\'\'}"
+    local sep=$'\x1f'
+    local response
+    response=$(python3 -c "
+import json, os, shlex
+path = '''$escaped_path'''
+
+def normalize(value):
+    raw = str(value or '').strip()
+    if not raw:
+        return ''
+    try:
+        parts = shlex.split(raw, posix=True)
+        token = parts[0] if parts else ''
+    except Exception:
+        token = raw.split()[0] if raw.split() else ''
+    token = os.path.basename(token).strip().lower()
+    return token
+
+patterns = []
+seen = set()
+try:
+    with open(path, 'r', encoding='utf-8') as fh:
+        payload = json.load(fh)
+except Exception:
+    payload = {}
+
+for value in (payload.get('disabled_command_patterns') or []):
+    normalized = normalize(value)
+    if normalized and normalized not in seen:
+        seen.add(normalized)
+        patterns.append(normalized)
+
+print('\x1f'.join(patterns))
+" 2>/dev/null)
+
+    if [[ -n "$response" ]]; then
+        GHOSTSHELL_DISABLED_PATTERNS=("${(ps:$sep:)response}")
+    fi
+}
+
+_ghostshell_matches_disabled_pattern() {
+    local command="$1"
+    local exe=""
+    local pattern
+
+    _ghostshell_reload_disabled_patterns_if_needed
+    if (( ${#GHOSTSHELL_DISABLED_PATTERNS[@]} == 0 )); then
+        return 1
+    fi
+
+    exe="$(_ghostshell_extract_executable_token "$command")"
+    if [[ -z "$exe" ]]; then
+        return 1
+    fi
+
+    for pattern in "${GHOSTSHELL_DISABLED_PATTERNS[@]}"; do
+        if [[ "$exe" == "$pattern"* || "$pattern" == "$exe"* ]]; then
+            return 0
+        fi
+    done
+    return 1
+}
+
+_ghostshell_token_looks_path_or_file() {
+    local token="$1"
+    if [[ -z "$token" ]]; then
+        return 1
+    fi
+    if [[ "$token" == "~"* || "$token" == "./"* || "$token" == "../"* || "$token" == *"/"* ]]; then
+        return 0
+    fi
+    if [[ "$token" =~ \.[A-Za-z0-9_-]+$ ]]; then
+        return 0
+    fi
+    return 1
+}
+
+_ghostshell_should_preserve_native_tab() {
+    local buffer="$BUFFER"
+    local exe=""
+    local -a tokens
+    local token=""
+
+    exe="$(_ghostshell_extract_executable_token "$buffer")"
+    if [[ -z "$exe" ]]; then
+        return 1
+    fi
+
+    if _ghostshell_value_in_array "$exe" "${GHOSTSHELL_PATH_HEAVY_EXECUTABLES[@]}"; then
+        return 0
+    fi
+
+    tokens=(${(z)buffer})
+    for token in "${tokens[@]}"; do
+        if _ghostshell_token_looks_path_or_file "$token"; then
+            return 0
+        fi
+    done
+
+    if _ghostshell_value_in_array "$exe" "${GHOSTSHELL_SCRIPT_EXECUTABLES[@]}"; then
+        if [[ "$buffer" == *[[:space:]] || ${#tokens[@]} -ge 2 ]]; then
+            return 0
+        fi
+    fi
+
+    return 1
+}
+
+_ghostshell_should_skip_ghostshell_for_buffer() {
+    _ghostshell_matches_disabled_pattern "$BUFFER"
+}
 
 # ======================================================
 # 1. CORE LOGIC (Fetch, Display, Feedback)
@@ -45,6 +278,9 @@ _ghostshell_fetch_suggestions() {
     # Don't fetch if buffer is too short
     if [[ ${#buffer_content} -lt 2 ]]; then
         GHOSTSHELL_SUGGESTIONS=()
+        GHOSTSHELL_DISPLAY_TEXTS=()
+        GHOSTSHELL_ACCEPT_MODES=()
+        GHOSTSHELL_SUGGESTION_KINDS=()
         return
     fi
     
@@ -66,31 +302,66 @@ try:
     with urllib.request.urlopen(req, timeout=1.5) as r:
         result = json.load(r)
         used_ai = bool(result.get('used_ai', False))
-        # Get the pool of suggestions (usually 20)
+        # Get structured suggestions when available.
         pool = result.get('pool', result.get('suggestions', []))
+        pool_meta = result.get('pool_meta', [])
         bootstrap = result.get('bootstrap', {})
         # Filter out empty or duplicate strings and limit to 20
         seen = set()
         clean_pool = []
-        for s in pool:
-            if s and s not in seen:
-                clean_pool.append(s)
-                seen.add(s)
+        clean_display = []
+        clean_modes = []
+        clean_kinds = []
+        if isinstance(pool_meta, list):
+            for item in pool_meta:
+                if not isinstance(item, dict):
+                    continue
+                accept_text = str(item.get('accept_text', '') or '')
+                if not accept_text or accept_text in seen:
+                    continue
+                seen.add(accept_text)
+                clean_pool.append(accept_text)
+                clean_display.append(str(item.get('display_text', accept_text) or accept_text))
+                clean_modes.append(str(item.get('accept_mode', 'suffix_append') or 'suffix_append'))
+                clean_kinds.append(str(item.get('kind', 'normal') or 'normal'))
+                if len(clean_pool) >= 20:
+                    break
+        if not clean_pool:
+            for s in pool:
+                if s and s not in seen:
+                    clean_pool.append(s)
+                    clean_display.append(s)
+                    clean_modes.append('suffix_append')
+                    clean_kinds.append('normal')
+                    seen.add(s)
+                if len(clean_pool) >= 20:
+                    break
         # If bootstrap is still running and we don't yet have suggestions,
         # return a non-actionable status ghost text.
         if not clean_pool and bootstrap.get('running'):
             clean_pool = ['__GHOSTSHELL_STATUS__: ** Index is still loading, suggestions coming in a few seconds **']
-        print(('1' if used_ai else '0') + '\n' + '\x1f'.join(clean_pool[:20]))
+            clean_display = clean_pool[:]
+            clean_modes = ['suffix_append']
+            clean_kinds = ['status']
+        print(
+            ('1' if used_ai else '0') + '\n' +
+            '\x1f'.join(clean_pool[:20]) + '\n' +
+            '\x1f'.join(clean_display[:20]) + '\n' +
+            '\x1f'.join(clean_modes[:20]) + '\n' +
+            '\x1f'.join(clean_kinds[:20])
+        )
 except Exception as e:
     print('0')
 " 2>/dev/null)
     
     # Parse response into GHOSTSHELL_SUGGESTIONS array and used_ai flag.
-    local used_ai_line="${response%%$'\n'*}"
-    local pool_line=""
-    if [[ "$response" == *$'\n'* ]]; then
-        pool_line="${response#*$'\n'}"
-    fi
+    local -a response_lines
+    response_lines=("${(@f)response}")
+    local used_ai_line="${response_lines[1]}"
+    local pool_line="${response_lines[2]}"
+    local display_line="${response_lines[3]}"
+    local mode_line="${response_lines[4]}"
+    local kind_line="${response_lines[5]}"
 
     if [[ "$used_ai_line" == "1" ]]; then
         GHOSTSHELL_LAST_FETCH_USED_AI=1
@@ -101,8 +372,32 @@ except Exception as e:
         if (( ${#GHOSTSHELL_SUGGESTIONS[@]} > 20 )); then
             GHOSTSHELL_SUGGESTIONS=("${GHOSTSHELL_SUGGESTIONS[@][1,20]}")
         fi
+        if [[ -n "$display_line" ]]; then
+            GHOSTSHELL_DISPLAY_TEXTS=("${(ps:$sep:)display_line}")
+        else
+            GHOSTSHELL_DISPLAY_TEXTS=("${GHOSTSHELL_SUGGESTIONS[@]}")
+        fi
+        if [[ -n "$mode_line" ]]; then
+            GHOSTSHELL_ACCEPT_MODES=("${(ps:$sep:)mode_line}")
+        else
+            GHOSTSHELL_ACCEPT_MODES=()
+        fi
+        if [[ -n "$kind_line" ]]; then
+            GHOSTSHELL_SUGGESTION_KINDS=("${(ps:$sep:)kind_line}")
+        else
+            GHOSTSHELL_SUGGESTION_KINDS=()
+        fi
+        local i
+        for (( i=1; i<=${#GHOSTSHELL_SUGGESTIONS[@]}; i++ )); do
+            [[ -z "${GHOSTSHELL_DISPLAY_TEXTS[$i]}" ]] && GHOSTSHELL_DISPLAY_TEXTS[$i]="${GHOSTSHELL_SUGGESTIONS[$i]}"
+            [[ -z "${GHOSTSHELL_ACCEPT_MODES[$i]}" ]] && GHOSTSHELL_ACCEPT_MODES[$i]="suffix_append"
+            [[ -z "${GHOSTSHELL_SUGGESTION_KINDS[$i]}" ]] && GHOSTSHELL_SUGGESTION_KINDS[$i]="normal"
+        done
     else
         GHOSTSHELL_SUGGESTIONS=()
+        GHOSTSHELL_DISPLAY_TEXTS=()
+        GHOSTSHELL_ACCEPT_MODES=()
+        GHOSTSHELL_SUGGESTION_KINDS=()
     fi
     
     GHOSTSHELL_SUGGESTION_INDEX=1
@@ -117,10 +412,16 @@ _ghostshell_set_status_message() {
     local message="$1"
     if [[ -z "$message" ]]; then
         GHOSTSHELL_SUGGESTIONS=()
+        GHOSTSHELL_DISPLAY_TEXTS=()
+        GHOSTSHELL_ACCEPT_MODES=()
+        GHOSTSHELL_SUGGESTION_KINDS=()
         GHOSTSHELL_SUGGESTION_INDEX=1
         return
     fi
     GHOSTSHELL_SUGGESTIONS=("${GHOSTSHELL_STATUS_PREFIX}${message}")
+    GHOSTSHELL_DISPLAY_TEXTS=("${GHOSTSHELL_STATUS_PREFIX}${message}")
+    GHOSTSHELL_ACCEPT_MODES=("suffix_append")
+    GHOSTSHELL_SUGGESTION_KINDS=("status")
     GHOSTSHELL_SUGGESTION_INDEX=1
 }
 
@@ -407,20 +708,51 @@ _ghostshell_filter_pool() {
     local typed_since_fetch="${buffer#$GHOSTSHELL_LAST_BUFFER}"
     
     # Filter suggestions that still match what the user typed
-    local new_suggestions=()
-    for sugg in "${GHOSTSHELL_SUGGESTIONS[@]}"; do
-        if [[ "$sugg" == "$typed_since_fetch"* ]]; then
+    local -a new_suggestions=()
+    local -a new_displays=()
+    local -a new_modes=()
+    local -a new_kinds=()
+    local i
+    for (( i=1; i<=${#GHOSTSHELL_SUGGESTIONS[@]}; i++ )); do
+        local sugg="${GHOSTSHELL_SUGGESTIONS[$i]}"
+        local display="${GHOSTSHELL_DISPLAY_TEXTS[$i]}"
+        local mode="${GHOSTSHELL_ACCEPT_MODES[$i]}"
+        local kind="${GHOSTSHELL_SUGGESTION_KINDS[$i]}"
+        if _ghostshell_is_status_suggestion "$sugg"; then
             new_suggestions+=("$sugg")
+            new_displays+=("$display")
+            new_modes+=("$mode")
+            new_kinds+=("$kind")
+            continue
+        fi
+        if [[ "$mode" == "replace_full" ]]; then
+            if [[ -n "$sugg" ]]; then
+                new_suggestions+=("$sugg")
+                new_displays+=("$display")
+                new_modes+=("$mode")
+                new_kinds+=("$kind")
+            fi
+        elif [[ "$sugg" == "$typed_since_fetch"* ]]; then
+            new_suggestions+=("$sugg")
+            new_displays+=("$display")
+            new_modes+=("${mode:-suffix_append}")
+            new_kinds+=("${kind:-normal}")
         fi
     done
     
     if [[ ${#new_suggestions[@]} -gt 0 ]]; then
         GHOSTSHELL_SUGGESTIONS=("${new_suggestions[@]}")
+        GHOSTSHELL_DISPLAY_TEXTS=("${new_displays[@]}")
+        GHOSTSHELL_ACCEPT_MODES=("${new_modes[@]}")
+        GHOSTSHELL_SUGGESTION_KINDS=("${new_kinds[@]}")
         GHOSTSHELL_SUGGESTION_INDEX=1
         _ghostshell_update_display
     else
         # Pool exhausted; wait for the next explicit trigger.
         GHOSTSHELL_SUGGESTIONS=()
+        GHOSTSHELL_DISPLAY_TEXTS=()
+        GHOSTSHELL_ACCEPT_MODES=()
+        GHOSTSHELL_SUGGESTION_KINDS=()
         _ghostshell_update_display
     fi
 }
@@ -463,11 +795,15 @@ _ghostshell_canonicalize_buffer_spacing() {
 _ghostshell_send_feedback() {
     local buffer="$1"
     local accepted="$2"
+    local accept_mode="${3:-suffix_append}"
+    if _ghostshell_matches_disabled_pattern "$buffer" || _ghostshell_matches_disabled_pattern "$accepted"; then
+        return
+    fi
     # Fire and forget feedback to server for zvec feedback stats
     (
         local escaped_buf="${buffer//\'/\'\\\'\'}"
         local escaped_acc="${accepted//\'/\'\\\'\'}"
-        local json_data="{\"command_buffer\": \"$escaped_buf\", \"accepted_suggestion\": \"$escaped_acc\"}"
+        local json_data="{\"command_buffer\": \"$escaped_buf\", \"accepted_suggestion\": \"$escaped_acc\", \"accept_mode\": \"${accept_mode}\"}"
         curl -s -X POST "http://127.0.0.1:22000/feedback" \
              -H "Content-Type: application/json" \
              -d "$json_data" > /dev/null 2>&1
@@ -490,56 +826,11 @@ _ghostshell_log_command() {
 
 _ghostshell_is_blocked_runtime_command() {
     local command="$1"
-    local -a tokens
-    local token=""
     local exe=""
-    local i=1
-
-    tokens=(${(z)command})
-    if (( ${#tokens[@]} == 0 )); then
-        return 1
-    fi
-
-    while (( i <= ${#tokens[@]} )); do
-        token="${tokens[$i]}"
-        if [[ -z "$token" ]]; then
-            (( i++ ))
-            continue
-        fi
-
-        case "$token" in
-            sudo|command)
-                (( i++ ))
-                continue
-                ;;
-            env|/usr/bin/env)
-                (( i++ ))
-                while (( i <= ${#tokens[@]} )); do
-                    token="${tokens[$i]}"
-                    if [[ -z "$token" || "$token" == -* || "$token" == *=* ]]; then
-                        (( i++ ))
-                        continue
-                    fi
-                    break
-                done
-                continue
-                ;;
-            -*|*=*)
-                (( i++ ))
-                continue
-                ;;
-            *)
-                exe="$token"
-                break
-                ;;
-        esac
-    done
-
+    exe="$(_ghostshell_extract_executable_token "$command")"
     if [[ -z "$exe" ]]; then
         return 1
     fi
-
-    exe="${exe:t}"
     [[ "$exe" == "rm" ]]
 }
 
@@ -551,6 +842,7 @@ _ghostshell_precmd_hook() {
     local exit_code="$?"
     local cmd="$GHOSTSHELL_LAST_EXECUTED_CMD"
     GHOSTSHELL_LAST_EXECUTED_CMD=""
+    _ghostshell_reload_disabled_patterns_if_needed
 
     if [[ -z "$cmd" ]]; then
         return
@@ -561,6 +853,9 @@ _ghostshell_precmd_hook() {
     fi
 
     if _ghostshell_is_blocked_runtime_command "$cmd"; then
+        return
+    fi
+    if _ghostshell_matches_disabled_pattern "$cmd"; then
         return
     fi
 
@@ -582,6 +877,10 @@ _ghostshell_maybe_reset_line_state_for_empty_buffer() {
 
 _ghostshell_try_fetch_on_space() {
     if _ghostshell_buffer_has_hash; then
+        _ghostshell_clear_suggestions
+        return
+    fi
+    if _ghostshell_should_skip_ghostshell_for_buffer; then
         _ghostshell_clear_suggestions
         return
     fi
@@ -620,6 +919,8 @@ _ghostshell_try_fetch_on_space() {
 
 _ghostshell_update_display() {
     local current="${GHOSTSHELL_SUGGESTIONS[$GHOSTSHELL_SUGGESTION_INDEX]}"
+    local mode="${GHOSTSHELL_ACCEPT_MODES[$GHOSTSHELL_SUGGESTION_INDEX]}"
+    local display_text="${GHOSTSHELL_DISPLAY_TEXTS[$GHOSTSHELL_SUGGESTION_INDEX]}"
     if _ghostshell_is_status_suggestion "$current"; then
         local status_msg="${current#$GHOSTSHELL_STATUS_PREFIX}"
         status_msg="${status_msg//$'\n'/}"
@@ -629,11 +930,18 @@ _ghostshell_update_display() {
         return
     fi
     
-    # If filtering happened, we might need a part of the suggestion
-    # The suggestions are suffixes relative to GHOSTSHELL_LAST_BUFFER
-    local typed_since_fetch="${BUFFER#$GHOSTSHELL_LAST_BUFFER}"
-    local display_sugg="${current#$typed_since_fetch}"
-    display_sugg="$(_ghostshell_merge_suffix "$BUFFER" "$display_sugg")"
+    local display_sugg=""
+    if [[ "$mode" == "replace_full" ]]; then
+        if [[ "$current" != "$BUFFER" ]]; then
+            display_sugg=" ${display_text}"
+        fi
+    else
+        # If filtering happened, we might need a part of the suggestion
+        # The suggestions are suffixes relative to GHOSTSHELL_LAST_BUFFER
+        local typed_since_fetch="${BUFFER#$GHOSTSHELL_LAST_BUFFER}"
+        display_sugg="${current#$typed_since_fetch}"
+        display_sugg="$(_ghostshell_merge_suffix "$BUFFER" "$display_sugg")"
+    fi
     
     # Ensure no newlines break the display
     display_sugg="${display_sugg//$'\n'/}" 
@@ -656,6 +964,8 @@ _ghostshell_update_display() {
 
 _ghostshell_has_visible_suggestion() {
     local current="${GHOSTSHELL_SUGGESTIONS[$GHOSTSHELL_SUGGESTION_INDEX]}"
+    local mode="${GHOSTSHELL_ACCEPT_MODES[$GHOSTSHELL_SUGGESTION_INDEX]}"
+    local display_text="${GHOSTSHELL_DISPLAY_TEXTS[$GHOSTSHELL_SUGGESTION_INDEX]}"
 
     if _ghostshell_is_status_suggestion "$current"; then
         return 0
@@ -665,9 +975,15 @@ _ghostshell_has_visible_suggestion() {
         return 1
     fi
 
-    local typed_since_fetch="${BUFFER#$GHOSTSHELL_LAST_BUFFER}"
-    local display_sugg="${current#$typed_since_fetch}"
-    display_sugg="$(_ghostshell_merge_suffix "$BUFFER" "$display_sugg")"
+    local display_sugg=""
+    if [[ "$mode" == "replace_full" ]]; then
+        [[ "$current" == "$BUFFER" ]] && return 1
+        display_sugg="$display_text"
+    else
+        local typed_since_fetch="${BUFFER#$GHOSTSHELL_LAST_BUFFER}"
+        display_sugg="${current#$typed_since_fetch}"
+        display_sugg="$(_ghostshell_merge_suffix "$BUFFER" "$display_sugg")"
+    fi
     display_sugg="${display_sugg//$'\n'/}"
     display_sugg="${display_sugg//$'\r'/}"
 
@@ -708,6 +1024,12 @@ _ghostshell_on_timer_trigger() {
         zle -R
         return
     fi
+    if _ghostshell_should_skip_ghostshell_for_buffer; then
+        _ghostshell_clear_suggestions
+        _ghostshell_update_display
+        zle -R
+        return
+    fi
     
     # Only fetch if buffer has changed and is long enough
     if [[ "$BUFFER" != "$GHOSTSHELL_LAST_BUFFER" && ${#BUFFER} -ge 2 ]]; then
@@ -741,6 +1063,9 @@ _ghostshell_clear_suggestions() {
         region_highlight=()
     fi
     GHOSTSHELL_SUGGESTIONS=()
+    GHOSTSHELL_DISPLAY_TEXTS=()
+    GHOSTSHELL_ACCEPT_MODES=()
+    GHOSTSHELL_SUGGESTION_KINDS=()
     _ghostshell_reset_intent_state
     _ghostshell_stop_timer
 }
@@ -753,6 +1078,12 @@ _ghostshell_self_insert() {
     _ghostshell_reset_intent_state
 
     if _ghostshell_buffer_has_hash; then
+        _ghostshell_clear_suggestions
+        _ghostshell_update_display
+        zle -R
+        return
+    fi
+    if _ghostshell_should_skip_ghostshell_for_buffer; then
         _ghostshell_clear_suggestions
         _ghostshell_update_display
         zle -R
@@ -843,23 +1174,36 @@ _ghostshell_accept_widget() {
         zle expand-or-complete
         return
     fi
+    if _ghostshell_should_skip_ghostshell_for_buffer || _ghostshell_should_preserve_native_tab; then
+        _ghostshell_clear_suggestions
+        zle expand-or-complete
+        return
+    fi
 
     local current="${GHOSTSHELL_SUGGESTIONS[$GHOSTSHELL_SUGGESTION_INDEX]}"
+    local mode="${GHOSTSHELL_ACCEPT_MODES[$GHOSTSHELL_SUGGESTION_INDEX]}"
     if _ghostshell_is_status_suggestion "$current"; then
         zle expand-or-complete
     elif [[ -n "$current" ]]; then
-        local typed_since_fetch="${BUFFER#$GHOSTSHELL_LAST_BUFFER}"
-        local to_add="${current#$typed_since_fetch}"
-        to_add="$(_ghostshell_merge_suffix "$BUFFER" "$to_add")"
-        local merged="${BUFFER}${to_add}"
-        local normalized_merged="$(_ghostshell_canonicalize_buffer_spacing "$merged")"
-        local normalized_buffer="$(_ghostshell_canonicalize_buffer_spacing "$BUFFER")"
-        local normalized_to_add="$to_add"
-        if [[ "$normalized_merged" == "$normalized_buffer"* ]]; then
-            normalized_to_add="${normalized_merged#$normalized_buffer}"
+        if [[ "$mode" == "replace_full" ]]; then
+            local normalized_buffer="$(_ghostshell_canonicalize_buffer_spacing "$BUFFER")"
+            local replacement="$(_ghostshell_canonicalize_buffer_spacing "$current")"
+            _ghostshell_send_feedback "$normalized_buffer" "$replacement" "replace_full"
+            BUFFER="$replacement"
+        else
+            local typed_since_fetch="${BUFFER#$GHOSTSHELL_LAST_BUFFER}"
+            local to_add="${current#$typed_since_fetch}"
+            to_add="$(_ghostshell_merge_suffix "$BUFFER" "$to_add")"
+            local merged="${BUFFER}${to_add}"
+            local normalized_merged="$(_ghostshell_canonicalize_buffer_spacing "$merged")"
+            local normalized_buffer="$(_ghostshell_canonicalize_buffer_spacing "$BUFFER")"
+            local normalized_to_add="$to_add"
+            if [[ "$normalized_merged" == "$normalized_buffer"* ]]; then
+                normalized_to_add="${normalized_merged#$normalized_buffer}"
+            fi
+            _ghostshell_send_feedback "$normalized_buffer" "$normalized_to_add" "suffix_append"
+            BUFFER="$normalized_merged"
         fi
-        _ghostshell_send_feedback "$normalized_buffer" "$normalized_to_add"
-        BUFFER="$normalized_merged"
         CURSOR=${#BUFFER}
         _ghostshell_clear_suggestions
         zle -R
@@ -871,9 +1215,15 @@ _ghostshell_accept_widget() {
 # --- Partial Accept ---
 _ghostshell_partial_accept() {
     local current="${GHOSTSHELL_SUGGESTIONS[$GHOSTSHELL_SUGGESTION_INDEX]}"
+    local mode="${GHOSTSHELL_ACCEPT_MODES[$GHOSTSHELL_SUGGESTION_INDEX]}"
     
     if _ghostshell_is_status_suggestion "$current"; then
         zle forward-word
+    elif [[ "$mode" == "replace_full" ]]; then
+        BUFFER="$(_ghostshell_canonicalize_buffer_spacing "$current")"
+        CURSOR=${#BUFFER}
+        _ghostshell_clear_suggestions
+        zle -R
     elif [[ -n "$current" ]]; then
         local typed_since_fetch="${BUFFER#$GHOSTSHELL_LAST_BUFFER}"
         local remaining="${current#$typed_since_fetch}"
@@ -939,6 +1289,12 @@ _ghostshell_cycle_prev() {
 # --- Manual Trigger (Ctrl+Space) ---
 _ghostshell_manual_trigger() {
     if [[ ${#BUFFER} -ge 2 ]]; then
+        if _ghostshell_should_skip_ghostshell_for_buffer; then
+            _ghostshell_clear_suggestions
+            _ghostshell_update_display
+            zle -R
+            return
+        fi
         local manual_allow_ai=0
         if [[ "$BUFFER" == *[[:space:]]* ]]; then
             manual_allow_ai=1
@@ -1032,6 +1388,7 @@ _ghostshell_capture_native_escape_binding() {
 _ghostshell_capture_native_escape_binding emacs
 _ghostshell_capture_native_escape_binding viins
 _ghostshell_capture_native_escape_binding vicmd
+_ghostshell_reload_disabled_patterns_if_needed
 
 # --- Core Controls ---
 _ghostshell_bind_widget '^@' _ghostshell_manual_trigger    # Ctrl+Space (manual trigger)

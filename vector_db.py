@@ -14,6 +14,7 @@ from typing import Dict, List, Optional, Tuple
 
 import transformers
 import zvec
+from rapidfuzz import fuzz
 from sentence_transformers import SentenceTransformer
 
 # Tell HuggingFace to avoid implicit network checks by default.
@@ -40,6 +41,10 @@ class CommandVectorDB:
     SCORE_HISTORY = 0.10
     BLOCKED_EXECUTABLES = {"rm"}
     PREFIX_SCAN_LIMIT = 2000
+    SEMANTIC_VECTOR_TOPN = 80
+    EXEC_FUZZ_SCOPE_THRESHOLD = 84.0
+    TYPO_EXEC_THRESHOLD = 90.0
+    SEMANTIC_MIN_SCORE = 55.0
 
     def __init__(self, db_path: str = None, model_name: str = "all-MiniLM-L6-v2"):
         if db_path is None:
@@ -112,6 +117,32 @@ class CommandVectorDB:
 
         matches = [cmd for cmd in base_candidates if cmd.startswith(normalized_prefix)]
         return matches[:topk]
+
+    @staticmethod
+    def _normalize_for_fuzzy(text: str) -> str:
+        normalized = os.path.basename((text or "").strip()).lower()
+        for sep in ("-", "_", "/", "."):
+            normalized = normalized.replace(sep, " ")
+        return " ".join(normalized.split())
+
+    @classmethod
+    def _fuzzy_exec_score(cls, typed_exec: str, candidate_exec: str) -> float:
+        typed = cls._normalize_for_fuzzy(typed_exec)
+        candidate = cls._normalize_for_fuzzy(candidate_exec)
+        if not typed or not candidate:
+            return 0.0
+        return float(fuzz.QRatio(typed, candidate))
+
+    @classmethod
+    def _fuzzy_command_score(cls, query: str, candidate: str) -> float:
+        typed = cls._normalize_for_fuzzy(query)
+        target = cls._normalize_for_fuzzy(candidate)
+        if not typed or not target:
+            return 0.0
+        quick = float(fuzz.QRatio(typed, target))
+        token_sorted = float(fuzz.token_sort_ratio(typed, target))
+        # Blend fast direct similarity with token-order-insensitive match.
+        return (0.7 * quick) + (0.3 * token_sorted)
 
     def _warm_prefix_cache_from_history(self, history_path: Path):
         key = str(history_path)
@@ -859,7 +890,7 @@ class CommandVectorDB:
             logger.error(f"Error searching database: {exc}")
             return []
 
-    def get_exact_prefix_matches(self, prefix: str, topk: int = 20) -> List[str]:
+    def get_prefix_or_semantic_matches(self, prefix: str, topk: int = 100) -> List[Dict[str, str]]:
         if not prefix:
             return []
 
@@ -868,25 +899,74 @@ class CommandVectorDB:
             return []
 
         lexical_matches = self._get_lexical_prefix_matches(normalized_prefix, topk=topk)
-        if len(lexical_matches) >= topk:
-            return lexical_matches[:topk]
+        typed_exec = self._prefix_exec_key(normalized_prefix)
+        if lexical_matches:
+            return [
+                {
+                    "command": command,
+                    "match_mode": "prefix",
+                    "typed_exec": typed_exec,
+                    "candidate_exec": self._prefix_exec_key(command),
+                }
+                for command in lexical_matches[:topk]
+            ]
 
-        # Semantic fallback augments lexical results when cache is sparse.
-        candidates = self.search(normalized_prefix, topk=max(topk * 5, 40))
-        seen = set(lexical_matches)
-        matches = list(lexical_matches)
-        for command, _ in candidates:
+        # Prefix miss: retrieve semantic candidates then re-rank with RapidFuzz.
+        candidates = self.search(normalized_prefix, topk=self.SEMANTIC_VECTOR_TOPN)
+        seen: set[str] = set()
+        scored_entries: List[Tuple[float, int, Dict[str, str]]] = []
+        for idx, (command, _) in enumerate(candidates):
             if command in seen:
-                continue
-            if not command.startswith(normalized_prefix):
                 continue
             if self.is_blocked_command(command):
                 continue
-            matches.append(command)
             seen.add(command)
-            if len(matches) >= topk:
-                break
-        return matches[:topk]
+            candidate_exec = self._prefix_exec_key(command)
+            if not typed_exec or not candidate_exec:
+                continue
+
+            exec_score = self._fuzzy_exec_score(typed_exec, candidate_exec)
+            same_exec = typed_exec == candidate_exec
+            in_scope = same_exec or (exec_score >= self.EXEC_FUZZ_SCOPE_THRESHOLD)
+            if not in_scope:
+                continue
+
+            command_score = self._fuzzy_command_score(normalized_prefix, command)
+            if command_score < self.SEMANTIC_MIN_SCORE:
+                continue
+            recall_rank_score = ((self.SEMANTIC_VECTOR_TOPN - idx) / self.SEMANTIC_VECTOR_TOPN) * 100.0
+            rerank_score = (0.75 * command_score) + (0.25 * recall_rank_score)
+
+            mode = "semantic_general"
+            if not same_exec and exec_score >= self.TYPO_EXEC_THRESHOLD:
+                mode = "semantic_typo"
+
+            scored_entries.append(
+                (
+                    rerank_score,
+                    -idx,
+                    {
+                        "command": command,
+                        "match_mode": mode,
+                        "typed_exec": typed_exec,
+                        "candidate_exec": candidate_exec,
+                    },
+                )
+            )
+
+        if not scored_entries:
+            return []
+
+        scored_entries.sort(key=lambda item: (item[0], item[1]), reverse=True)
+        best = scored_entries[0][2]
+        return [
+            {
+                "command": best["command"],
+                "match_mode": best["match_mode"],
+                "typed_exec": best["typed_exec"],
+                "candidate_exec": best["candidate_exec"],
+            }
+        ][:1]
 
     def rerank_candidates(self, buffer_context: str, candidates: List[str]) -> List[str]:
         if not candidates:
@@ -1073,13 +1153,21 @@ class CommandVectorDB:
             )
         )
 
-    def record_feedback(self, buffer_context: str, accepted_suggestion: str):
+    def record_feedback(self, buffer_context: str, accepted_suggestion: str, accept_mode: str = "suffix_append"):
         accepted_suggestion = accepted_suggestion or ""
-        full_command = self.normalize_command(
-            self.canonicalize_shell_spacing(
-                self.merge_buffer_and_suffix(buffer_context, accepted_suggestion)
+        mode = (accept_mode or "suffix_append").strip().lower()
+        if mode == "replace_full":
+            full_command = self.normalize_command(
+                self.canonicalize_shell_spacing(accepted_suggestion)
             )
-        )
+            context_payload = full_command
+        else:
+            full_command = self.normalize_command(
+                self.canonicalize_shell_spacing(
+                    self.merge_buffer_and_suffix(buffer_context, accepted_suggestion)
+                )
+            )
+            context_payload = accepted_suggestion
         if not full_command:
             return
         if self.is_blocked_command(full_command):
@@ -1094,7 +1182,7 @@ class CommandVectorDB:
             with self._io_lock:
                 self._increment_command_feedback(full_command, now_ts)
                 for context_key in context_keys:
-                    self._increment_context_feedback(context_key, accepted_suggestion, now_ts)
+                    self._increment_context_feedback(context_key, context_payload, now_ts)
         except Exception as exc:
             logger.warning(f"Failed to record feedback in zvec: {exc}")
 

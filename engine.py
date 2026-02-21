@@ -191,10 +191,21 @@ class SuggestionEngine:
         if shutil.which("cargo"): inv.package_sources.append("cargo")
         return inv
 
-    def _get_vector_candidates(self, ctx: RequestContext) -> list[str]:
+    def _filter_blocked_full_commands(self, commands: list[str]) -> list[str]:
+        filtered: list[str] = []
+        for command in commands:
+            normalized = (command or "").strip()
+            if not normalized:
+                continue
+            if self._is_blocked_command(normalized):
+                continue
+            filtered.append(normalized)
+        return filtered
+
+    def _get_vector_candidates(self, ctx: RequestContext) -> list[dict[str, str]]:
         """
         Get command suggestions from the vector database.
-        Returns exact prefix matches using semantic similarity.
+        Returns structured candidates for suffix append or full replacement.
         """
         prefix = ctx.buffer.strip()
         if len(prefix) < 2:
@@ -207,22 +218,57 @@ class SuggestionEngine:
             return []
 
         try:
-            # Pull a wider prefix candidate set, then rerank with usage/context signals.
-            matches = self.vector_db.get_exact_prefix_matches(prefix, topk=100)
+            matches = self.vector_db.get_prefix_or_semantic_matches(prefix, topk=100)
         except Exception as e:
             logger.error(
                 "Vector DB lookup failed: %s",
                 self.privacy_guard.sanitize_for_log(str(e)),
             )
             return []
-        
-        # Return only the suffix part (what comes after the prefix)
-        candidates = []
-        for cmd in matches:
-            if cmd.startswith(prefix) and cmd != prefix:
-                suffix = cmd[len(prefix):]
-                candidates.append(suffix)
-        
+
+        if not matches:
+            return []
+
+        first_mode = matches[0].get("match_mode", "")
+        candidates: list[dict[str, str]] = []
+        if first_mode == "prefix":
+            suffixes: list[str] = []
+            for item in matches:
+                cmd = item.get("command", "")
+                if not cmd.startswith(prefix) or cmd == prefix:
+                    continue
+                suffixes.append(cmd[len(prefix):])
+            if self.vector_db is not None and suffixes:
+                suffixes = self.vector_db.rerank_candidates(ctx.buffer, suffixes)
+            suffixes = self._filter_blocked_candidates(ctx.buffer, suffixes)
+            for suffix in suffixes:
+                candidates.append(
+                    {
+                        "display_text": suffix,
+                        "accept_text": suffix,
+                        "accept_mode": "suffix_append",
+                        "kind": "normal",
+                    }
+                )
+            return candidates
+
+        full_commands = [item.get("command", "") for item in matches]
+        full_commands = self._filter_blocked_full_commands(full_commands)
+        is_typo_mode = first_mode == "semantic_typo"
+        for index, command in enumerate(full_commands):
+            display = command
+            kind = "normal"
+            if is_typo_mode:
+                kind = "typo_recovery"
+                display = f" Maybe you meant: {command}"
+            candidates.append(
+                {
+                    "display_text": display,
+                    "accept_text": command,
+                    "accept_mode": "replace_full",
+                    "kind": kind,
+                }
+            )
         return candidates
 
     def _is_blocked_command(self, command: str) -> bool:
@@ -629,7 +675,7 @@ class SuggestionEngine:
         config: dict,
         ctx: RequestContext,
         allow_ai: bool = True,
-    ) -> tuple[list[str], list[str], bool]:
+    ) -> tuple[list[str], list[str], list[dict[str, str]], bool]:
         """
         New paradigm:
         1. Get top 20 exact prefix matches from vector DB
@@ -639,36 +685,34 @@ class SuggestionEngine:
         Returns:
             tuple: (top_3_suggestions, full_pool_of_20)
         """
+        def _pad_pool(values: list[str], size: int = 20) -> list[str]:
+            pool = values[:size]
+            while len(pool) < size:
+                pool.append("")
+            return pool
+
         # Get vector-based candidates (up to 20)
         vector_candidates = self._get_vector_candidates(ctx)
-        
+
         # If we have candidates from history, return the top 3 + full pool
         if vector_candidates:
-            reranked = vector_candidates
-            if self.vector_db is not None:
-                reranked = self.vector_db.rerank_candidates(ctx.buffer, vector_candidates)
-            reranked = self._filter_blocked_candidates(ctx.buffer, reranked)
-            suggestions = reranked[:3]
-            pool = reranked[:20]  # Full pool for filtering
-            
+            pool_meta = vector_candidates[:20]
+            pool = [entry.get("accept_text", "") for entry in pool_meta]
+            suggestions = pool[:3]
+
             # Pad to 3 if needed
             while len(suggestions) < 3:
                 suggestions.append("")
-            
-            # Pad pool to 20
-            while len(pool) < 20:
-                pool.append("")
-            
+
+            pool = _pad_pool(pool, size=20)
             logger.info(f"Vector DB returned {len(vector_candidates)} matches")
-            return (suggestions, pool, False)
+            return (suggestions, pool, pool_meta, False)
 
         # If no vector matches, this is a new/unknown command - invoke AI
         if not allow_ai:
             suggestions = ["", "", ""]
-            pool = suggestions[:]
-            while len(pool) < 20:
-                pool.append("")
-            return (suggestions, pool, False)
+            pool = _pad_pool(suggestions, size=20)
+            return (suggestions, pool, [], False)
 
         logger.info("No vector matches found, invoking AI for new command")
 
@@ -774,11 +818,21 @@ class SuggestionEngine:
             suggestions.append("")
 
         # For AI suggestions, pool is same as suggestions (no filtering needed)
-        pool = suggestions[:]
-        while len(pool) < 20:
-            pool.append("")
+        pool = _pad_pool(suggestions, size=20)
+        pool_meta: list[dict[str, str]] = []
+        for suffix in suggestions:
+            if not suffix:
+                continue
+            pool_meta.append(
+                {
+                    "display_text": suffix,
+                    "accept_text": suffix,
+                    "accept_mode": "suffix_append",
+                    "kind": "normal",
+                }
+            )
 
-        return (suggestions[:3], pool, not privacy_blocked)
+        return (suggestions[:3], pool, pool_meta, not privacy_blocked)
 
     async def get_intent_command(self, config: dict, ctx: RequestContext, intent_text: str) -> dict:
         text = (intent_text or "").strip()
@@ -986,13 +1040,17 @@ class SuggestionEngine:
             )
             return "I couldn't generate a response right now. Try again."
 
-    def log_feedback(self, buffer: str, accepted: str):
+    def log_feedback(self, buffer: str, accepted: str, accept_mode: str = "suffix_append"):
         if not buffer:
             return
+        mode = (accept_mode or "suffix_append").strip().lower()
         try:
             vector_db = self._ensure_vector_db()
-            vector_db.record_feedback(buffer, accepted)
-            full_command = f"{buffer}{accepted}".replace("\n", " ").replace("\r", " ").strip()
+            vector_db.record_feedback(buffer, accepted, mode)
+            if mode == "replace_full":
+                full_command = (accepted or "").replace("\n", " ").replace("\r", " ").strip()
+            else:
+                full_command = f"{buffer}{accepted}".replace("\n", " ").replace("\r", " ").strip()
             if full_command:
                 sanitized = self.privacy_guard.sanitize_text(full_command, context="log_feedback")
                 logger.info(
