@@ -252,10 +252,15 @@ When typo recovery is active, the first ghost suggestion is shown as:
 Maybe you meant:  docker start 7b567d2835e3
 ```
 
-Pressing `Tab` accepts the full command and replaces the full line, except in native-completion contexts where GhostShell intentionally does not steal `Tab`:
+In native-completion contexts, GhostShell suppresses automatic fetches and does not steal `Tab`:
 - path-heavy commands (`cd`, `ls`, `cat`, `vim`, etc.)
 - script/file argument contexts (`python script.py`, `node app.js`, `bash foo.sh`)
 - tokens that look like paths/files (`/`, `./`, `../`, `~`, or extension-like tokens such as `.py`, `.sh`, `.json`)
+
+In those contexts:
+- automatic fetches (`space_auto`, `pause_timer`) are skipped
+- `Tab` always runs native completion (`expand-or-complete`)
+- `Ctrl+Space` is an explicit manual override to fetch suggestions
 
 Semantic intent examples (same executable scope):
 

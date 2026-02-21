@@ -890,6 +890,13 @@ _ghostshell_try_fetch_on_space() {
     local manual_allow_ai="${2:-1}"
     local trigger_source="space_auto"
 
+    if [[ "$is_manual" != "1" ]] && _ghostshell_should_preserve_native_tab; then
+        _ghostshell_clear_suggestions
+        GHOSTSHELL_SHOW_CTRL_SPACE_HINT=0
+        GHOSTSHELL_LAST_FETCH_USED_AI=0
+        return
+    fi
+
     if [[ "$is_manual" == "1" ]]; then
         allow_ai="$manual_allow_ai"
         trigger_source="manual_ctrl_space"
@@ -1030,6 +1037,12 @@ _ghostshell_on_timer_trigger() {
         zle -R
         return
     fi
+    if _ghostshell_should_preserve_native_tab; then
+        _ghostshell_clear_suggestions
+        _ghostshell_update_display
+        zle -R
+        return
+    fi
     
     # Only fetch if buffer has changed and is long enough
     if [[ "$BUFFER" != "$GHOSTSHELL_LAST_BUFFER" && ${#BUFFER} -ge 2 ]]; then
@@ -1085,6 +1098,13 @@ _ghostshell_self_insert() {
     fi
     if _ghostshell_should_skip_ghostshell_for_buffer; then
         _ghostshell_clear_suggestions
+        _ghostshell_update_display
+        zle -R
+        return
+    fi
+    if _ghostshell_should_preserve_native_tab; then
+        _ghostshell_clear_suggestions
+        GHOSTSHELL_SHOW_CTRL_SPACE_HINT=0
         _ghostshell_update_display
         zle -R
         return
