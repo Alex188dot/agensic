@@ -14,6 +14,7 @@ cp ghostshell.zsh "$INSTALL_DIR/"
 cp engine.py "$INSTALL_DIR/"
 cp vector_db.py "$INSTALL_DIR/"
 cp privacy_guard.py "$INSTALL_DIR/"
+cp shell_client.py "$INSTALL_DIR/"
 
 # 3. Install Python Dependencies
 echo "📦 Installing Python dependencies..."

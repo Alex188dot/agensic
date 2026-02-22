@@ -37,8 +37,22 @@ typeset -gA GHOSTSHELL_NATIVE_ESC_WIDGET
 GHOSTSHELL_NATIVE_ESC_WIDGET=()
 typeset -g -a GHOSTSHELL_DISABLED_PATTERNS
 GHOSTSHELL_DISABLED_PATTERNS=()
+typeset -g GHOSTSHELL_SOURCE_PATH="${(%):-%N}"
+if [[ -z "$GHOSTSHELL_SOURCE_PATH" || "$GHOSTSHELL_SOURCE_PATH" == "zsh" ]]; then
+    GHOSTSHELL_SOURCE_PATH="${HOME}/.ghostshell/ghostshell.zsh"
+fi
+typeset -g GHOSTSHELL_SOURCE_DIR="${GHOSTSHELL_SOURCE_PATH:A:h}"
+typeset -g GHOSTSHELL_HOME="${HOME}/.ghostshell"
 typeset -g GHOSTSHELL_CONFIG_PATH="${HOME}/.ghostshell/config.json"
+typeset -g GHOSTSHELL_CLIENT_HELPER="${GHOSTSHELL_SOURCE_DIR}/shell_client.py"
+typeset -g GHOSTSHELL_PLUGIN_LOG="${GHOSTSHELL_HOME}/plugin.log"
 typeset -g GHOSTSHELL_CONFIG_MTIME=""
+typeset -g GHOSTSHELL_FETCH_ATTEMPT_COUNT=0
+typeset -g GHOSTSHELL_FETCH_SUCCESS_COUNT=0
+typeset -g GHOSTSHELL_LAST_FETCH_ERROR_CODE=""
+typeset -g GHOSTSHELL_FETCH_LOG_THROTTLE_SECONDS=10
+typeset -g GHOSTSHELL_FETCH_LOG_LAST_KEY=""
+typeset -g GHOSTSHELL_FETCH_LOG_LAST_TS=0
 typeset -g -a GHOSTSHELL_PATH_HEAVY_EXECUTABLES
 GHOSTSHELL_PATH_HEAVY_EXECUTABLES=(cd ls cat less more head tail vi vim nvim nano code open source cp mv mkdir rmdir touch find grep rg sed awk bat)
 typeset -g -a GHOSTSHELL_SCRIPT_EXECUTABLES
@@ -269,13 +283,56 @@ _ghostshell_should_skip_ghostshell_for_buffer() {
 # 1. CORE LOGIC (Fetch, Display, Feedback)
 # ======================================================
 
+_ghostshell_now_epoch() {
+    local now
+    now="$(date +%s 2>/dev/null)"
+    if [[ -z "$now" ]]; then
+        now="0"
+    fi
+    print -r -- "$now"
+}
+
+_ghostshell_log_fetch_error() {
+    local error_code="$1"
+    local trigger_source="$2"
+    local buffer_len="$3"
+    if [[ -z "$error_code" ]]; then
+        return
+    fi
+
+    local key="${error_code}|${trigger_source}"
+    local now="$(_ghostshell_now_epoch)"
+    local throttle="${GHOSTSHELL_FETCH_LOG_THROTTLE_SECONDS:-10}"
+
+    if [[ "$key" == "$GHOSTSHELL_FETCH_LOG_LAST_KEY" ]]; then
+        if [[ "$now" == <-> && "$GHOSTSHELL_FETCH_LOG_LAST_TS" == <-> ]]; then
+            local delta=$(( now - GHOSTSHELL_FETCH_LOG_LAST_TS ))
+            if (( delta >= 0 && delta < throttle )); then
+                return
+            fi
+        fi
+    fi
+
+    GHOSTSHELL_FETCH_LOG_LAST_KEY="$key"
+    GHOSTSHELL_FETCH_LOG_LAST_TS="$now"
+
+    mkdir -p "$GHOSTSHELL_HOME" 2>/dev/null
+    {
+        printf "%s error=%s trigger=%s buffer_len=%s\n" \
+            "$(date '+%Y-%m-%d %H:%M:%S' 2>/dev/null)" \
+            "$error_code" \
+            "$trigger_source" \
+            "$buffer_len"
+    } >> "$GHOSTSHELL_PLUGIN_LOG" 2>/dev/null
+}
+
 _ghostshell_fetch_suggestions() {
     local allow_ai="${1:-1}"
     local trigger_source="${2:-unknown}"
     local buffer_content="$BUFFER"
-    local cwd="$PWD"
     local sep=$'\x1f'
     GHOSTSHELL_LAST_FETCH_USED_AI=0
+    GHOSTSHELL_FETCH_ATTEMPT_COUNT=$((GHOSTSHELL_FETCH_ATTEMPT_COUNT + 1))
     
     # Don't fetch if buffer is too short
     if [[ ${#buffer_content} -lt 2 ]]; then
@@ -285,85 +342,120 @@ _ghostshell_fetch_suggestions() {
         GHOSTSHELL_SUGGESTION_KINDS=()
         return
     fi
-    
-    # Escaping single quotes for python
-    local escaped_buffer="${buffer_content//\'/\'\\\'\'}"
-    
-    local response=$(python3 -c "
-import urllib.request, json, sys
-data = {
-    'command_buffer': '''$escaped_buffer''',
-    'cursor_position': ${CURSOR},
-    'working_directory': '''$cwd''',
+
+    local request_json
+    request_json="$(
+        GHOSTSHELL_REQ_BUFFER="$buffer_content" \
+        GHOSTSHELL_REQ_CURSOR="$CURSOR" \
+        GHOSTSHELL_REQ_CWD="$PWD" \
+        GHOSTSHELL_REQ_ALLOW_AI="$allow_ai" \
+        GHOSTSHELL_REQ_TRIGGER_SOURCE="$trigger_source" \
+        python3 -c "
+import json, os
+payload = {
+    'command_buffer': os.environ.get('GHOSTSHELL_REQ_BUFFER', ''),
+    'cursor_position': int(os.environ.get('GHOSTSHELL_REQ_CURSOR', '0') or '0'),
+    'working_directory': os.environ.get('GHOSTSHELL_REQ_CWD', ''),
     'shell': 'zsh',
-    'allow_ai': bool(int('${allow_ai}')),
-    'trigger_source': '''$trigger_source''',
+    'allow_ai': bool(int(os.environ.get('GHOSTSHELL_REQ_ALLOW_AI', '1') or '1')),
+    'trigger_source': os.environ.get('GHOSTSHELL_REQ_TRIGGER_SOURCE', 'unknown'),
 }
+print(json.dumps(payload, separators=(',', ':')))
+" 2>/dev/null
+    )"
+
+    if [[ -z "$request_json" ]]; then
+        GHOSTSHELL_LAST_FETCH_ERROR_CODE="payload_build_error"
+        _ghostshell_log_fetch_error "$GHOSTSHELL_LAST_FETCH_ERROR_CODE" "$trigger_source" "${#buffer_content}"
+        GHOSTSHELL_SUGGESTIONS=()
+        GHOSTSHELL_DISPLAY_TEXTS=()
+        GHOSTSHELL_ACCEPT_MODES=()
+        GHOSTSHELL_SUGGESTION_KINDS=()
+        GHOSTSHELL_SUGGESTION_INDEX=1
+        return
+    fi
+
+    if [[ ! -f "$GHOSTSHELL_CLIENT_HELPER" ]]; then
+        GHOSTSHELL_LAST_FETCH_ERROR_CODE="helper_missing"
+        _ghostshell_log_fetch_error "$GHOSTSHELL_LAST_FETCH_ERROR_CODE" "$trigger_source" "${#buffer_content}"
+        GHOSTSHELL_SUGGESTIONS=()
+        GHOSTSHELL_DISPLAY_TEXTS=()
+        GHOSTSHELL_ACCEPT_MODES=()
+        GHOSTSHELL_SUGGESTION_KINDS=()
+        GHOSTSHELL_SUGGESTION_INDEX=1
+        return
+    fi
+
+    local response_json
+    response_json="$(printf '%s' "$request_json" | python3 "$GHOSTSHELL_CLIENT_HELPER" --timeout 3.0 2>/dev/null)"
+
+    local parsed
+    parsed="$(
+        GHOSTSHELL_CLIENT_RESPONSE="$response_json" \
+        python3 -c "
+import json, os
+sep = '\x1f'
+raw = os.environ.get('GHOSTSHELL_CLIENT_RESPONSE', '')
 try:
-    req = urllib.request.Request('http://127.0.0.1:22000/predict', data=json.dumps(data).encode('utf-8'), headers={'Content-Type': 'application/json'})
-    with urllib.request.urlopen(req, timeout=1.5) as r:
-        result = json.load(r)
-        used_ai = bool(result.get('used_ai', False))
-        # Get structured suggestions when available.
-        pool = result.get('pool', result.get('suggestions', []))
-        pool_meta = result.get('pool_meta', [])
-        bootstrap = result.get('bootstrap', {})
-        # Filter out empty or duplicate strings and limit to 20
-        seen = set()
-        clean_pool = []
-        clean_display = []
-        clean_modes = []
-        clean_kinds = []
-        if isinstance(pool_meta, list):
-            for item in pool_meta:
-                if not isinstance(item, dict):
-                    continue
-                accept_text = str(item.get('accept_text', '') or '')
-                if not accept_text or accept_text in seen:
-                    continue
-                seen.add(accept_text)
-                clean_pool.append(accept_text)
-                clean_display.append(str(item.get('display_text', accept_text) or accept_text))
-                clean_modes.append(str(item.get('accept_mode', 'suffix_append') or 'suffix_append'))
-                clean_kinds.append(str(item.get('kind', 'normal') or 'normal'))
-                if len(clean_pool) >= 20:
-                    break
-        if not clean_pool:
-            for s in pool:
-                if s and s not in seen:
-                    clean_pool.append(s)
-                    clean_display.append(s)
-                    clean_modes.append('suffix_append')
-                    clean_kinds.append('normal')
-                    seen.add(s)
-                if len(clean_pool) >= 20:
-                    break
-        # If bootstrap is still running and we don't yet have suggestions,
-        # return a non-actionable status ghost text.
-        if not clean_pool and bootstrap.get('running'):
-            clean_pool = ['__GHOSTSHELL_STATUS__: ** Index is still loading, suggestions coming in a few seconds **']
-            clean_display = clean_pool[:]
-            clean_modes = ['suffix_append']
-            clean_kinds = ['status']
-        print(
-            ('1' if used_ai else '0') + '\n' +
-            '\x1f'.join(clean_pool[:20]) + '\n' +
-            '\x1f'.join(clean_display[:20]) + '\n' +
-            '\x1f'.join(clean_modes[:20]) + '\n' +
-            '\x1f'.join(clean_kinds[:20])
-        )
-except Exception as e:
-    print('0')
-" 2>/dev/null)
-    
-    # Parse response into GHOSTSHELL_SUGGESTIONS array and used_ai flag.
-    local -a response_lines
-    response_lines=("${(@f)response}")
-    local used_ai_line="${response_lines[1]}"
-    local pool_line="${response_lines[2]}"
-    local display_line="${response_lines[3]}"
-    local mode_line="${response_lines[4]}"
-    local kind_line="${response_lines[5]}"
+    data = json.loads(raw)
+except Exception:
+    print('ok=0')
+    print('error_code=bad_client_json')
+    raise SystemExit(0)
+
+ok = bool(data.get('ok', False))
+error_code = str(data.get('error_code', '') or '')
+used_ai = '1' if bool(data.get('used_ai', False)) else '0'
+
+if not ok:
+    print('ok=0')
+    print('error_code=' + error_code)
+    print('used_ai=' + used_ai)
+    raise SystemExit(0)
+
+def clean_list(value):
+    if not isinstance(value, list):
+        return []
+    return [str(item or '') for item in value]
+
+pool = clean_list(data.get('pool'))[:20]
+display = clean_list(data.get('display'))[:20]
+modes = clean_list(data.get('modes'))[:20]
+kinds = clean_list(data.get('kinds'))[:20]
+
+print('ok=1')
+print('error_code=')
+print('used_ai=' + used_ai)
+print('pool=' + sep.join(pool))
+print('display=' + sep.join(display))
+print('modes=' + sep.join(modes))
+print('kinds=' + sep.join(kinds))
+" 2>/dev/null
+    )"
+
+    local -a parsed_lines
+    parsed_lines=("${(@f)parsed}")
+    local ok_value="${parsed_lines[1]#ok=}"
+    local error_code="${parsed_lines[2]#error_code=}"
+    local used_ai_line="${parsed_lines[3]#used_ai=}"
+    local pool_line="${parsed_lines[4]#pool=}"
+    local display_line="${parsed_lines[5]#display=}"
+    local mode_line="${parsed_lines[6]#modes=}"
+    local kind_line="${parsed_lines[7]#kinds=}"
+
+    if [[ "$ok_value" != "1" ]]; then
+        GHOSTSHELL_LAST_FETCH_ERROR_CODE="${error_code:-client_fetch_failed}"
+        _ghostshell_log_fetch_error "$GHOSTSHELL_LAST_FETCH_ERROR_CODE" "$trigger_source" "${#buffer_content}"
+        GHOSTSHELL_SUGGESTIONS=()
+        GHOSTSHELL_DISPLAY_TEXTS=()
+        GHOSTSHELL_ACCEPT_MODES=()
+        GHOSTSHELL_SUGGESTION_KINDS=()
+        GHOSTSHELL_SUGGESTION_INDEX=1
+        return
+    fi
+
+    GHOSTSHELL_FETCH_SUCCESS_COUNT=$((GHOSTSHELL_FETCH_SUCCESS_COUNT + 1))
+    GHOSTSHELL_LAST_FETCH_ERROR_CODE=""
 
     if [[ "$used_ai_line" == "1" ]]; then
         GHOSTSHELL_LAST_FETCH_USED_AI=1

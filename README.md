@@ -124,6 +124,12 @@ Run:
 aiterminal setup
 ```
 
+Diagnostics:
+
+```bash
+aiterminal doctor
+```
+
 First screen:
 - `Manage GhostShell command patterns`
 - `Choose AI provider`

@@ -18,6 +18,7 @@ CONFIG_DIR = os.path.expanduser("~/.ghostshell")
 CONFIG_FILE = os.path.join(CONFIG_DIR, "config.json")
 PID_FILE = os.path.join(CONFIG_DIR, "daemon.pid")
 SERVER_SCRIPT = os.path.join(os.path.dirname(os.path.abspath(__file__)), "server.py")
+SHELL_CLIENT_SCRIPT = os.path.join(os.path.dirname(os.path.abspath(__file__)), "shell_client.py")
 PLIST_PATH = os.path.expanduser("~/Library/LaunchAgents/com.ghostshell.daemon.plist")
 
 def ensure_config_dir():
@@ -349,6 +350,19 @@ def _try_kill_pid(pid: int, sig: int = signal.SIGTERM) -> bool:
     except Exception:
         return False
 
+def _is_pid_alive(pid: int | None) -> bool:
+    if pid is None or pid <= 0:
+        return False
+    try:
+        os.kill(pid, 0)
+        return True
+    except ProcessLookupError:
+        return False
+    except PermissionError:
+        return True
+    except Exception:
+        return False
+
 def _wait_for_port_close(timeout_seconds: float = 10.0, interval_seconds: float = 0.2) -> bool:
     import time
     deadline = time.time() + timeout_seconds
@@ -367,36 +381,48 @@ def _fetch_daemon_status() -> dict | None:
     except Exception:
         return None
 
-def _wait_for_bootstrap_ready(timeout_seconds: float = 20.0) -> tuple[bool, int]:
+def _wait_for_bootstrap_ready(started_pid: int | None = None) -> tuple[bool, int, str]:
     import time
 
-    deadline = time.time() + timeout_seconds
     last_indexed = 0
-    saw_status = False
 
     with console.status("[yellow]Warming up command index...[/yellow]", spinner="dots") as status:
-        while time.time() < deadline:
-            if not is_port_open():
-                return (False, last_indexed)
+        while True:
+            if started_pid is not None and not _is_pid_alive(started_pid):
+                return (
+                    False,
+                    last_indexed,
+                    "Daemon process exited before initialization completed. Check `aiterminal logs`.",
+                )
 
             payload = _fetch_daemon_status()
             if payload and isinstance(payload.get("bootstrap"), dict):
-                saw_status = True
                 bootstrap = payload["bootstrap"]
                 last_indexed = int(bootstrap.get("indexed_commands", 0) or 0)
+                phase = str(bootstrap.get("phase") or "starting")
+                error = str(bootstrap.get("error") or "").strip()
                 if bootstrap.get("ready"):
-                    return (True, last_indexed)
+                    return (True, last_indexed, "")
+                if phase == "error":
+                    return (False, last_indexed, error or "Backend initialization failed.")
 
-                status.update(
-                    "[yellow]Warming up command index in background (you can use the shell while this completes)...[/yellow]"
-                )
+                if phase == "downloading_model":
+                    status.update("[yellow]Downloading embedding model from Hugging Face...[/yellow]")
+                elif phase == "syncing_history":
+                    status.update("[yellow]Warming up command index...[/yellow]")
+                elif phase == "loading_model_local":
+                    status.update("[yellow]Loading embedding model from local cache...[/yellow]")
+                elif phase == "initializing_db":
+                    status.update("[yellow]Initializing vector database...[/yellow]")
+                else:
+                    status.update("[yellow]Starting GhostShell...[/yellow]")
+            else:
+                if is_port_open():
+                    status.update("[yellow]Waiting for daemon status...[/yellow]")
+                else:
+                    status.update("[yellow]Starting GhostShell...[/yellow]")
 
             time.sleep(0.25)
-
-    # If status endpoint is unavailable, don't block startup.
-    if not saw_status:
-        return (False, 0)
-    return (False, last_indexed)
 
 @app.command()
 def setup():
@@ -467,7 +493,20 @@ def start():
     """Start the background AI daemon manually."""
     ensure_config_dir()
     if is_port_open():
-        console.print("[yellow]Daemon already running on port 22000.[/yellow]")
+        payload = _fetch_daemon_status()
+        bootstrap = payload.get("bootstrap", {}) if isinstance(payload, dict) else {}
+        if isinstance(bootstrap, dict) and bootstrap.get("ready"):
+            indexed = int(bootstrap.get("indexed_commands", 0) or 0)
+            console.print("[yellow]Daemon already running on port 22000.[/yellow]")
+            console.print(f"[green]✔ Command index ready[/green]")
+            return
+        console.print("[yellow]Daemon already running; waiting for readiness...[/yellow]")
+        ready, indexed, error = _wait_for_bootstrap_ready()
+        if ready:
+            console.print(f"[green]✔ Command index ready[/green]")
+            return
+        console.print(f"[red]✗ Startup failed before readiness:[/red] {error}")
+        raise typer.Exit(code=1)
         return
 
     if os.path.exists(PID_FILE):
@@ -488,11 +527,12 @@ def start():
     
     console.print(f"[green]✔ Started (PID: {process.pid})[/green]")
     console.print(f"[dim]Log file: {CONFIG_DIR}/server.log[/dim]")
-    ready, indexed = _wait_for_bootstrap_ready(timeout_seconds=20.0)
+    ready, indexed, error = _wait_for_bootstrap_ready(started_pid=process.pid)
     if ready:
-        console.print(f"[green]✔ Command index ready ({indexed} commands loaded).[/green]")
+        console.print(f"[green]✔ Command index ready[/green]")
     else:
-        console.print("[yellow]Index warmup still running in background. Suggestions may improve in a few seconds.[/yellow]")
+        console.print(f"[red]✗ Startup failed before readiness:[/red] {error}")
+        raise typer.Exit(code=1)
 
 @app.command()
 def stop():
@@ -597,6 +637,115 @@ def test():
         console.print("\n[yellow]Troubleshooting:[/yellow]")
         console.print("1. Check if server is running: aiterminal start")
         console.print("2. View logs: aiterminal logs")
+
+@app.command()
+def doctor():
+    """Run diagnostics for GhostShell suggestion pipeline."""
+    console.print("[bold]Running GhostShell diagnostics...[/bold]")
+
+    issues: list[str] = []
+    warnings: list[str] = []
+    suggestion_preview = ""
+
+    payload = _fetch_daemon_status()
+    if not payload or not isinstance(payload, dict):
+        issues.append("daemon_unreachable")
+        console.print("[red]✗ Daemon status:[/red] unreachable")
+    else:
+        console.print("[green]✓ Daemon status:[/green] reachable")
+        bootstrap = payload.get("bootstrap", {}) if isinstance(payload.get("bootstrap"), dict) else {}
+        if not bootstrap.get("ready"):
+            issues.append("bootstrap_not_ready")
+            phase = str(bootstrap.get("phase") or "unknown")
+            console.print(f"[red]✗ Bootstrap:[/red] not ready (phase={phase})")
+        else:
+            indexed = int(bootstrap.get("indexed_commands", 0) or 0)
+            console.print(f"[green]✓ Bootstrap:[/green] ready")
+
+    if os.path.exists(SHELL_CLIENT_SCRIPT):
+        sample_payload = {
+            "command_buffer": "git st",
+            "cursor_position": 6,
+            "working_directory": os.path.expanduser("~"),
+            "shell": "zsh",
+            "allow_ai": False,
+            "trigger_source": "doctor",
+        }
+        try:
+            run = subprocess.run(
+                [sys.executable, SHELL_CLIENT_SCRIPT, "--timeout", "2.5"],
+                input=json.dumps(sample_payload),
+                text=True,
+                capture_output=True,
+                check=False,
+            )
+            output = (run.stdout or "").strip()
+            if not output:
+                issues.append("predict_error")
+                console.print("[red]✗ Predict probe:[/red] empty helper response")
+            else:
+                parsed = json.loads(output)
+                if not parsed.get("ok"):
+                    error_code = str(parsed.get("error_code", "predict_error") or "predict_error")
+                    issues.append(error_code)
+                    console.print(f"[red]✗ Predict probe:[/red] {error_code}")
+                else:
+                    pool = parsed.get("pool", [])
+                    if not isinstance(pool, list):
+                        issues.append("predict_error")
+                        console.print("[red]✗ Predict probe:[/red] invalid response shape")
+                    elif not pool:
+                        warnings.append("empty_pool")
+                        console.print("[yellow]⚠ Predict probe:[/yellow] empty_pool")
+                    else:
+                        suggestion_preview = str(pool[0] or "")
+                        console.print("[green]✓ Predict probe:[/green] returned suggestions")
+        except subprocess.TimeoutExpired:
+            issues.append("predict_timeout")
+            console.print("[red]✗ Predict probe:[/red] predict_timeout")
+        except Exception:
+            issues.append("predict_error")
+            console.print("[red]✗ Predict probe:[/red] predict_error")
+    else:
+        issues.append("helper_missing")
+        console.print(f"[red]✗ Helper:[/red] missing at {SHELL_CLIENT_SCRIPT}")
+
+    try:
+        binding = subprocess.run(
+            ["zsh", "-ic", "bindkey '^@'"],
+            capture_output=True,
+            text=True,
+            check=False,
+            timeout=3,
+        )
+        if "_ghostshell_manual_trigger" not in (binding.stdout or ""):
+            warnings.append("zsh_widget_not_bound")
+            console.print("[yellow]⚠ Zsh binding:[/yellow] zsh_widget_not_bound")
+        else:
+            console.print("[green]✓ Zsh binding:[/green] Ctrl+Space mapped")
+    except Exception:
+        warnings.append("zsh_widget_not_bound")
+        console.print("[yellow]⚠ Zsh binding:[/yellow] could not verify")
+
+    plugin_log = os.path.join(CONFIG_DIR, "plugin.log")
+    if os.path.exists(plugin_log):
+        console.print(f"[dim]Plugin log: {plugin_log}[/dim]")
+
+    if suggestion_preview:
+        console.print(f"[dim]Suggestion preview: {suggestion_preview}[/dim]")
+
+    unique_issues = list(dict.fromkeys(issues))
+    unique_warnings = list(dict.fromkeys(warnings))
+
+    if unique_issues:
+        console.print(f"[red]Doctor result:[/red] FAILED ({', '.join(unique_issues)})")
+        raise typer.Exit(code=1)
+
+    if unique_warnings:
+        console.print(f"[yellow]Doctor result:[/yellow] WARN ({', '.join(unique_warnings)})")
+        return
+
+    console.print("[green]Doctor result:[/green] OK")
 
 @app.command("shortcuts")
 def shortcuts_command():

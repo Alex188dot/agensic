@@ -4,6 +4,7 @@ import json
 import re
 import shutil
 import threading
+import time
 import platform
 import asyncio
 from pathlib import Path
@@ -55,6 +56,7 @@ class SuggestionEngine:
         self._bootstrap_thread = None
         self._bootstrap_history_file = ""
         self._bootstrap_completed_for = ""
+        self._bootstrap_error = ""
 
     def _ensure_vector_db(self):
         if self.vector_db is not None:
@@ -70,14 +72,34 @@ class SuggestionEngine:
     def _bootstrap_worker(self, history_file: str):
         try:
             logger.info("Starting vector DB bootstrap in background")
-            vector_db = self._ensure_vector_db()
+            max_lock_retries = 20
+            attempt = 0
+            while True:
+                try:
+                    vector_db = self._ensure_vector_db()
+                    break
+                except Exception as lock_exc:
+                    sanitized = self.privacy_guard.sanitize_for_log(str(lock_exc))
+                    if "lock file" in sanitized.lower() and attempt < max_lock_retries:
+                        attempt += 1
+                        logger.warning(
+                            "Vector DB lock busy; retrying bootstrap (%d/%d)",
+                            attempt,
+                            max_lock_retries,
+                        )
+                        time.sleep(0.25)
+                        continue
+                    raise
             if history_file:
                 vector_db.initialize_from_history(history_file)
             logger.info("Background history sync complete")
         except Exception as e:
+            sanitized = self.privacy_guard.sanitize_for_log(str(e))
+            with self._bootstrap_lock:
+                self._bootstrap_error = sanitized
             logger.error(
                 "Background history sync failed: %s",
-                self.privacy_guard.sanitize_for_log(str(e)),
+                sanitized,
             )
         finally:
             with self._bootstrap_lock:
@@ -103,6 +125,7 @@ class SuggestionEngine:
             ):
                 return
 
+            self._bootstrap_error = ""
             self._bootstrap_history_file = history_file
             self._bootstrap_thread = threading.Thread(
                 target=self._bootstrap_worker,
@@ -117,6 +140,7 @@ class SuggestionEngine:
             thread = self._bootstrap_thread
             history_file = self._bootstrap_history_file
             completed_for = self._bootstrap_completed_for
+            bootstrap_error = self._bootstrap_error
 
         running = bool(thread and thread.is_alive())
         ready = bool(
@@ -133,11 +157,55 @@ class SuggestionEngine:
             except Exception:
                 indexed_commands = 0
 
+        phase = "starting"
+        model_download_in_progress = False
+        model_download_needed = False
+        error = ""
+        if self.vector_db is not None and hasattr(self.vector_db, "get_init_status"):
+            try:
+                init_status = self.vector_db.get_init_status()
+                phase = str(init_status.get("phase") or phase)
+                model_download_in_progress = bool(
+                    init_status.get("model_download_in_progress", False)
+                )
+                model_download_needed = bool(
+                    init_status.get("model_download_needed", False)
+                )
+                error = str(init_status.get("error") or "")
+            except Exception:
+                pass
+        else:
+            try:
+                from vector_db import get_runtime_init_status
+
+                init_status = get_runtime_init_status()
+                phase = str(init_status.get("phase") or phase)
+                model_download_in_progress = bool(
+                    init_status.get("model_download_in_progress", False)
+                )
+                model_download_needed = bool(
+                    init_status.get("model_download_needed", False)
+                )
+                error = str(init_status.get("error") or "")
+            except Exception:
+                pass
+
+        if bootstrap_error:
+            phase = "error"
+            error = bootstrap_error
+        elif ready and phase != "error":
+            phase = "ready"
+            error = ""
+
         return {
             "running": running,
             "ready": ready,
             "history_file": history_file,
             "indexed_commands": indexed_commands,
+            "phase": phase,
+            "model_download_in_progress": model_download_in_progress,
+            "model_download_needed": model_download_needed,
+            "error": error,
         }
 
     def _safe_tail(self, path: str, max_lines: int) -> list[str]:

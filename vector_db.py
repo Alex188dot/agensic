@@ -27,6 +27,25 @@ logging.getLogger("sentence_transformers").setLevel(logging.ERROR)
 
 logger = logging.getLogger("ghostshell.vector_db")
 
+_RUNTIME_INIT_STATUS_LOCK = threading.Lock()
+_RUNTIME_INIT_STATUS: Dict[str, object] = {
+    "phase": "starting",
+    "model_download_in_progress": False,
+    "model_download_needed": False,
+    "error": "",
+}
+
+
+def _update_runtime_init_status(**kwargs):
+    with _RUNTIME_INIT_STATUS_LOCK:
+        for key, value in kwargs.items():
+            _RUNTIME_INIT_STATUS[key] = value
+
+
+def get_runtime_init_status() -> Dict[str, object]:
+    with _RUNTIME_INIT_STATUS_LOCK:
+        return dict(_RUNTIME_INIT_STATUS)
+
 
 class CommandVectorDB:
     """
@@ -47,6 +66,12 @@ class CommandVectorDB:
     SEMANTIC_MIN_SCORE = 55.0
 
     def __init__(self, db_path: str = None, model_name: str = "all-MiniLM-L6-v2"):
+        _update_runtime_init_status(
+            phase="starting",
+            model_download_in_progress=False,
+            model_download_needed=False,
+            error="",
+        )
         if db_path is None:
             db_path = os.path.expanduser("~/.ghostshell/zvec_commands")
 
@@ -63,8 +88,14 @@ class CommandVectorDB:
         self.dimensions = 384
         self._io_lock = threading.RLock()
         self._is_closed = False
+        self._status_lock = threading.Lock()
+        self._init_phase = "starting"
+        self._model_download_in_progress = False
+        self._model_download_needed = False
+        self._init_error = ""
 
         self.model = self._load_model()
+        self._set_init_phase("initializing_db")
         self.collection = self._init_command_collection(self.db_path)
         self.feedback_collection = self._init_feedback_collection(self.feedback_db_path)
         self.command_cache: set[str] = set()
@@ -72,6 +103,32 @@ class CommandVectorDB:
         self._history_cache_warmed_for: set[str] = set()
         self.inserted_commands = self._load_existing_commands(limit=1024)
         self._register_commands(self.inserted_commands)
+
+    def _set_init_phase(self, phase: str):
+        with self._status_lock:
+            self._init_phase = phase
+        _update_runtime_init_status(phase=phase)
+
+    def _set_init_error(self, error: str):
+        clean_error = str(error or "").strip()
+        with self._status_lock:
+            self._init_phase = "error"
+            self._init_error = clean_error
+            self._model_download_in_progress = False
+        _update_runtime_init_status(
+            phase="error",
+            error=clean_error,
+            model_download_in_progress=False,
+        )
+
+    def get_init_status(self) -> Dict[str, object]:
+        with self._status_lock:
+            return {
+                "phase": self._init_phase,
+                "model_download_in_progress": bool(self._model_download_in_progress),
+                "model_download_needed": bool(self._model_download_needed),
+                "error": self._init_error,
+            }
 
     @staticmethod
     def normalize_command(command: str) -> str:
@@ -381,6 +438,7 @@ class CommandVectorDB:
 
     def _load_model(self) -> SentenceTransformer:
         logger.info(f"Loading embedding model: {self.model_name}")
+        self._set_init_phase("loading_model_local")
         try:
             import torch
 
@@ -392,16 +450,37 @@ class CommandVectorDB:
         try:
             model = SentenceTransformer(self.model_name, local_files_only=True)
             logger.info("Model loaded from local cache")
-        except Exception:
+            self._set_init_phase("initializing_db")
+            return model
+        except Exception as local_exc:
             logger.info("Model not found locally. Downloading once...")
-            os.environ["HF_HUB_OFFLINE"] = "0"
-            os.environ["TRANSFORMERS_OFFLINE"] = "0"
-            model = SentenceTransformer(self.model_name)
-            os.environ["HF_HUB_OFFLINE"] = "1"
-            os.environ["TRANSFORMERS_OFFLINE"] = "1"
-            logger.info("Model downloaded and cached")
-
-        return model
+            with self._status_lock:
+                self._model_download_needed = True
+                self._model_download_in_progress = True
+                self._init_phase = "downloading_model"
+            _update_runtime_init_status(
+                phase="downloading_model",
+                model_download_needed=True,
+                model_download_in_progress=True,
+            )
+            try:
+                os.environ["HF_HUB_OFFLINE"] = "0"
+                os.environ["TRANSFORMERS_OFFLINE"] = "0"
+                model = SentenceTransformer(self.model_name)
+                logger.info("Model downloaded and cached")
+                self._set_init_phase("initializing_db")
+                return model
+            except Exception as download_exc:
+                self._set_init_error(
+                    f"Embedding model initialization failed: {download_exc}"
+                )
+                raise download_exc from local_exc
+            finally:
+                with self._status_lock:
+                    self._model_download_in_progress = False
+                _update_runtime_init_status(model_download_in_progress=False)
+                os.environ["HF_HUB_OFFLINE"] = "1"
+                os.environ["TRANSFORMERS_OFFLINE"] = "1"
 
     def _is_corruption_error(self, error: Exception) -> bool:
         msg = str(error).lower()
@@ -635,9 +714,11 @@ class CommandVectorDB:
         return (self.count_history_commands(parsed_commands), end_offset)
 
     def initialize_from_history(self, history_file: str):
+        self._set_init_phase("syncing_history")
         history_path = Path(history_file).expanduser()
         if not history_path.exists():
             logger.warning(f"History file not found: {history_file}")
+            self._set_init_phase("ready")
             return
 
         logger.info(f"Syncing database from history: {history_file}")
@@ -660,6 +741,7 @@ class CommandVectorDB:
                     }
                 )
                 logger.info("Database already populated; seeded incremental history pointer")
+                self._set_init_phase("ready")
                 return
 
             start_offset = 0
@@ -688,6 +770,7 @@ class CommandVectorDB:
                         "offset": stat.st_size,
                     }
                 )
+                self._set_init_phase("ready")
                 return
 
             total_occurrences = sum(command_counts.values())
@@ -707,8 +790,10 @@ class CommandVectorDB:
                     "offset": end_offset,
                 }
             )
+            self._set_init_phase("ready")
         except Exception as exc:
             logger.error(f"Error reading history file: {exc}")
+            self._set_init_error(f"History sync failed: {exc}")
 
     def insert_commands(self, commands: List[str]) -> int:
         if self._is_closed:
