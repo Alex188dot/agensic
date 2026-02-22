@@ -140,12 +140,22 @@ aiterminal doctor
 ```
 
 First screen:
-- `Manage GhostShell command patterns`
 - `Choose AI provider`
+- `Manage GhostShell command patterns`
+- `Manage command store (add/remove commands)`
 
 Pattern controls:
 - `Disable GhostShell for a specific pattern`
 - `Re-enable GhostShell for a specific pattern`
+
+Command store:
+- `Add commands` (comma-separated input; accidental spaces are trimmed)
+- `Remove commands` (multi-select with arrow keys + `Space`, then `Enter` to confirm)
+- Remove screen categories:
+  - `Potential wrong commands` (conservative typo-like low-usage variants)
+  - `Commands` (all other commands)
+- Deletion is exact-command only and removes selected entries from both shell history and vector store.
+- Removed commands are tracked to prevent automatic re-ingestion until manually re-added.
 
 LM Studio example:
 

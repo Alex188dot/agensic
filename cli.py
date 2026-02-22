@@ -308,6 +308,208 @@ def _configure_provider(existing_config: dict):
     if not start_enabled and questionary.confirm("Start daemon now?").ask():
         start()
 
+def _ensure_command_store_backend_ready() -> bool:
+    if not is_port_open():
+        should_start = questionary.confirm(
+            "Command store needs the daemon running. Start daemon now?"
+        ).ask()
+        if not should_start:
+            console.print("[yellow]Command store cancelled.[/yellow]")
+            return False
+        try:
+            start()
+            return True
+        except typer.Exit:
+            console.print("[red]Failed to start daemon for command store.[/red]")
+            return False
+
+    payload = _fetch_daemon_status()
+    bootstrap = payload.get("bootstrap", {}) if isinstance(payload, dict) else {}
+    if isinstance(bootstrap, dict) and bootstrap.get("ready"):
+        return True
+
+    console.print("[yellow]Daemon is running but command index is not ready yet. Waiting...[/yellow]")
+    ready, _, error = _wait_for_bootstrap_ready()
+    if ready:
+        return True
+
+    console.print(f"[red]Command store unavailable:[/red] {error}")
+    return False
+
+def _command_store_request(method: str, path: str, payload: dict | None = None) -> dict | None:
+    url = f"http://127.0.0.1:22000{path}"
+    try:
+        response = requests.request(method.upper(), url, json=payload, timeout=20)
+    except Exception as exc:
+        console.print(f"[red]Failed to reach daemon:[/red] {exc}")
+        return None
+
+    if response.status_code != 200:
+        body = response.text.strip()
+        if body:
+            console.print(f"[red]Command store request failed ({response.status_code}):[/red] {body}")
+        else:
+            console.print(f"[red]Command store request failed ({response.status_code}).[/red]")
+        return None
+
+    try:
+        data = response.json()
+    except ValueError:
+        console.print("[red]Invalid response from command store endpoint.[/red]")
+        return None
+    if not isinstance(data, dict):
+        console.print("[red]Unexpected response format from command store endpoint.[/red]")
+        return None
+    return data
+
+def _manage_command_store_add():
+    raw = questionary.text(
+        "Add commands (comma-separated; spaces are ok):"
+    ).ask() or ""
+    parts = [part.strip() for part in raw.split(",")]
+    commands = [part for part in parts if part]
+    if not commands:
+        console.print("[yellow]No commands provided. Nothing changed.[/yellow]")
+        return
+
+    payload = _command_store_request("POST", "/command_store/add", {"commands": commands})
+    if not payload:
+        return
+    inserted = int(payload.get("inserted", 0) or 0)
+    already_present = int(payload.get("already_present", 0) or 0)
+    unblocked_removed = int(payload.get("unblocked_removed", 0) or 0)
+
+    console.print(
+        f"[green]✓ Added commands[/green] inserted={inserted}, already_present={already_present}, "
+        f"unblocked_from_removed={unblocked_removed}"
+    )
+
+def _format_command_store_choice(item: dict, show_reason: bool = False) -> str:
+    command = str(item.get("command", "") or "").strip()
+    usage = int(item.get("usage_score", 0) or 0)
+    label = f"{command} [usage:{usage}]"
+    if show_reason:
+        reason = str(item.get("reason", "") or "").strip()
+        if reason:
+            label = f"{label} ({reason})"
+    return label
+
+def _manage_command_store_remove():
+    payload = _command_store_request("GET", "/command_store/list")
+    if not payload:
+        return
+
+    potential_wrong = payload.get("potential_wrong", [])
+    commands = payload.get("commands", [])
+    if not isinstance(potential_wrong, list):
+        potential_wrong = []
+    if not isinstance(commands, list):
+        commands = []
+
+    choices: list = []
+    seen: set[str] = set()
+
+    if potential_wrong:
+        choices.append(questionary.Separator("Potential wrong commands"))
+        for item in potential_wrong:
+            if not isinstance(item, dict):
+                continue
+            command = str(item.get("command", "") or "").strip()
+            if not command or command in seen:
+                continue
+            seen.add(command)
+            choices.append(
+                questionary.Choice(
+                    title=_format_command_store_choice(item, show_reason=True),
+                    value=command,
+                )
+            )
+
+    regular_choices = []
+    for item in commands:
+        if not isinstance(item, dict):
+            continue
+        command = str(item.get("command", "") or "").strip()
+        if not command or command in seen:
+            continue
+        seen.add(command)
+        regular_choices.append(
+            questionary.Choice(
+                title=_format_command_store_choice(item, show_reason=False),
+                value=command,
+            )
+        )
+
+    if regular_choices:
+        choices.append(questionary.Separator("Commands"))
+        choices.extend(regular_choices)
+
+    if not choices:
+        console.print("[yellow]No commands available in command store.[/yellow]")
+        return
+
+    selected = questionary.checkbox(
+        "Select commands to remove (use arrows, Space to select multiple, Enter to continue):",
+        choices=choices,
+        pointer="👉",
+    ).ask()
+    if not selected:
+        console.print("[yellow]No commands selected. Nothing changed.[/yellow]")
+        return
+
+    count = len(selected)
+    prompt = (
+        "Are you sure you want to delete this command from your history and command store?"
+        if count == 1
+        else "Are you sure you want to delete these commands from your history and command store?"
+    )
+    if not questionary.confirm(prompt).ask():
+        console.print("[yellow]Deletion cancelled.[/yellow]")
+        return
+
+    shell_name = os.environ.get("SHELL", "zsh")
+    result = _command_store_request(
+        "POST",
+        "/command_store/remove",
+        {"commands": selected, "shell": shell_name},
+    )
+    if not result:
+        return
+
+    vector_removed = int(result.get("vector_removed", 0) or 0)
+    guarded = int(result.get("guarded", 0) or 0)
+    history_removed = int(result.get("history_removed_lines", 0) or 0)
+    console.print(
+        f"[green]✓ Removed commands[/green] vector_removed={vector_removed}, "
+        f"history_lines_removed={history_removed}, guarded={guarded}"
+    )
+
+    warnings_list = result.get("warnings", [])
+    if isinstance(warnings_list, list):
+        for warning in warnings_list:
+            message = str(warning or "").strip()
+            if message:
+                console.print(f"[yellow]{message}[/yellow]")
+
+def _manage_command_store():
+    if not _ensure_command_store_backend_ready():
+        return
+
+    action = questionary.select(
+        "Manage command store:",
+        choices=[
+            "Add commands",
+            "Remove commands",
+        ],
+        pointer="👉",
+    ).ask()
+    if not action:
+        return
+    if action == "Add commands":
+        _manage_command_store_add()
+        return
+    _manage_command_store_remove()
+
 def is_port_open(host: str = "127.0.0.1", port: int = 22000) -> bool:
     """Return True if something is already listening on host:port."""
     with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
@@ -432,17 +634,21 @@ def setup():
     action = questionary.select(
         "Choose one:",
         choices=[
-            "Manage GhostShell command patterns",
             "Choose AI provider",
+            "Manage GhostShell command patterns",
+            "Manage command store (add/remove commands)",
         ],
         pointer="👉",
     ).ask()
     if not action:
         return
+    if action == "Choose AI provider":
+        _configure_provider(existing_config)
+        return
     if action == "Manage GhostShell command patterns":
         _manage_pattern_controls(existing_config)
         return
-    _configure_provider(existing_config)
+    _manage_command_store()
 
 @app.command()
 def enable_startup():

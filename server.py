@@ -14,6 +14,8 @@ import logging
 import json
 import shlex
 import warnings
+import tempfile
+from pathlib import Path
 import uvicorn
 from contextlib import asynccontextmanager
 from fastapi import FastAPI, BackgroundTasks
@@ -87,6 +89,13 @@ class Feedback(BaseModel):
     command_buffer: str
     accepted_suggestion: str
     accept_mode: str = "suffix_append"
+
+class CommandStorePayload(BaseModel):
+    commands: list[str]
+
+class CommandStoreRemovePayload(BaseModel):
+    commands: list[str]
+    shell: str | None = None
 
 def load_config():
     if not os.path.exists(CONFIG_FILE):
@@ -173,6 +182,68 @@ def _command_matches_disabled_pattern(command: str, patterns: list[str]) -> bool
         if exe.startswith(pattern) or pattern.startswith(exe):
             return True
     return False
+
+def _parse_history_line(raw_line: str) -> str:
+    line = (raw_line or "").strip()
+    if not line:
+        return ""
+    if line.startswith(":"):
+        parts = line.split(";", 1)
+        if len(parts) == 2:
+            line = parts[1].strip()
+    return line
+
+def _normalize_unique_commands(commands: list[str], vector_db) -> list[str]:
+    seen: set[str] = set()
+    out: list[str] = []
+    for raw in commands:
+        normalized = vector_db.normalize_command(str(raw or ""))
+        if not normalized or normalized in seen:
+            continue
+        seen.add(normalized)
+        out.append(normalized)
+    return out
+
+def _rewrite_history_without_commands(history_file: str, commands_to_remove: set[str]) -> tuple[int, str]:
+    if not history_file:
+        return (0, "History file could not be detected for this shell.")
+
+    history_path = Path(history_file).expanduser()
+    if not history_path.exists() or not history_path.is_file():
+        return (0, f"History file not found: {history_path}")
+
+    removed_lines = 0
+    tmp_path = None
+    try:
+        os.makedirs(str(history_path.parent), exist_ok=True)
+        source_stat = history_path.stat()
+
+        with open(history_path, "r", encoding="utf-8", errors="ignore") as src:
+            with tempfile.NamedTemporaryFile(
+                mode="w",
+                encoding="utf-8",
+                dir=str(history_path.parent),
+                prefix=f"{history_path.name}.tmp.",
+                delete=False,
+            ) as dst:
+                tmp_path = dst.name
+                for line in src:
+                    normalized = _parse_history_line(line)
+                    if normalized and normalized in commands_to_remove:
+                        removed_lines += 1
+                        continue
+                    dst.write(line)
+
+        os.chmod(tmp_path, source_stat.st_mode)
+        os.replace(tmp_path, history_path)
+        return (removed_lines, "")
+    except Exception as exc:
+        if tmp_path:
+            try:
+                os.remove(tmp_path)
+            except OSError:
+                pass
+        return (removed_lines, f"Failed to rewrite history: {exc}")
 
 @app.post("/predict")
 async def predict_completion(ctx: Context):
@@ -293,6 +364,56 @@ def log_command(data: dict, background_tasks: BackgroundTasks):
 
     background_tasks.add_task(engine.log_executed_command, command, exit_code, source)
     return {"status": "ok"}
+
+@app.get("/command_store/list")
+def command_store_list(shell: str = ""):
+    target_shell = (shell or os.environ.get("SHELL", "zsh")).strip()
+    history_file = get_history_file(target_shell)
+    vector_db = engine._ensure_vector_db()
+    payload = vector_db.list_command_store(history_file=history_file)
+    return {
+        "status": "ok",
+        "history_file": history_file,
+        **payload,
+    }
+
+@app.post("/command_store/add")
+def command_store_add(data: CommandStorePayload):
+    vector_db = engine._ensure_vector_db()
+    result = vector_db.add_manual_commands(data.commands or [])
+    return {
+        "status": "ok",
+        **result,
+    }
+
+@app.post("/command_store/remove")
+def command_store_remove(data: CommandStoreRemovePayload):
+    target_shell = (data.shell or os.environ.get("SHELL", "zsh")).strip()
+    history_file = get_history_file(target_shell)
+    vector_db = engine._ensure_vector_db()
+
+    normalized_targets = _normalize_unique_commands(data.commands or [], vector_db)
+    result = vector_db.remove_commands_exact(normalized_targets)
+
+    history_removed_lines = 0
+    warnings_list: list[str] = []
+    if normalized_targets:
+        history_removed_lines, history_warning = _rewrite_history_without_commands(
+            history_file,
+            set(normalized_targets),
+        )
+        if history_warning:
+            warnings_list.append(history_warning)
+        elif history_file and not vector_db.align_history_index_state_to_end(history_file):
+            warnings_list.append("History index pointer could not be aligned after rewrite.")
+
+    return {
+        "status": "ok",
+        "history_file": history_file,
+        "history_removed_lines": history_removed_lines,
+        "warnings": warnings_list,
+        **result,
+    }
 
 @app.get("/status")
 def daemon_status():

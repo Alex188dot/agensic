@@ -85,6 +85,10 @@ class CommandVectorDB:
             os.path.dirname(self.db_path),
             "last_indexed_line",
         )
+        self.removed_commands_path = os.path.join(
+            os.path.dirname(self.db_path),
+            "removed_commands.json",
+        )
         self.model_name = model_name
         self.dimensions = 384
         self._io_lock = threading.RLock()
@@ -104,6 +108,7 @@ class CommandVectorDB:
         self.token_candidates_by_context: Dict[str, set[str]] = defaultdict(set)
         self.global_token_candidates: set[str] = set()
         self._history_cache_warmed_for: set[str] = set()
+        self.removed_commands: set[str] = self._load_removed_commands()
         self.inserted_commands = self._load_existing_commands(limit=1024)
         self._register_commands(self.inserted_commands)
 
@@ -133,6 +138,74 @@ class CommandVectorDB:
                 "error": self._init_error,
             }
 
+    def _load_removed_commands(self) -> set[str]:
+        if not os.path.exists(self.removed_commands_path):
+            return set()
+        try:
+            with open(self.removed_commands_path, "r", encoding="utf-8") as f:
+                payload = json.load(f)
+            if not isinstance(payload, list):
+                return set()
+            clean: set[str] = set()
+            for value in payload:
+                normalized = self.normalize_command(str(value))
+                if normalized:
+                    clean.add(normalized)
+            return clean
+        except Exception as exc:
+            logger.warning(f"Could not read removed commands file: {exc}")
+            return set()
+
+    def _save_removed_commands(self):
+        try:
+            os.makedirs(os.path.dirname(self.removed_commands_path), exist_ok=True)
+            tmp_path = f"{self.removed_commands_path}.tmp"
+            with open(tmp_path, "w", encoding="utf-8") as f:
+                json.dump(sorted(self.removed_commands), f, indent=2)
+            os.replace(tmp_path, self.removed_commands_path)
+        except Exception as exc:
+            logger.warning(f"Could not save removed commands file: {exc}")
+
+    def is_removed_command(self, command: str) -> bool:
+        normalized = self.normalize_command(command)
+        if not normalized:
+            return False
+        return normalized in self.removed_commands
+
+    def mark_removed_commands(self, commands: List[str]) -> int:
+        if not commands:
+            return 0
+        added = 0
+        with self._io_lock:
+            for raw in commands:
+                normalized = self.normalize_command(raw)
+                if not normalized:
+                    continue
+                if normalized in self.removed_commands:
+                    continue
+                self.removed_commands.add(normalized)
+                added += 1
+            if added:
+                self._save_removed_commands()
+        return added
+
+    def unmark_removed_commands(self, commands: List[str]) -> int:
+        if not commands:
+            return 0
+        removed = 0
+        with self._io_lock:
+            for raw in commands:
+                normalized = self.normalize_command(raw)
+                if not normalized:
+                    continue
+                if normalized not in self.removed_commands:
+                    continue
+                self.removed_commands.remove(normalized)
+                removed += 1
+            if removed:
+                self._save_removed_commands()
+        return removed
+
     @staticmethod
     def normalize_command(command: str) -> str:
         return (command or "").strip()
@@ -154,11 +227,34 @@ class CommandVectorDB:
                 continue
             if self.is_blocked_command(normalized):
                 continue
+            if self.is_removed_command(normalized):
+                continue
             self.command_cache.add(normalized)
             exec_key = self._prefix_exec_key(normalized)
             if exec_key:
                 self.command_cache_by_exec[exec_key].add(normalized)
             self._register_command_tokens(normalized)
+
+    def _unregister_commands(self, commands: List[str]):
+        if not commands:
+            return
+        for raw in commands:
+            normalized = self.normalize_command(raw)
+            if not normalized:
+                continue
+            self.command_cache.discard(normalized)
+            self.inserted_commands.discard(normalized)
+            exec_key = self._prefix_exec_key(normalized)
+            if exec_key in self.command_cache_by_exec:
+                self.command_cache_by_exec[exec_key].discard(normalized)
+                if not self.command_cache_by_exec[exec_key]:
+                    self.command_cache_by_exec.pop(exec_key, None)
+
+    def _rebuild_token_indexes(self):
+        self.token_candidates_by_context.clear()
+        self.global_token_candidates.clear()
+        for command in self.command_cache:
+            self._register_command_tokens(command)
 
     def _get_lexical_prefix_matches(self, prefix: str, topk: int) -> List[str]:
         normalized_prefix = self.normalize_command(prefix)
@@ -1058,6 +1154,9 @@ class CommandVectorDB:
             if self.is_blocked_command(normalized):
                 logger.debug("Skipping blocked command insert")
                 continue
+            if self.is_removed_command(normalized):
+                logger.debug("Skipping removed command insert")
+                continue
             seen.add(normalized)
             normalized_unique.append(normalized)
 
@@ -1120,6 +1219,9 @@ class CommandVectorDB:
         if self.is_blocked_command(normalized):
             logger.debug("Skipping blocked command execute_count update")
             return
+        if self.is_removed_command(normalized):
+            logger.debug("Skipping removed command execute_count update")
+            return
         self._register_commands([normalized])
         self._increment_execute_count(normalized)
 
@@ -1134,6 +1236,9 @@ class CommandVectorDB:
                 continue
             if self.is_blocked_command(normalized):
                 logger.debug("Skipping blocked command from history upsert")
+                continue
+            if self.is_removed_command(normalized):
+                logger.debug("Skipping removed command from history upsert")
                 continue
             n = int(count or 0)
             if n <= 0:
@@ -1197,6 +1302,343 @@ class CommandVectorDB:
             logger.error(f"Error upserting history commands: {exc}")
             return -1
 
+    def _collect_history_command_counts(self, history_file: str) -> Dict[str, int]:
+        history_path = Path(history_file).expanduser()
+        if not history_path.exists() or not history_path.is_file():
+            return {}
+
+        counts: Dict[str, int] = {}
+        try:
+            with open(history_path, "r", encoding="utf-8", errors="ignore") as f:
+                for line in f:
+                    command = self.normalize_command(self._parse_history_line(line))
+                    if not command:
+                        continue
+                    if self.is_blocked_command(command):
+                        continue
+                    if self.is_removed_command(command):
+                        continue
+                    counts[command] = counts.get(command, 0) + 1
+        except Exception as exc:
+            logger.warning(f"Could not read history for command store listing: {exc}")
+            return {}
+        return counts
+
+    def _fetch_command_doc_fields(self, commands: List[str]) -> Dict[str, Dict[str, object]]:
+        if not commands:
+            return {}
+
+        out: Dict[str, Dict[str, object]] = {}
+        batch_size = 256
+        for i in range(0, len(commands), batch_size):
+            chunk = commands[i : i + batch_size]
+            ids = [self.command_doc_id(command) for command in chunk]
+            with self._io_lock:
+                docs = self.collection.fetch(ids)
+            for command, command_id in zip(chunk, ids):
+                doc = docs.get(command_id)
+                if doc is None:
+                    continue
+                out[command] = dict(doc.fields or {})
+        return out
+
+    @classmethod
+    def _exec_tokens_look_like_typo(cls, candidate_exec: str, dominant_exec: str) -> bool:
+        candidate = cls._normalize_word_token(candidate_exec)
+        dominant = cls._normalize_word_token(dominant_exec)
+        if not candidate or not dominant:
+            return False
+        if candidate == dominant:
+            return False
+        if len(candidate) < 4 or len(dominant) < 4:
+            return False
+        candidate_fuzzy = cls._normalize_for_fuzzy(candidate).replace(" ", "")
+        dominant_fuzzy = cls._normalize_for_fuzzy(dominant).replace(" ", "")
+        if not candidate_fuzzy or not dominant_fuzzy:
+            return False
+        if candidate_fuzzy[0] != dominant_fuzzy[0]:
+            return False
+        if abs(len(candidate_fuzzy) - len(dominant_fuzzy)) > 2:
+            return False
+        if Levenshtein.distance(candidate_fuzzy, dominant_fuzzy) > 2:
+            return False
+        score = float(fuzz.QRatio(candidate_fuzzy, dominant_fuzzy))
+        return score >= 84.0
+
+    @classmethod
+    def _full_command_variant_looks_like_typo(cls, candidate: str, dominant: str) -> bool:
+        candidate_tokens = cls.tokenize_command(candidate)
+        dominant_tokens = cls.tokenize_command(dominant)
+        if not candidate_tokens or not dominant_tokens:
+            return False
+        if len(candidate_tokens) != len(dominant_tokens):
+            return False
+
+        diffs = []
+        for idx, (left, right) in enumerate(zip(candidate_tokens, dominant_tokens)):
+            if cls._normalize_word_token(left) != cls._normalize_word_token(right):
+                diffs.append(idx)
+        if len(diffs) != 1:
+            return False
+
+        idx = diffs[0]
+        left_raw = candidate_tokens[idx]
+        right_raw = dominant_tokens[idx]
+        left = cls._normalize_word_token(left_raw)
+        right = cls._normalize_word_token(right_raw)
+        if not left or not right:
+            return False
+        if cls._should_skip_word_typo_token(left) or cls._should_skip_word_typo_token(right):
+            return False
+
+        left_fuzzy = cls._normalize_for_fuzzy(left).replace(" ", "")
+        right_fuzzy = cls._normalize_for_fuzzy(right).replace(" ", "")
+        if not left_fuzzy or not right_fuzzy:
+            return False
+        if left_fuzzy[0] != right_fuzzy[0]:
+            return False
+        if abs(len(left_fuzzy) - len(right_fuzzy)) > 2:
+            return False
+        if Levenshtein.distance(left_fuzzy, right_fuzzy) > 2:
+            return False
+
+        command_score = float(
+            fuzz.QRatio(
+                cls._normalize_for_fuzzy(candidate),
+                cls._normalize_for_fuzzy(dominant),
+            )
+        )
+        return command_score >= 90.0
+
+    def _detect_potential_wrong_commands(
+        self, entries: List[Dict[str, object]]
+    ) -> Dict[str, str]:
+        if not entries:
+            return {}
+
+        by_exec: Dict[str, List[Dict[str, object]]] = defaultdict(list)
+        exec_usage: Dict[str, int] = defaultdict(int)
+        for entry in entries:
+            command = str(entry.get("command", "") or "")
+            if not command:
+                continue
+            exec_key = self._prefix_exec_key(command)
+            if not exec_key:
+                continue
+            usage = int(entry.get("usage_score", 0) or 0)
+            by_exec[exec_key].append(entry)
+            exec_usage[exec_key] += usage
+
+        suspicious: Dict[str, str] = {}
+
+        # Executable-token typo detection: only very low-usage variants are flagged.
+        ranked_execs = sorted(exec_usage.items(), key=lambda item: item[1], reverse=True)
+        for candidate_exec, candidate_usage in ranked_execs:
+            if candidate_usage <= 0 or candidate_usage > 2:
+                continue
+            for dominant_exec, dominant_usage in ranked_execs:
+                if dominant_exec == candidate_exec:
+                    continue
+                if dominant_usage < 8:
+                    continue
+                if dominant_usage < candidate_usage * 4:
+                    continue
+                if not self._exec_tokens_look_like_typo(candidate_exec, dominant_exec):
+                    continue
+                for item in by_exec.get(candidate_exec, []):
+                    command = str(item.get("command", "") or "")
+                    if command and command not in suspicious:
+                        suspicious[command] = f"looks like typo of '{dominant_exec}'"
+                break
+
+        # Full-command typo detection under same executable.
+        for exec_key, items in by_exec.items():
+            ordered = sorted(items, key=lambda item: int(item.get("usage_score", 0) or 0), reverse=True)
+            dominant_candidates = [
+                item for item in ordered if int(item.get("usage_score", 0) or 0) >= 5
+            ]
+            if not dominant_candidates:
+                continue
+
+            for item in ordered:
+                command = str(item.get("command", "") or "")
+                usage = int(item.get("usage_score", 0) or 0)
+                if not command or usage > 2 or command in suspicious:
+                    continue
+
+                for dominant in dominant_candidates[:6]:
+                    dominant_command = str(dominant.get("command", "") or "")
+                    dominant_usage = int(dominant.get("usage_score", 0) or 0)
+                    if not dominant_command or dominant_command == command:
+                        continue
+                    if dominant_usage < usage * 4:
+                        continue
+                    if not self._full_command_variant_looks_like_typo(command, dominant_command):
+                        continue
+                    suspicious[command] = f"looks similar to high-usage '{dominant_command}'"
+                    break
+
+        return suspicious
+
+    def list_command_store(self, history_file: str = "") -> Dict[str, object]:
+        history_counts = self._collect_history_command_counts(history_file) if history_file else {}
+
+        commands = set(history_counts.keys())
+        with self._io_lock:
+            commands.update(self.command_cache)
+            commands.update(self.inserted_commands)
+
+        filtered = sorted(
+            command
+            for command in commands
+            if command
+            and not self.is_blocked_command(command)
+            and not self.is_removed_command(command)
+        )
+        fields = self._fetch_command_doc_fields(filtered)
+
+        entries: List[Dict[str, object]] = []
+        for command in filtered:
+            doc_fields = fields.get(command, {})
+            accept_count = int(doc_fields.get("accept_count", 0) or 0)
+            execute_count = int(doc_fields.get("execute_count", 0) or 0)
+            stored_history = int(doc_fields.get("history_count", 0) or 0)
+            parsed_history = int(history_counts.get(command, 0) or 0)
+            history_count = max(stored_history, parsed_history)
+            usage_score = accept_count + execute_count + history_count
+            entries.append(
+                {
+                    "command": command,
+                    "accept_count": accept_count,
+                    "execute_count": execute_count,
+                    "history_count": history_count,
+                    "usage_score": usage_score,
+                }
+            )
+
+        suspicious = self._detect_potential_wrong_commands(entries)
+
+        potential_wrong: List[Dict[str, object]] = []
+        commands_list: List[Dict[str, object]] = []
+        for entry in entries:
+            command = str(entry.get("command", "") or "")
+            if not command:
+                continue
+            if command in suspicious:
+                row = dict(entry)
+                row["reason"] = suspicious[command]
+                potential_wrong.append(row)
+            else:
+                commands_list.append(entry)
+
+        potential_wrong.sort(
+            key=lambda item: (
+                int(item.get("usage_score", 0) or 0),
+                str(item.get("command", "")),
+            )
+        )
+        commands_list.sort(key=lambda item: str(item.get("command", "")))
+        return {
+            "potential_wrong": potential_wrong,
+            "commands": commands_list,
+            "total_commands": len(entries),
+        }
+
+    def add_manual_commands(self, commands: List[str]) -> Dict[str, int]:
+        normalized_unique: List[str] = []
+        seen: set[str] = set()
+        for value in commands:
+            normalized = self.normalize_command(str(value or ""))
+            if not normalized or normalized in seen:
+                continue
+            seen.add(normalized)
+            normalized_unique.append(normalized)
+
+        unblocked_removed = self.unmark_removed_commands(normalized_unique)
+        eligible = [cmd for cmd in normalized_unique if not self.is_blocked_command(cmd)]
+        if not eligible:
+            return {
+                "requested": len(commands),
+                "normalized": len(normalized_unique),
+                "inserted": 0,
+                "already_present": 0,
+                "unblocked_removed": unblocked_removed,
+            }
+
+        ids = [self.command_doc_id(command) for command in eligible]
+        with self._io_lock:
+            existing = self.collection.fetch(ids)
+        existing_count = sum(1 for command_id in ids if command_id in existing)
+        inserted = self.insert_commands(eligible)
+        already_present = max(0, existing_count)
+        return {
+            "requested": len(commands),
+            "normalized": len(normalized_unique),
+            "inserted": inserted,
+            "already_present": already_present,
+            "unblocked_removed": unblocked_removed,
+        }
+
+    def remove_commands_exact(self, commands: List[str]) -> Dict[str, int]:
+        normalized_unique: List[str] = []
+        seen: set[str] = set()
+        for value in commands:
+            normalized = self.normalize_command(str(value or ""))
+            if not normalized or normalized in seen:
+                continue
+            seen.add(normalized)
+            normalized_unique.append(normalized)
+
+        guarded = self.mark_removed_commands(normalized_unique)
+        removable = [cmd for cmd in normalized_unique if not self.is_blocked_command(cmd)]
+        if not removable:
+            return {
+                "requested": len(commands),
+                "normalized": len(normalized_unique),
+                "vector_removed": 0,
+                "guarded": guarded,
+            }
+
+        ids = [self.command_doc_id(command) for command in removable]
+        existing_ids: List[str] = []
+        with self._io_lock:
+            existing = self.collection.fetch(ids)
+            for command_id in ids:
+                if command_id in existing:
+                    existing_ids.append(command_id)
+            if existing_ids:
+                self.collection.delete(existing_ids)
+
+        self._unregister_commands(removable)
+        self._rebuild_token_indexes()
+
+        return {
+            "requested": len(commands),
+            "normalized": len(normalized_unique),
+            "vector_removed": len(existing_ids),
+            "guarded": guarded,
+        }
+
+    def align_history_index_state_to_end(self, history_file: str) -> bool:
+        history_path = Path(history_file).expanduser()
+        if not history_path.exists() or not history_path.is_file():
+            return False
+        try:
+            stat = history_path.stat()
+            with self._io_lock:
+                self._save_index_state(
+                    {
+                        "history_file": str(history_path),
+                        "inode": stat.st_ino,
+                        "device": stat.st_dev,
+                        "offset": stat.st_size,
+                    }
+                )
+            return True
+        except Exception as exc:
+            logger.warning(f"Could not align history index state: {exc}")
+            return False
+
     def search(self, query: str, topk: int = 20) -> List[Tuple[str, float]]:
         if not query:
             return []
@@ -1216,7 +1658,7 @@ class CommandVectorDB:
             matches = []
             for res in results:
                 command = res.fields.get("command", "")
-                if command:
+                if command and not self.is_removed_command(command):
                     matches.append((command, res.score))
 
             logger.debug(f"Found {len(matches)} matches for query: '{query}'")
@@ -1254,6 +1696,8 @@ class CommandVectorDB:
             if command in seen:
                 continue
             if self.is_blocked_command(command):
+                continue
+            if self.is_removed_command(command):
                 continue
             seen.add(command)
             candidate_exec = self._prefix_exec_key(command)
@@ -1380,6 +1824,8 @@ class CommandVectorDB:
             return list(candidates)
 
     def _increment_command_feedback(self, full_command: str, accepted_at: int):
+        if self.is_removed_command(full_command):
+            return
         command_id = self.command_doc_id(full_command)
         existing = self.collection.fetch([command_id]).get(command_id)
         if existing is not None:
@@ -1414,6 +1860,8 @@ class CommandVectorDB:
         self._register_commands([full_command])
 
     def _increment_execute_count(self, full_command: str):
+        if self.is_removed_command(full_command):
+            return
         command_id = self.command_doc_id(full_command)
         now_ts = int(time.time())
         try:
@@ -1504,6 +1952,9 @@ class CommandVectorDB:
         if self.is_blocked_command(full_command):
             logger.debug("Skipping blocked command feedback record")
             return
+        if self.is_removed_command(full_command):
+            logger.debug("Skipping removed command feedback record")
+            return
 
         # Store both 1-token and 2-token contexts derived from the finalized command.
         context_keys = self.extract_context_keys(full_command)
@@ -1529,6 +1980,7 @@ class CommandVectorDB:
                 self.token_candidates_by_context.clear()
                 self.global_token_candidates.clear()
                 self._history_cache_warmed_for.clear()
+                self.removed_commands.clear()
 
             self.model = None
             gc.collect()
