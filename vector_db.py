@@ -15,6 +15,7 @@ from typing import Dict, List, Optional, Tuple
 import transformers
 import zvec
 from rapidfuzz import fuzz
+from rapidfuzz.distance import Levenshtein
 from sentence_transformers import SentenceTransformer
 
 # Tell HuggingFace to avoid implicit network checks by default.
@@ -62,8 +63,8 @@ class CommandVectorDB:
     PREFIX_SCAN_LIMIT = 2000
     SEMANTIC_VECTOR_TOPN = 80
     EXEC_FUZZ_SCOPE_THRESHOLD = 84.0
-    TYPO_EXEC_THRESHOLD = 90.0
     SEMANTIC_MIN_SCORE = 55.0
+    WORD_TYPO_ROOT_CONTEXT = "__root__"
 
     def __init__(self, db_path: str = None, model_name: str = "all-MiniLM-L6-v2"):
         _update_runtime_init_status(
@@ -100,6 +101,8 @@ class CommandVectorDB:
         self.feedback_collection = self._init_feedback_collection(self.feedback_db_path)
         self.command_cache: set[str] = set()
         self.command_cache_by_exec: Dict[str, set[str]] = defaultdict(set)
+        self.token_candidates_by_context: Dict[str, set[str]] = defaultdict(set)
+        self.global_token_candidates: set[str] = set()
         self._history_cache_warmed_for: set[str] = set()
         self.inserted_commands = self._load_existing_commands(limit=1024)
         self._register_commands(self.inserted_commands)
@@ -155,6 +158,7 @@ class CommandVectorDB:
             exec_key = self._prefix_exec_key(normalized)
             if exec_key:
                 self.command_cache_by_exec[exec_key].add(normalized)
+            self._register_command_tokens(normalized)
 
     def _get_lexical_prefix_matches(self, prefix: str, topk: int) -> List[str]:
         normalized_prefix = self.normalize_command(prefix)
@@ -181,6 +185,252 @@ class CommandVectorDB:
         for sep in ("-", "_", "/", "."):
             normalized = normalized.replace(sep, " ")
         return " ".join(normalized.split())
+
+    @staticmethod
+    def _normalize_word_token(token: str) -> str:
+        return (token or "").strip().lower()
+
+    @staticmethod
+    def _is_shell_operator_token(token: str) -> bool:
+        return (token or "").strip() in {
+            "|",
+            "||",
+            "&",
+            "&&",
+            ";",
+            "(",
+            ")",
+            "{",
+            "}",
+            "<",
+            ">",
+            "<<",
+            ">>",
+            "<<<",
+            ">&",
+            "<&",
+            "2>",
+            "1>",
+            "2>>",
+            "1>>",
+            "&>",
+            "2>&1",
+        }
+
+    @classmethod
+    def _looks_path_like_token(cls, token: str) -> bool:
+        value = (token or "").strip()
+        if not value:
+            return False
+        if value in {".", ".."}:
+            return True
+        if value.startswith(("~/", "./", "../")):
+            return True
+        if "/" in value:
+            return True
+        if value.startswith("~") and len(value) > 1:
+            return True
+        if "." in value and not value.startswith("-"):
+            return True
+        return False
+
+    @classmethod
+    def _should_skip_word_typo_token(cls, token: str) -> bool:
+        value = (token or "").strip()
+        if not value:
+            return True
+        if cls._is_shell_operator_token(value):
+            return True
+        if cls._looks_path_like_token(value):
+            return True
+        if value.startswith(("$(", "${", "`")):
+            return True
+        return False
+
+    @classmethod
+    def _word_typo_context_keys(cls, prior_tokens: List[str]) -> List[str]:
+        if not prior_tokens:
+            return [cls.WORD_TYPO_ROOT_CONTEXT]
+        keys: List[str] = []
+        last = prior_tokens[-1]
+        if last:
+            keys.append(f"1:{last}")
+        if len(prior_tokens) >= 2:
+            two = f"{prior_tokens[-2]} {prior_tokens[-1]}".strip()
+            if two:
+                keys.insert(0, f"2:{two}")
+        return keys
+
+    def _register_command_tokens(self, command: str):
+        tokens = self.tokenize_command(command)
+        if not tokens:
+            return
+
+        prior_tokens: List[str] = []
+        for raw in tokens:
+            token = self._normalize_word_token(raw)
+            if not token:
+                continue
+            if self._is_shell_operator_token(token):
+                prior_tokens = []
+                continue
+            if self._should_skip_word_typo_token(token):
+                prior_tokens.append(token)
+                if len(prior_tokens) > 6:
+                    prior_tokens = prior_tokens[-6:]
+                continue
+
+            for key in self._word_typo_context_keys(prior_tokens):
+                self.token_candidates_by_context[key].add(token)
+            self.global_token_candidates.add(token)
+            prior_tokens.append(token)
+            if len(prior_tokens) > 6:
+                prior_tokens = prior_tokens[-6:]
+
+    @classmethod
+    def _word_typo_threshold(cls, token: str) -> float:
+        compact = cls._normalize_for_fuzzy(token).replace(" ", "")
+        length = len(compact) if compact else len((token or "").strip())
+        if length <= 2:
+            return 88.0
+        if length == 3:
+            return 66.0
+        if length == 4:
+            return 74.0
+        if length <= 6:
+            return 82.0
+        return 80.0
+
+    @classmethod
+    def _word_typo_max_distance(cls, token: str) -> int:
+        compact = cls._normalize_for_fuzzy(token).replace(" ", "")
+        length = len(compact) if compact else len((token or "").strip())
+        if length <= 2:
+            return 1
+        if length <= 4:
+            return 2
+        return 2
+
+    def _get_contextual_token_candidates(self, prior_tokens: List[str]) -> set[str]:
+        candidates: set[str] = set()
+        for key in self._word_typo_context_keys(prior_tokens):
+            candidates.update(self.token_candidates_by_context.get(key, set()))
+        return candidates
+
+    @classmethod
+    def _best_word_typo_match(cls, token: str, candidates: set[str]) -> str:
+        typed_word = cls._normalize_word_token(token)
+        if not typed_word or not candidates:
+            return ""
+
+        typed_fuzzy = cls._normalize_for_fuzzy(typed_word)
+        if not typed_fuzzy:
+            return ""
+
+        threshold = cls._word_typo_threshold(typed_word)
+        best_token = ""
+        best_score = 0.0
+
+        for candidate in sorted(candidates):
+            normalized_candidate = cls._normalize_word_token(candidate)
+            if not normalized_candidate or normalized_candidate == typed_word:
+                continue
+            candidate_fuzzy = cls._normalize_for_fuzzy(normalized_candidate)
+            if not candidate_fuzzy:
+                continue
+
+            if not typed_fuzzy or not candidate_fuzzy:
+                continue
+
+            if typed_fuzzy[0] != candidate_fuzzy[0]:
+                continue
+
+            length_delta = abs(len(candidate_fuzzy) - len(typed_fuzzy))
+            if length_delta > 2:
+                continue
+
+            edit_distance = Levenshtein.distance(typed_fuzzy, candidate_fuzzy)
+            if edit_distance > cls._word_typo_max_distance(typed_word):
+                continue
+
+            quick = float(fuzz.QRatio(typed_fuzzy, candidate_fuzzy))
+            token_sorted = float(fuzz.token_sort_ratio(typed_fuzzy, candidate_fuzzy))
+            score = (0.7 * quick) + (0.3 * token_sorted)
+
+            if score > best_score:
+                best_score = score
+                best_token = normalized_candidate
+
+        if best_score < threshold:
+            return ""
+        return best_token
+
+    def get_word_typo_candidate(self, buffer: str) -> Dict[str, str] | None:
+        normalized_buffer = self.normalize_command(buffer)
+        if len(normalized_buffer) < 2:
+            return None
+
+        tokens = self.tokenize_command(normalized_buffer)
+        if not tokens:
+            return None
+
+        corrected_tokens: List[str] = []
+        prior_tokens: List[str] = []
+        changed = False
+
+        for raw in tokens:
+            raw_token = (raw or "").strip()
+            token = self._normalize_word_token(raw_token)
+            if not raw_token or not token:
+                continue
+
+            if self._is_shell_operator_token(token):
+                corrected_tokens.append(raw_token)
+                prior_tokens = []
+                continue
+
+            if self._should_skip_word_typo_token(token):
+                corrected_tokens.append(raw_token)
+                prior_tokens.append(token)
+                if len(prior_tokens) > 6:
+                    prior_tokens = prior_tokens[-6:]
+                continue
+
+            contextual_candidates = self._get_contextual_token_candidates(prior_tokens)
+            if token in contextual_candidates:
+                corrected_tokens.append(raw_token)
+                prior_tokens.append(token)
+                if len(prior_tokens) > 6:
+                    prior_tokens = prior_tokens[-6:]
+                continue
+
+            candidate_pool = contextual_candidates if contextual_candidates else self.global_token_candidates
+            best_match = self._best_word_typo_match(token, candidate_pool)
+            if best_match:
+                corrected_tokens.append(best_match)
+                prior_tokens.append(best_match)
+                if len(prior_tokens) > 6:
+                    prior_tokens = prior_tokens[-6:]
+                if best_match != token:
+                    changed = True
+                continue
+
+            corrected_tokens.append(raw_token)
+            prior_tokens.append(token)
+            if len(prior_tokens) > 6:
+                prior_tokens = prior_tokens[-6:]
+
+        if not changed:
+            return None
+
+        corrected_prefix = self.normalize_command(
+            self.canonicalize_shell_spacing(" ".join(corrected_tokens))
+        )
+        if not corrected_prefix or corrected_prefix == normalized_buffer:
+            return None
+        if self.is_blocked_command(corrected_prefix):
+            return None
+        return {"corrected_prefix": corrected_prefix}
 
     @classmethod
     def _fuzzy_exec_score(cls, typed_exec: str, candidate_exec: str) -> float:
@@ -1022,17 +1272,13 @@ class CommandVectorDB:
             recall_rank_score = ((self.SEMANTIC_VECTOR_TOPN - idx) / self.SEMANTIC_VECTOR_TOPN) * 100.0
             rerank_score = (0.75 * command_score) + (0.25 * recall_rank_score)
 
-            mode = "semantic_general"
-            if not same_exec and exec_score >= self.TYPO_EXEC_THRESHOLD:
-                mode = "semantic_typo"
-
             scored_entries.append(
                 (
                     rerank_score,
                     -idx,
                     {
                         "command": command,
-                        "match_mode": mode,
+                        "match_mode": "semantic_general",
                         "typed_exec": typed_exec,
                         "candidate_exec": candidate_exec,
                     },
@@ -1280,6 +1526,8 @@ class CommandVectorDB:
                 self.inserted_commands.clear()
                 self.command_cache.clear()
                 self.command_cache_by_exec.clear()
+                self.token_candidates_by_context.clear()
+                self.global_token_candidates.clear()
                 self._history_cache_warmed_for.clear()
 
             self.model = None

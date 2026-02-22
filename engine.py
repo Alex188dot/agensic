@@ -294,10 +294,30 @@ class SuggestionEngine:
             )
             return []
 
-        if not matches:
-            return []
+        first_mode = matches[0].get("match_mode", "") if matches else ""
+        if not matches or first_mode != "prefix":
+            try:
+                typo_candidate = self.vector_db.get_word_typo_candidate(ctx.buffer)
+            except Exception as e:
+                logger.warning(
+                    "Word typo lookup failed: %s",
+                    self.privacy_guard.sanitize_for_log(str(e)),
+                )
+                typo_candidate = None
+            if typo_candidate is not None:
+                corrected_prefix = (typo_candidate.get("corrected_prefix", "") or "").strip()
+                if corrected_prefix and not self._is_blocked_command(corrected_prefix):
+                    return [
+                        {
+                            "display_text": f" Did you mean: {corrected_prefix}",
+                            "accept_text": corrected_prefix,
+                            "accept_mode": "replace_full",
+                            "kind": "typo_recovery",
+                        }
+                    ]
+            if not matches:
+                return []
 
-        first_mode = matches[0].get("match_mode", "")
         candidates: list[dict[str, str]] = []
         if first_mode == "prefix":
             suffixes: list[str] = []
@@ -322,13 +342,9 @@ class SuggestionEngine:
 
         full_commands = [item.get("command", "") for item in matches]
         full_commands = self._filter_blocked_full_commands(full_commands)
-        is_typo_mode = first_mode == "semantic_typo"
-        for index, command in enumerate(full_commands):
+        for command in full_commands:
             display = command
             kind = "normal"
-            if is_typo_mode:
-                kind = "typo_recovery"
-                display = f" Maybe you meant: {command}"
             candidates.append(
                 {
                     "display_text": display,

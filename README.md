@@ -28,9 +28,10 @@ GhostShell uses a **vector database** (`zvec`) to store command history and retr
 3. **Keep typing** → current suggestion pool is filtered locally
 4. **Press `Space`** → fetches the next-segment pool using the updated buffer
 5. **Prefix miss** → vector top candidates are re-ranked with RapidFuzz
-6. **Typo recovery** (e.g. `dokcer`) → RapidFuzz can trigger `Maybe you meant: ...`
-7. **No vector suggestions at all** → AI fallback is used automatically
-8. **Press `Ctrl+Space`** → explicitly request an AI suggestion
+6. **Word-by-word typo recovery** (e.g. `dokcer`, `nxp --help`) runs before LLM fallback
+7. **Typo hit** → first suggestion is `Did you mean: <corrected words up to current word>`
+8. **No vector suggestions and no typo recovery** → AI fallback is used automatically
+9. **Press `Ctrl+Space`** → explicitly request an AI suggestion
 
 ### Example Flow
 
@@ -53,6 +54,14 @@ $ qztool --help█
 # Need AI immediately for the current buffer?
 $ qztool --ver█
 # press Ctrl+Space to force an AI suggestion
+```
+
+```bash
+$ dokcer █
+# first suggestion: Did you mean: docker
+
+$ nxp --help█
+# first suggestion: Did you mean: npx --help
 ```
 
 ## Installation
@@ -247,15 +256,15 @@ GhostShell prints a normal text explanation in the terminal.
 1. **Vector DB First**: Searches your history for similar commands
 2. **Space Triggering**: Auto requests only on `Space`
 3. **Real-time Filtering**: As you type, filters the 20 suggestions
-4. **Retrieve & Re-rank**: Prefix miss uses vector top-N recall, then RapidFuzz reranking
-5. **Typo Recovery**: RapidFuzz executable similarity enables `Maybe you meant` replacement
-6. **AI Fallback**: Only invoked when vectors return no suggestions
-7. **Per-Command Budget**: At most 4 automatic AI fallbacks; use `Ctrl+Space` for manual fetch after cap
+4. **Typo Recovery**: Word-by-word typo checks run before LLM fallback and return `Did you mean: ...`
+5. **AI Fallback**: Only invoked when vectors return no suggestions and no typo correction is found
+6. **Per-Command Budget**: At most 4 automatic AI fallbacks; use `Ctrl+Space` for manual fetch after cap
 
 When typo recovery is active, the first ghost suggestion is shown as:
 
 ```text
-Maybe you meant:  docker start 7b567d2835e3
+Did you mean: docker
+Did you mean: npx --help
 ```
 
 In native-completion contexts, GhostShell suppresses automatic fetches and does not steal `Tab`:
