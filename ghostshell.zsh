@@ -222,7 +222,9 @@ _ghostshell_token_looks_path_or_file() {
     if [[ "$token" == "~"* || "$token" == "./"* || "$token" == "../"* || "$token" == *"/"* ]]; then
         return 0
     fi
-    if [[ "$token" =~ \.[A-Za-z0-9_-]+$ ]]; then
+    # Treat dotted tokens as likely file names (e.g. foo.txt) without
+    # relying on regex escaping that can overmatch plain words in zsh.
+    if [[ "$token" == *.* && "$token" != "." && "$token" != ".." ]]; then
         return 0
     fi
     return 1
