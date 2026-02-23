@@ -309,7 +309,7 @@ class SuggestionEngine:
                 if corrected_prefix and not self._is_blocked_command(corrected_prefix):
                     return [
                         {
-                            "display_text": f" Did you mean: {corrected_prefix}",
+                            "display_text": f" Did you mean: {corrected_prefix}", # extra space is needed otherwise it will be too close to the user command, DO NOT REMOVE IT
                             "accept_text": corrected_prefix,
                             "accept_mode": "replace_full",
                             "kind": "typo_recovery",
@@ -340,11 +340,16 @@ class SuggestionEngine:
                 )
             return candidates
 
+        semantic_mode = first_mode.startswith("semantic")
         full_commands = [item.get("command", "") for item in matches]
         full_commands = self._filter_blocked_full_commands(full_commands)
         for command in full_commands:
-            display = command
-            kind = "normal"
+            if semantic_mode:
+                display = f" Did you mean: {command}" # extra space is needed otherwise it will be too close to the user command, DO NOT REMOVE IT
+                kind = "semantic_recovery"
+            else:
+                display = command
+                kind = "normal"
             candidates.append(
                 {
                     "display_text": display,

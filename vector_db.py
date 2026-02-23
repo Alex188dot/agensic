@@ -547,6 +547,42 @@ class CommandVectorDB:
         # Blend fast direct similarity with token-order-insensitive match.
         return (0.7 * quick) + (0.3 * token_sorted)
 
+    @classmethod
+    def _is_whole_word_semantic_miss(
+        cls,
+        query: str,
+        candidate: str,
+        typed_exec: str,
+        candidate_exec: str,
+    ) -> bool:
+        if typed_exec != candidate_exec:
+            return False
+
+        query_tokens = cls.tokenize_command(query)
+        candidate_tokens = cls.tokenize_command(candidate)
+        if not query_tokens or not candidate_tokens:
+            return False
+
+        typed_last = cls._normalize_word_token(query_tokens[-1])
+        candidate_last = cls._normalize_word_token(candidate_tokens[-1])
+        if not typed_last or not candidate_last:
+            return False
+        if cls._should_skip_word_typo_token(typed_last) or cls._should_skip_word_typo_token(candidate_last):
+            return False
+
+        typed_compact = cls._normalize_for_fuzzy(typed_last).replace(" ", "")
+        candidate_compact = cls._normalize_for_fuzzy(candidate_last).replace(" ", "")
+        if not typed_compact or not candidate_compact:
+            return False
+        if len(typed_compact) < 4:
+            return False
+        if typed_compact == candidate_compact:
+            return False
+
+        # Treat tiny single-edit differences as typos, not semantic misses.
+        tiny_edit_typo = Levenshtein.distance(typed_compact, candidate_compact) <= 1
+        return not tiny_edit_typo
+
     def _warm_prefix_cache_from_history(self, history_path: Path):
         key = str(history_path)
         if key in self._history_cache_warmed_for:
@@ -1714,7 +1750,19 @@ class CommandVectorDB:
             if command_score < self.SEMANTIC_MIN_SCORE:
                 continue
             recall_rank_score = ((self.SEMANTIC_VECTOR_TOPN - idx) / self.SEMANTIC_VECTOR_TOPN) * 100.0
-            rerank_score = (0.75 * command_score) + (0.25 * recall_rank_score)
+            whole_word_miss = self._is_whole_word_semantic_miss(
+                normalized_prefix,
+                command,
+                typed_exec,
+                candidate_exec,
+            )
+            if whole_word_miss:
+                # Semantic-first ranking for full-word misses like halt/terminate.
+                rerank_score = (0.85 * recall_rank_score) + (0.15 * command_score)
+                match_mode = "semantic_whole_word"
+            else:
+                rerank_score = (0.75 * command_score) + (0.25 * recall_rank_score)
+                match_mode = "semantic_general"
 
             scored_entries.append(
                 (
@@ -1722,7 +1770,7 @@ class CommandVectorDB:
                     -idx,
                     {
                         "command": command,
-                        "match_mode": "semantic_general",
+                        "match_mode": match_mode,
                         "typed_exec": typed_exec,
                         "candidate_exec": candidate_exec,
                     },
@@ -1733,15 +1781,16 @@ class CommandVectorDB:
             return []
 
         scored_entries.sort(key=lambda item: (item[0], item[1]), reverse=True)
-        best = scored_entries[0][2]
+        top = [item[2] for item in scored_entries[:3]]
         return [
             {
-                "command": best["command"],
-                "match_mode": best["match_mode"],
-                "typed_exec": best["typed_exec"],
-                "candidate_exec": best["candidate_exec"],
+                "command": item["command"],
+                "match_mode": item["match_mode"],
+                "typed_exec": item["typed_exec"],
+                "candidate_exec": item["candidate_exec"],
             }
-        ][:1]
+            for item in top
+        ][:3]
 
     def rerank_candidates(self, buffer_context: str, candidates: List[str]) -> List[str]:
         if not candidates:
