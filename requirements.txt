@@ -1,4 +1,4 @@
-fastapi==0.118.0
+fastapi==0.131.0
 uvicorn==0.34.0
 litellm==1.81.9
 rich==14.3.2

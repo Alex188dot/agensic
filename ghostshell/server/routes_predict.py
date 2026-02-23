@@ -1,13 +1,13 @@
 from fastapi import APIRouter
 
 from ghostshell.server import deps
-from ghostshell.server.schemas import Context
+from ghostshell.server.schemas import Context, PredictResponse
 
 router = APIRouter()
 
 
-@router.post("/predict")
-async def predict_completion(ctx: Context):
+@router.post("/predict", response_model=PredictResponse, response_model_exclude_unset=True)
+async def predict_completion(ctx: Context) -> PredictResponse:
     if not ctx.command_buffer.strip():
         return {
             "suggestions": ["", "", ""],

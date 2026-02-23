@@ -9,10 +9,10 @@ os.environ.setdefault("MKL_NUM_THREADS", "1")
 os.environ.setdefault("OPENBLAS_NUM_THREADS", "1")
 os.environ.setdefault("VECLIB_MAXIMUM_THREADS", "1")
 os.environ.setdefault("NUMEXPR_NUM_THREADS", "1")
-os.environ.setdefault(
-    "PYTHONWARNINGS",
-    "ignore:resource_tracker:UserWarning",
-)
+# os.environ.setdefault(
+#     "PYTHONWARNINGS",
+#     "ignore:resource_tracker:UserWarning",
+# )
 
 from ghostshell.engine import RequestContext, SuggestionEngine
 from ghostshell.privacy import PrivacyGuard
@@ -26,11 +26,11 @@ logging.basicConfig(
 )
 logger = logging.getLogger("ghostshell")
 
-warnings.filterwarnings(
-    "ignore",
-    message=r"resource_tracker: There appear to be \d+ leaked semaphore objects to clean up at shutdown",
-    category=UserWarning,
-)
+# warnings.filterwarnings(
+#     "ignore",
+#     message=r"resource_tracker: There appear to be \d+ leaked semaphore objects to clean up at shutdown",
+#     category=UserWarning,
+# )
 
 CONFIG_DIR = os.path.expanduser("~/.ghostshell")
 CONFIG_FILE = os.path.join(CONFIG_DIR, "config.json")

@@ -1,13 +1,13 @@
 from fastapi import APIRouter
 
 from ghostshell.server import deps
-from ghostshell.server.schemas import IntentContext
+from ghostshell.server.schemas import IntentContext, IntentResponse
 
 router = APIRouter()
 
 
-@router.post("/intent")
-async def resolve_intent(ctx: IntentContext):
+@router.post("/intent", response_model=IntentResponse, response_model_exclude_unset=True)
+async def resolve_intent(ctx: IntentContext) -> IntentResponse:
     config = deps.load_config()
     req_context = deps.RequestContext(
         history_file=deps.get_history_file(ctx.shell),

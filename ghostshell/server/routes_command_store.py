@@ -3,13 +3,20 @@ import os
 from fastapi import APIRouter, BackgroundTasks
 
 from ghostshell.server import deps
-from ghostshell.server.schemas import CommandStorePayload, CommandStoreRemovePayload
+from ghostshell.server.schemas import (
+    CommandStoreAddResponse,
+    CommandStoreListResponse,
+    CommandStorePayload,
+    CommandStoreRemovePayload,
+    CommandStoreRemoveResponse,
+    LogCommandResponse,
+)
 
 router = APIRouter()
 
 
-@router.post("/log_command")
-def log_command(data: dict, background_tasks: BackgroundTasks):
+@router.post("/log_command", response_model=LogCommandResponse, response_model_exclude_unset=True)
+def log_command(data: dict, background_tasks: BackgroundTasks) -> LogCommandResponse:
     command = str(data.get("command", "") or "").strip()
     if not command:
         return {"status": "ignored", "reason": "empty_command"}
@@ -35,8 +42,8 @@ def log_command(data: dict, background_tasks: BackgroundTasks):
     return {"status": "ok"}
 
 
-@router.get("/command_store/list")
-def command_store_list(shell: str = "", include_all: bool = False):
+@router.get("/command_store/list", response_model=CommandStoreListResponse, response_model_exclude_unset=True)
+def command_store_list(shell: str = "", include_all: bool = False) -> CommandStoreListResponse:
     target_shell = (shell or os.environ.get("SHELL", "zsh")).strip()
     history_file = deps.get_history_file(target_shell)
     vector_db = deps.engine._ensure_vector_db()
@@ -48,8 +55,8 @@ def command_store_list(shell: str = "", include_all: bool = False):
     }
 
 
-@router.post("/command_store/add")
-def command_store_add(data: CommandStorePayload):
+@router.post("/command_store/add", response_model=CommandStoreAddResponse, response_model_exclude_unset=True)
+def command_store_add(data: CommandStorePayload) -> CommandStoreAddResponse:
     vector_db = deps.engine._ensure_vector_db()
     result = vector_db.add_manual_commands(data.commands or [])
     return {
@@ -58,8 +65,12 @@ def command_store_add(data: CommandStorePayload):
     }
 
 
-@router.post("/command_store/remove")
-def command_store_remove(data: CommandStoreRemovePayload):
+@router.post(
+    "/command_store/remove",
+    response_model=CommandStoreRemoveResponse,
+    response_model_exclude_unset=True,
+)
+def command_store_remove(data: CommandStoreRemovePayload) -> CommandStoreRemoveResponse:
     target_shell = (data.shell or os.environ.get("SHELL", "zsh")).strip()
     history_file = deps.get_history_file(target_shell)
     vector_db = deps.engine._ensure_vector_db()
