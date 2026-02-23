@@ -59,7 +59,7 @@ def _setup_style() -> Style:
 
 
 def _print_screen_heading(title: str) -> None:
-    console.print(f"[bold cyan]{title}[/bold cyan] [bold #ff8c00](Esc = back)[/bold #ff8c00]")
+    console.print(f"[bold cyan]{title}[/bold cyan]")
 
 
 def _attach_escape_back(question: Question) -> Question:
@@ -80,6 +80,7 @@ def _setup_select(message: str, choices: list[str], **kwargs) -> Any:
         message,
         choices=choices,
         pointer="👉",
+        instruction=" ",
         style=_setup_style(),
         **kwargs,
     )
@@ -740,7 +741,9 @@ def _checkbox_without_invert(
                         ("class:instruction", " to move, "),
                         ("class:instruction-key", "<space>"),
                         ("class:instruction", " to select, "),
-                        ("class:instruction-key", "<a>"),
+                        ("class:instruction-key", "letter keys"),
+                        ("class:instruction", " to jump, "),
+                        ("class:instruction-key", "<Ctrl-A>"),
                         ("class:instruction", " to select all)"),
                     ]
                 )
@@ -770,7 +773,7 @@ def _checkbox_without_invert(
             ic.selected_options.append(pointed_choice)
         perform_validation(get_selected_values())
 
-    @bindings.add("a", eager=True)
+    @bindings.add(Keys.ControlA, eager=True)
     def _toggle_all(_event):
         all_selected = True
         for c in ic.choices:
@@ -793,8 +796,6 @@ def _checkbox_without_invert(
 
     bindings.add(Keys.Down, eager=True)(_move_cursor_down)
     bindings.add(Keys.Up, eager=True)(_move_cursor_up)
-    bindings.add("j", eager=True)(_move_cursor_down)
-    bindings.add("k", eager=True)(_move_cursor_up)
     bindings.add(Keys.ControlN, eager=True)(_move_cursor_down)
     bindings.add(Keys.ControlP, eager=True)(_move_cursor_up)
 
@@ -810,10 +811,20 @@ def _checkbox_without_invert(
     def _back(event):
         event.app.exit(result=BACK_SIGNAL)
 
-    @bindings.add(Keys.Any)
-    def _other(_event):
-        # Disallow all other text input, including "i".
-        return
+    @bindings.add(Keys.Any, eager=True)
+    def _jump_to_first_by_letter(event):
+        # Letter key navigation: jump to first command that starts with typed letter.
+        key = str(getattr(event, "data", "") or "")
+        if len(key) != 1 or not key.isalpha():
+            return
+        prefix = key.lower()
+        for idx, choice in enumerate(ic.choices):
+            if isinstance(choice, Separator) or getattr(choice, "disabled", False):
+                continue
+            value = str(getattr(choice, "value", "") or "").strip().lower()
+            if value.startswith(prefix):
+                ic.pointed_at = idx
+                return
 
     return Question(
         Application(
