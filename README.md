@@ -88,6 +88,22 @@ python server.py
 
 The server runs on `http://127.0.0.1:22000`
 
+### Project Structure
+
+Runtime entrypoints remain at the project root:
+
+- `cli.py`
+- `server.py`
+
+Implementation code is organized under:
+
+- `ghostshell/cli/`
+- `ghostshell/server/`
+- `ghostshell/engine/`
+- `ghostshell/vector_db/`
+- `ghostshell/privacy/`
+- `ghostshell/utils/`
+
 ### 3. Load the Shell Plugin
 
 Add to your `~/.zshrc`:

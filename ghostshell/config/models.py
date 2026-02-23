@@ -1,0 +1,14 @@
+from dataclasses import dataclass, field
+
+
+@dataclass
+class GhostShellConfig:
+    provider: str = "openai"
+    model: str = "gpt-5-mini"
+    api_key: str = ""
+    base_url: str = ""
+    disabled_command_patterns: list[str] = field(default_factory=list)
+    headers: dict = field(default_factory=dict)
+    timeout: float | None = None
+    api_version: str = ""
+    extra_body: dict = field(default_factory=dict)

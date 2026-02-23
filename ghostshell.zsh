@@ -54,7 +54,7 @@ typeset -g GHOSTSHELL_FETCH_LOG_THROTTLE_SECONDS=10
 typeset -g GHOSTSHELL_FETCH_LOG_LAST_KEY=""
 typeset -g GHOSTSHELL_FETCH_LOG_LAST_TS=0
 typeset -g -a GHOSTSHELL_PATH_HEAVY_EXECUTABLES
-GHOSTSHELL_PATH_HEAVY_EXECUTABLES=(cd ls cat less more head tail vi vim nvim nano code open source cp mv mkdir rmdir touch find grep rg sed awk bat)
+GHOSTSHELL_PATH_HEAVY_EXECUTABLES=(cd ls cat less more head tail vi vim nvim nano code source open cp mv mkdir rmdir touch find grep rg sed awk bat)
 typeset -g -a GHOSTSHELL_SCRIPT_EXECUTABLES
 GHOSTSHELL_SCRIPT_EXECUTABLES=(python python3 python3.11 python3.12 node bash sh zsh ruby perl php lua)
 

@@ -1,0 +1,1 @@
+"""GhostShell package root."""
