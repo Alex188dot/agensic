@@ -31,7 +31,7 @@ GhostShell uses a **vector database** (`zvec`) to store command history and retr
 6. **Word-by-word typo recovery** (e.g. `dokcer`, `nxp --help`) runs before LLM fallback
 7. **Typo hit** → first suggestion is `Did you mean: <corrected words up to current word>`
 8. **No vector suggestions and no typo recovery** → AI fallback is used automatically
-9. **Press `Ctrl+Space`** → explicitly request an AI suggestion
+9. **Press `Ctrl+Space`** → explicitly request a manual suggestion fetch (within per-line LLM budget)
 
 ### Example Flow
 
@@ -53,7 +53,7 @@ $ qztool --help█
 
 # Need AI immediately for the current buffer?
 $ qztool --ver█
-# press Ctrl+Space to force an AI suggestion
+# press Ctrl+Space to request a manual suggestion fetch
 ```
 
 ```bash
@@ -135,11 +135,13 @@ Create `~/.ghostshell/config.json`:
   "provider": "openai",
   "model": "gpt-4o-mini",
   "api_key": "your-api-key-here",
+  "llm_calls_per_line": 4,
   "disabled_command_patterns": ["ros2", "kubectl"]
 }
 ```
 
 `disabled_command_patterns` is optional. When set, GhostShell is fully suppressed for matching command families (including in-progress prefixes like `ro` for `ros2`).
+`llm_calls_per_line` is optional. `0` disables LLM calls on that line; any number `> 0` sets the max LLM calls per command line (auto + manual `Ctrl+Space`).
 
 ### Setup Menu
 
@@ -157,8 +159,13 @@ aiterminal doctor
 
 First screen:
 - `Choose AI provider`
+- `Customize LLM budget`
 - `Manage GhostShell command patterns`
 - `Manage command store (add/remove commands)`
+
+Navigation:
+- `Esc` goes back to the previous setup screen.
+- Every setup prompt shows an orange `Esc = back` instruction.
 
 Pattern controls:
 - `Disable GhostShell for a specific pattern`
@@ -272,7 +279,7 @@ GhostShell prints a normal text explanation in the terminal.
 - **Tab** - Accept current suggestion
 - **Ctrl+P** - Previous suggestion
 - **Ctrl+N** - Next suggestion  
-- **Ctrl+Space** - Manual trigger (bypasses auto LLM budget cap)
+- **Ctrl+Space** - Manual trigger (still limited by per-line LLM budget)
 - **Esc** - Clear visible ghost suggestion and keep your typed buffer
 - **Option+→** - Accept first word only
 - **Enter** - Execute command (logs to vector DB)
@@ -284,7 +291,7 @@ GhostShell prints a normal text explanation in the terminal.
 3. **Real-time Filtering**: As you type, filters the 20 suggestions
 4. **Typo Recovery**: Word-by-word typo checks run before LLM fallback and return `Did you mean: ...`
 5. **AI Fallback**: Only invoked when vectors return no suggestions and no typo correction is found
-6. **Per-Command Budget**: At most 4 automatic AI fallbacks; use `Ctrl+Space` for manual fetch after cap
+6. **Per-Command Budget**: Configurable in `aiterminal setup` (`Customize LLM budget`): `0` disables LLM calls, `N>0` allows up to `N` LLM calls per command line (auto + manual)
 
 When typo recovery is active, the first ghost suggestion is shown as:
 
@@ -301,7 +308,7 @@ In native-completion contexts, GhostShell suppresses automatic fetches and does 
 In those contexts:
 - automatic fetches (`space_auto`, `pause_timer`) are skipped
 - `Tab` always runs native completion (`expand-or-complete`)
-- `Ctrl+Space` is an explicit manual override to fetch suggestions
+- `Ctrl+Space` is an explicit manual fetch (still subject to configured per-line LLM budget)
 
 Semantic intent examples (same executable scope):
 
@@ -361,9 +368,9 @@ This means:
 
 - **Auto trigger**: `Space` key only
 - **First AI fallback**: Requires at least one typed `Space`
-- **Auto AI budget**: Max 4 per command line
-- **Overflow hint**: `To trigger new LLM suggestions press ctrl + space`
-- **Manual override**: `Ctrl+Space` always fetches
+- **LLM budget**: Configurable per command line (`llm_calls_per_line`, default `4`)
+- **Budget semantics**: `0` disables LLM calls; any `N>0` allows up to `N` LLM calls per line (auto + manual)
+- **Overflow hint**: `LLM budget reached for this command line`
 
 ### Suggestion Pool
 
@@ -440,7 +447,7 @@ Contributions welcome! Areas for improvement:
 
 - [ ] Support for bash (currently zsh only)
 - [ ] Better history parsing (handle multiline commands)
-- [ ] Configurable auto AI call budget
+- [x] Configurable per-line LLM call budget
 - [ ] Vector DB compression/optimization
 - [ ] More AI providers
 

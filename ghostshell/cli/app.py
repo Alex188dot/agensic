@@ -8,11 +8,13 @@ import questionary
 import socket
 import signal
 import shlex
+from typing import Any
 from pathlib import Path
 from rich.console import Console
 from rich.panel import Panel
 from prompt_toolkit.application import Application
 from prompt_toolkit.key_binding import KeyBindings
+from prompt_toolkit.key_binding.key_bindings import merge_key_bindings
 from prompt_toolkit.keys import Keys
 from prompt_toolkit.styles import Style
 from questionary import Separator, Question
@@ -32,6 +34,85 @@ PROJECT_ROOT = str(Path(__file__).resolve().parents[2])
 SERVER_SCRIPT = os.path.join(PROJECT_ROOT, "server.py")
 SHELL_CLIENT_SCRIPT = os.path.join(PROJECT_ROOT, "shell_client.py")
 PLIST_PATH = os.path.expanduser("~/Library/LaunchAgents/com.ghostshell.daemon.plist")
+DEFAULT_LLM_CALLS_PER_LINE = 4
+
+
+class _BackSignal:
+    pass
+
+
+BACK_SIGNAL = _BackSignal()
+
+
+def _setup_style() -> Style:
+    return merge_styles_default(
+        [
+            Style([("instruction", "fg:#ff8c00 bold")]),
+            Style([("instruction-key", "fg:#ff8c00 bold")]),
+        ]
+    )
+
+
+def _attach_escape_back(question: Question) -> Question:
+    extra_bindings = KeyBindings()
+
+    @extra_bindings.add(Keys.Escape, eager=True)
+    def _escape(event):
+        event.app.exit(result=BACK_SIGNAL)
+
+    question.application.key_bindings = merge_key_bindings(
+        [question.application.key_bindings, extra_bindings]
+    )
+    return question
+
+
+def _setup_select(message: str, choices: list[str], **kwargs) -> Any:
+    question = questionary.select(
+        message,
+        choices=choices,
+        pointer="👉",
+        instruction="Esc = back",
+        style=_setup_style(),
+        **kwargs,
+    )
+    return _attach_escape_back(question).ask()
+
+
+def _setup_text(message: str, default: str = "", show_back_instruction: bool = True, **kwargs) -> Any:
+    instruction = "Esc = back" if show_back_instruction else None
+    question = questionary.text(
+        message,
+        default=default,
+        instruction=instruction,
+        style=_setup_style(),
+        **kwargs,
+    )
+    return _attach_escape_back(question).ask()
+
+
+def _setup_confirm(message: str, default: bool = True, **kwargs) -> Any:
+    question = questionary.confirm(
+        message,
+        default=default,
+        instruction="Esc = back",
+        style=_setup_style(),
+        **kwargs,
+    )
+    return _attach_escape_back(question).ask()
+
+
+def _setup_password(message: str, **kwargs) -> Any:
+    console.print("[bold #ff8c00]Esc[/bold #ff8c00] = back")
+    question = questionary.password(
+        message,
+        style=_setup_style(),
+        **kwargs,
+    )
+    return _attach_escape_back(question).ask()
+
+
+def _is_back(value: Any) -> bool:
+    return value is BACK_SIGNAL
 
 def ensure_config_dir():
     if not os.path.exists(CONFIG_DIR): os.makedirs(CONFIG_DIR)
@@ -134,6 +215,23 @@ def _with_disabled_patterns(config: dict, patterns: list[str]) -> dict:
     updated["disabled_command_patterns"] = _sanitize_disabled_patterns(patterns)
     return updated
 
+
+def _get_llm_calls_per_line(config: dict) -> int:
+    value = config.get("llm_calls_per_line", DEFAULT_LLM_CALLS_PER_LINE)
+    try:
+        parsed = int(value)
+    except (TypeError, ValueError):
+        return DEFAULT_LLM_CALLS_PER_LINE
+    if parsed < 0:
+        return DEFAULT_LLM_CALLS_PER_LINE
+    return parsed
+
+
+def _with_llm_calls_per_line(config: dict, value: int) -> dict:
+    updated = dict(config or {})
+    updated["llm_calls_per_line"] = max(0, int(value))
+    return updated
+
 def _disable_pattern_in_config(config: dict, raw_pattern: str) -> tuple[dict, str, bool]:
     normalized = _normalize_command_pattern(raw_pattern)
     if not normalized:
@@ -170,162 +268,253 @@ def _default_model_for_provider(provider: str) -> str:
     return "gpt-5-mini"
 
 def _manage_pattern_controls(existing_config: dict):
-    patterns = _get_disabled_patterns(existing_config)
-    action = questionary.select(
-        "Pattern controls:",
-        choices=[
-            "Disable GhostShell for a specific pattern",
-            "Re-enable GhostShell for a specific pattern",
-        ],
-        pointer="👉",
-    ).ask()
-    if not action:
-        return
-
-    if action.startswith("Disable"):
-        raw_pattern = questionary.text(
-            "Enter pattern (command family) to disable, e.g. docker:"
-        ).ask() or ""
-        updated, normalized, changed = _disable_pattern_in_config(existing_config, raw_pattern)
-        if not normalized:
-            console.print("[yellow]No valid pattern provided. Nothing changed.[/yellow]")
+    while True:
+        config = _load_config()
+        patterns = _get_disabled_patterns(config)
+        action = _setup_select(
+            "Pattern controls:",
+            choices=[
+                "Disable GhostShell for a specific pattern",
+                "Re-enable GhostShell for a specific pattern",
+            ],
+        )
+        if _is_back(action) or not action:
             return
+
+        if action.startswith("Disable"):
+            raw_pattern = _setup_text(
+                "Enter pattern (command family) to disable, e.g. docker:"
+            )
+            if _is_back(raw_pattern):
+                continue
+            updated, normalized, changed = _disable_pattern_in_config(config, raw_pattern)
+            if not normalized:
+                console.print("[yellow]No valid pattern provided. Nothing changed.[/yellow]")
+                continue
+            _save_config(updated)
+            if changed:
+                console.print(f"[green]✓ Disabled GhostShell for '{normalized}'.[/green]")
+            else:
+                console.print(f"[yellow]Pattern '{normalized}' was already disabled.[/yellow]")
+            continue
+
+        if not patterns:
+            console.print("[yellow]No disabled patterns found. Nothing to re-enable.[/yellow]")
+            continue
+
+        selected = _setup_select(
+            "Select a pattern to re-enable:",
+            choices=patterns,
+        )
+        if _is_back(selected) or not selected:
+            continue
+        updated, changed = _enable_pattern_in_config(config, selected)
+        if not changed:
+            console.print("[yellow]Pattern not found. Nothing changed.[/yellow]")
+            continue
         _save_config(updated)
-        if changed:
-            console.print(f"[green]✓ Disabled GhostShell for '{normalized}'.[/green]")
-        else:
-            console.print(f"[yellow]Pattern '{normalized}' was already disabled.[/yellow]")
-        return
-
-    if not patterns:
-        console.print("[yellow]No disabled patterns found. Nothing to re-enable.[/yellow]")
-        return
-
-    selected = questionary.select(
-        "Select a pattern to re-enable:",
-        choices=patterns,
-        pointer="👉",
-    ).ask()
-    if not selected:
-        return
-    updated, changed = _enable_pattern_in_config(existing_config, selected)
-    if not changed:
-        console.print("[yellow]Pattern not found. Nothing changed.[/yellow]")
-        return
-    _save_config(updated)
-    console.print(f"[green]✓ Re-enabled GhostShell for '{selected}'.[/green]")
+        console.print(f"[green]✓ Re-enabled GhostShell for '{selected}'.[/green]")
 
 def _configure_provider(existing_config: dict):
-    provider = questionary.select(
-        "Select Provider:",
-        choices=["openai", "groq", "ollama", "lm_studio", "custom", "gemini", "anthropic", "azure"],
-        pointer="👉",
-    ).ask()
-    if not provider:
-        return
-
-    model = questionary.text(
-        "Enter Model Name:",
-        default=_default_model_for_provider(provider),
-    ).ask()
-    if not model:
-        return
-
-    api_key = ""
-    if provider == "lm_studio":
-        if questionary.confirm("Set an API key for LM Studio?").ask():
-            api_key = questionary.password("Enter API Key:").ask() or ""
-    elif provider == "ollama":
-        if questionary.confirm("Set an API key for Ollama?").ask():
-            api_key = questionary.password("Enter API Key:").ask() or ""
-    else:
-        api_key = questionary.password("Enter API Key (leave blank if not required):").ask() or ""
-
-    base_url = ""
-    if provider in ["ollama", "lm_studio", "custom"]:
-        if provider == "ollama":
-            default_url = "http://localhost:11434"
-        elif provider == "lm_studio":
-            default_url = "http://localhost:1234/v1"
-        else:
-            default_url = "https://api.openai.com/v1"
-        base_url = questionary.text("Enter Base URL:", default=default_url).ask() or ""
-
     config = dict(existing_config or {})
-    config["provider"] = provider
-    config["model"] = model
-    config["api_key"] = api_key
-    config["base_url"] = base_url
-    if "disabled_command_patterns" in existing_config:
-        config["disabled_command_patterns"] = _get_disabled_patterns(existing_config)
+    provider = ""
+    model = ""
+    api_key = ""
+    base_url = ""
+    headers_raw = ""
+    timeout_raw = ""
+    api_version = ""
+    extra_body_raw = ""
+    step = 0
 
-    if provider == "custom":
-        headers_raw = questionary.text(
-            "Optional headers as JSON (e.g. {\"X-API-Key\": \"...\"}):",
-            default="",
-        ).ask() or ""
-        if headers_raw.strip():
-            try:
-                parsed_headers = json.loads(headers_raw)
-                if isinstance(parsed_headers, dict):
-                    config["headers"] = parsed_headers
+    while True:
+        if step == 0:
+            provider = _setup_select(
+                "Select Provider:",
+                choices=["openai", "groq", "ollama", "lm_studio", "custom", "gemini", "anthropic", "azure"],
+            )
+            if _is_back(provider) or not provider:
+                return
+            step = 1
+            continue
+
+        if step == 1:
+            default_model = str(config.get("model") or _default_model_for_provider(provider))
+            model_value = _setup_text(
+                "Enter Model Name:",
+                default=default_model,
+            )
+            if _is_back(model_value):
+                step = 0
+                continue
+            if not model_value:
+                continue
+            model = model_value
+            step = 2
+            continue
+
+        if step == 2:
+            if provider == "lm_studio":
+                wants_api_key = _setup_confirm("Set an API key for LM Studio?", default=False)
+                if _is_back(wants_api_key):
+                    step = 1
+                    continue
+                if wants_api_key:
+                    value = _setup_password("Enter API Key:")
+                    if _is_back(value):
+                        step = 1
+                        continue
+                    api_key = value or ""
                 else:
-                    console.print("[yellow]Ignoring headers: JSON must be an object.[/yellow]")
-            except json.JSONDecodeError:
-                console.print("[yellow]Ignoring headers: invalid JSON.[/yellow]")
-
-        timeout_raw = questionary.text("Optional timeout in seconds:", default="").ask() or ""
-        if timeout_raw.strip():
-            try:
-                timeout_value = float(timeout_raw)
-                if timeout_value > 0:
-                    config["timeout"] = timeout_value
+                    api_key = ""
+            elif provider == "ollama":
+                wants_api_key = _setup_confirm("Set an API key for Ollama?", default=False)
+                if _is_back(wants_api_key):
+                    step = 1
+                    continue
+                if wants_api_key:
+                    value = _setup_password("Enter API Key:")
+                    if _is_back(value):
+                        step = 1
+                        continue
+                    api_key = value or ""
                 else:
-                    console.print("[yellow]Ignoring timeout: must be > 0.[/yellow]")
-            except ValueError:
-                console.print("[yellow]Ignoring timeout: invalid number.[/yellow]")
+                    api_key = ""
+            else:
+                value = _setup_password("Enter API Key (leave blank if not required):")
+                if _is_back(value):
+                    step = 1
+                    continue
+                api_key = value or ""
+            step = 3
+            continue
 
-        api_version = questionary.text("Optional API version:", default="").ask() or ""
-        if api_version.strip():
-            config["api_version"] = api_version.strip()
-
-        extra_body_raw = questionary.text(
-            "Optional extra body as JSON:",
-            default="",
-        ).ask() or ""
-        if extra_body_raw.strip():
-            try:
-                parsed_body = json.loads(extra_body_raw)
-                if isinstance(parsed_body, dict):
-                    config["extra_body"] = parsed_body
+        if step == 3:
+            if provider in ["ollama", "lm_studio", "custom"]:
+                if provider == "ollama":
+                    default_url = "http://localhost:11434"
+                elif provider == "lm_studio":
+                    default_url = "http://localhost:1234/v1"
                 else:
-                    console.print("[yellow]Ignoring extra_body: JSON must be an object.[/yellow]")
-            except json.JSONDecodeError:
-                console.print("[yellow]Ignoring extra_body: invalid JSON.[/yellow]")
-    else:
-        config.pop("headers", None)
-        config.pop("timeout", None)
-        config.pop("api_version", None)
-        config.pop("extra_body", None)
+                    default_url = "https://api.openai.com/v1"
+                value = _setup_text("Enter Base URL:", default=default_url)
+                if _is_back(value):
+                    step = 2
+                    continue
+                base_url = value or ""
+            else:
+                base_url = ""
+            step = 4
+            continue
 
-    _save_config(config)
-    console.print("[green]✓ Configuration saved![/green]")
-    console.print(f"[dim]Provider: {provider}, Model: {model}[/dim]")
+        if step == 4:
+            if provider == "custom":
+                value = _setup_text(
+                    "Optional headers as JSON (e.g. {\"X-API-Key\": \"...\"}):",
+                    default=headers_raw,
+                )
+                if _is_back(value):
+                    step = 3
+                    continue
+                headers_raw = value or ""
 
-    start_enabled = False
-    if questionary.confirm("Enable start on boot (Recommended)?").ask():
-        enable_startup()
-        start_enabled = True
+                value = _setup_text("Optional timeout in seconds:", default=timeout_raw)
+                if _is_back(value):
+                    step = 3
+                    continue
+                timeout_raw = value or ""
 
-    if not start_enabled and questionary.confirm("Start daemon now?").ask():
-        start()
+                value = _setup_text("Optional API version:", default=api_version)
+                if _is_back(value):
+                    step = 3
+                    continue
+                api_version = value or ""
+
+                value = _setup_text("Optional extra body as JSON:", default=extra_body_raw)
+                if _is_back(value):
+                    step = 3
+                    continue
+                extra_body_raw = value or ""
+            step = 5
+            continue
+
+        if step == 5:
+            config["provider"] = provider
+            config["model"] = model
+            config["api_key"] = api_key
+            config["base_url"] = base_url
+            if "disabled_command_patterns" in existing_config:
+                config["disabled_command_patterns"] = _get_disabled_patterns(existing_config)
+
+            if provider == "custom":
+                if headers_raw.strip():
+                    try:
+                        parsed_headers = json.loads(headers_raw)
+                        if isinstance(parsed_headers, dict):
+                            config["headers"] = parsed_headers
+                        else:
+                            console.print("[yellow]Ignoring headers: JSON must be an object.[/yellow]")
+                    except json.JSONDecodeError:
+                        console.print("[yellow]Ignoring headers: invalid JSON.[/yellow]")
+
+                if timeout_raw.strip():
+                    try:
+                        timeout_value = float(timeout_raw)
+                        if timeout_value > 0:
+                            config["timeout"] = timeout_value
+                        else:
+                            console.print("[yellow]Ignoring timeout: must be > 0.[/yellow]")
+                    except ValueError:
+                        console.print("[yellow]Ignoring timeout: invalid number.[/yellow]")
+
+                if api_version.strip():
+                    config["api_version"] = api_version.strip()
+
+                if extra_body_raw.strip():
+                    try:
+                        parsed_body = json.loads(extra_body_raw)
+                        if isinstance(parsed_body, dict):
+                            config["extra_body"] = parsed_body
+                        else:
+                            console.print("[yellow]Ignoring extra_body: JSON must be an object.[/yellow]")
+                    except json.JSONDecodeError:
+                        console.print("[yellow]Ignoring extra_body: invalid JSON.[/yellow]")
+            else:
+                config.pop("headers", None)
+                config.pop("timeout", None)
+                config.pop("api_version", None)
+                config.pop("extra_body", None)
+
+            _save_config(config)
+            console.print("[green]✓ Configuration saved![/green]")
+            console.print(f"[dim]Provider: {provider}, Model: {model}[/dim]")
+            step = 6
+            continue
+
+        if step == 6:
+            enable_boot = _setup_confirm("Enable start on boot (Recommended)?")
+            if _is_back(enable_boot):
+                step = 5
+                continue
+            if enable_boot:
+                enable_startup()
+                return
+            step = 7
+            continue
+
+        if step == 7:
+            should_start = _setup_confirm("Start daemon now?", default=False)
+            if _is_back(should_start):
+                step = 6
+                continue
+            if should_start:
+                start()
+            return
 
 def _ensure_command_store_backend_ready() -> bool:
     if not is_port_open():
-        should_start = questionary.confirm(
-            "Command store needs the daemon running. Start daemon now?"
-        ).ask()
-        if not should_start:
+        should_start = _setup_confirm("Command store needs the daemon running. Start daemon now?")
+        if _is_back(should_start) or not should_start:
             console.print("[yellow]Command store cancelled.[/yellow]")
             return False
         try:
@@ -347,6 +536,38 @@ def _ensure_command_store_backend_ready() -> bool:
 
     console.print(f"[red]Command store unavailable:[/red] {error}")
     return False
+
+
+def _configure_llm_budget(existing_config: dict):
+    config = dict(existing_config or {})
+    current = _get_llm_calls_per_line(config)
+    console.print("[bold cyan]Customize LLM budget[/bold cyan] [bold #ff8c00](Esc = back)[/bold #ff8c00]")
+    console.print("0 = no LLM calls")
+    console.print("Any number > 0 = max LLM calls per command line")
+    console.print("[dim]This limit resets when you submit or clear the command line.[/dim]")
+
+    while True:
+        raw_value = _setup_text(
+            "How many LLM calls are allowed per line?",
+            default=str(current),
+            show_back_instruction=False,
+        )
+        if _is_back(raw_value):
+            return
+        try:
+            parsed = int(str(raw_value).strip())
+            if parsed < 0:
+                raise ValueError
+        except ValueError:
+            console.print("[yellow]Please enter a non-negative integer (0, 1, 2, ...).[/yellow]")
+            continue
+        config = _with_llm_calls_per_line(config, parsed)
+        _save_config(config)
+        console.print(
+            f"[green]✓ LLM budget saved.[/green] {parsed} calls per command line "
+            f"({'disabled' if parsed == 0 else 'enabled'})"
+        )
+        return
 
 def _command_store_request(method: str, path: str, payload: dict | None = None) -> dict | None:
     url = f"http://127.0.0.1:22000{path}"
@@ -375,9 +596,12 @@ def _command_store_request(method: str, path: str, payload: dict | None = None) 
     return data
 
 def _manage_command_store_add():
-    raw = questionary.text(
+    raw = _setup_text(
         "Add commands (comma-separated; spaces are ok):"
-    ).ask() or ""
+    )
+    if _is_back(raw):
+        return
+    raw = raw or ""
     parts = [part.strip() for part in raw.split(",")]
     commands = [part for part in parts if part]
     if not commands:
@@ -481,7 +705,9 @@ def _checkbox_without_invert(
                         ("class:instruction-key", "<space>"),
                         ("class:instruction", " to select, "),
                         ("class:instruction-key", "<a>"),
-                        ("class:instruction", " to select all)"),
+                        ("class:instruction", " to select all, "),
+                        ("class:instruction-key", "Esc"),
+                        ("class:instruction", " to go back)"),
                     ]
                 )
         return tokens
@@ -546,6 +772,10 @@ def _checkbox_without_invert(
             ic.is_answered = True
             event.app.exit(result=selected_values)
 
+    @bindings.add(Keys.Escape, eager=True)
+    def _back(event):
+        event.app.exit(result=BACK_SIGNAL)
+
     @bindings.add(Keys.Any)
     def _other(_event):
         # Disallow all other text input, including "i".
@@ -561,43 +791,64 @@ def _checkbox_without_invert(
     )
 
 def _manage_command_store_remove():
-    payload = _command_store_request("GET", "/command_store/list?include_all=true")
-    if not payload:
-        return
+    while True:
+        payload = _command_store_request("GET", "/command_store/list?include_all=true")
+        if not payload:
+            return
 
-    potential_wrong = payload.get("potential_wrong", [])
-    commands = payload.get("commands", [])
-    if not isinstance(potential_wrong, list):
-        potential_wrong = []
-    if not isinstance(commands, list):
-        commands = []
+        potential_wrong = payload.get("potential_wrong", [])
+        commands = payload.get("commands", [])
+        if not isinstance(potential_wrong, list):
+            potential_wrong = []
+        if not isinstance(commands, list):
+            commands = []
 
-    usage_values: list[int] = []
-    for item in potential_wrong + commands:
-        if not isinstance(item, dict):
-            continue
-        usage_values.append(int(item.get("usage_score", 0) or 0))
-    usage_values.sort()
-    low_cutoff = _percentile(usage_values, 0.10) if usage_values else None
-    high_cutoff = _percentile(usage_values, 0.90) if usage_values else None
+        usage_values: list[int] = []
+        for item in potential_wrong + commands:
+            if not isinstance(item, dict):
+                continue
+            usage_values.append(int(item.get("usage_score", 0) or 0))
+        usage_values.sort()
+        low_cutoff = _percentile(usage_values, 0.10) if usage_values else None
+        high_cutoff = _percentile(usage_values, 0.90) if usage_values else None
 
-    choices: list = []
-    seen: set[str] = set()
+        choices: list = []
+        seen: set[str] = set()
 
-    if potential_wrong:
-        choices.append(questionary.Separator("Potential wrong commands"))
-        for item in potential_wrong:
+        if potential_wrong:
+            choices.append(questionary.Separator("Potential wrong commands"))
+            for item in potential_wrong:
+                if not isinstance(item, dict):
+                    continue
+                command = str(item.get("command", "") or "").strip()
+                if not command or command in seen:
+                    continue
+                seen.add(command)
+                choices.append(
+                    questionary.Choice(
+                        title=_format_command_store_choice(
+                            item,
+                            show_reason=True,
+                            low_cutoff=low_cutoff,
+                            high_cutoff=high_cutoff,
+                        ),
+                        value=command,
+                    )
+                )
+
+        regular_choices = []
+        for item in commands:
             if not isinstance(item, dict):
                 continue
             command = str(item.get("command", "") or "").strip()
             if not command or command in seen:
                 continue
             seen.add(command)
-            choices.append(
+            regular_choices.append(
                 questionary.Choice(
                     title=_format_command_store_choice(
                         item,
-                        show_reason=True,
+                        show_reason=False,
                         low_cutoff=low_cutoff,
                         high_cutoff=high_cutoff,
                     ),
@@ -605,95 +856,81 @@ def _manage_command_store_remove():
                 )
             )
 
-    regular_choices = []
-    for item in commands:
-        if not isinstance(item, dict):
+        if regular_choices:
+            choices.append(questionary.Separator("Commands"))
+            choices.extend(regular_choices)
+
+        if not choices:
+            console.print("[yellow]No commands available in command store.[/yellow]")
+            return
+
+        selected = _checkbox_without_invert(
+            "Select commands to remove (use arrows, Space to select multiple, Enter to continue):",
+            choices=choices,
+            pointer="👉",
+        ).ask()
+        if _is_back(selected):
+            return
+        if not selected:
+            console.print("[yellow]No commands selected. Nothing changed.[/yellow]")
+            return
+
+        count = len(selected)
+        prompt = (
+            "Are you sure you want to delete this command from your history and command store?"
+            if count == 1
+            else "Are you sure you want to delete these commands from your history and command store?"
+        )
+        confirmed = _setup_confirm(prompt)
+        if _is_back(confirmed):
             continue
-        command = str(item.get("command", "") or "").strip()
-        if not command or command in seen:
-            continue
-        seen.add(command)
-        regular_choices.append(
-            questionary.Choice(
-                title=_format_command_store_choice(
-                    item,
-                    show_reason=False,
-                    low_cutoff=low_cutoff,
-                    high_cutoff=high_cutoff,
-                ),
-                value=command,
-            )
+        if not confirmed:
+            console.print("[yellow]Deletion cancelled.[/yellow]")
+            return
+
+        shell_name = os.environ.get("SHELL", "zsh")
+        result = _command_store_request(
+            "POST",
+            "/command_store/remove",
+            {"commands": selected, "shell": shell_name},
+        )
+        if not result:
+            return
+
+        vector_removed = int(result.get("vector_removed", 0) or 0)
+        guarded = int(result.get("guarded", 0) or 0)
+        history_removed = int(result.get("history_removed_lines", 0) or 0)
+        console.print(
+            f"[green]✓ Removed commands[/green] vector_removed={vector_removed}, "
+            f"history_lines_removed={history_removed}, guarded={guarded}"
         )
 
-    if regular_choices:
-        choices.append(questionary.Separator("Commands"))
-        choices.extend(regular_choices)
-
-    if not choices:
-        console.print("[yellow]No commands available in command store.[/yellow]")
+        warnings_list = result.get("warnings", [])
+        if isinstance(warnings_list, list):
+            for warning in warnings_list:
+                message = str(warning or "").strip()
+                if message:
+                    console.print(f"[yellow]{message}[/yellow]")
         return
-
-    selected = _checkbox_without_invert(
-        "Select commands to remove (use arrows, Space to select multiple, Enter to continue):",
-        choices=choices,
-        pointer="👉",
-    ).ask()
-    if not selected:
-        console.print("[yellow]No commands selected. Nothing changed.[/yellow]")
-        return
-
-    count = len(selected)
-    prompt = (
-        "Are you sure you want to delete this command from your history and command store?"
-        if count == 1
-        else "Are you sure you want to delete these commands from your history and command store?"
-    )
-    if not questionary.confirm(prompt).ask():
-        console.print("[yellow]Deletion cancelled.[/yellow]")
-        return
-
-    shell_name = os.environ.get("SHELL", "zsh")
-    result = _command_store_request(
-        "POST",
-        "/command_store/remove",
-        {"commands": selected, "shell": shell_name},
-    )
-    if not result:
-        return
-
-    vector_removed = int(result.get("vector_removed", 0) or 0)
-    guarded = int(result.get("guarded", 0) or 0)
-    history_removed = int(result.get("history_removed_lines", 0) or 0)
-    console.print(
-        f"[green]✓ Removed commands[/green] vector_removed={vector_removed}, "
-        f"history_lines_removed={history_removed}, guarded={guarded}"
-    )
-
-    warnings_list = result.get("warnings", [])
-    if isinstance(warnings_list, list):
-        for warning in warnings_list:
-            message = str(warning or "").strip()
-            if message:
-                console.print(f"[yellow]{message}[/yellow]")
 
 def _manage_command_store():
     if not _ensure_command_store_backend_ready():
         return
 
-    action = questionary.select(
-        "Manage command store:",
-        choices=[
-            "Add commands",
-            "Remove commands",
-        ],
-        pointer="👉",
-    ).ask()
-    if not action:
-        return
-    if action == "Add commands":
-        _manage_command_store_add()
-        return
-    _manage_command_store_remove()
+    while True:
+        action = _setup_select(
+            "Manage command store:",
+            choices=[
+                "Add commands",
+                "Remove commands",
+            ],
+        )
+        if _is_back(action) or not action:
+            return
+        if action == "Add commands":
+            _manage_command_store_add()
+            continue
+        _manage_command_store_remove()
 
 def is_port_open(host: str = "127.0.0.1", port: int = 22000) -> bool:
     """Return True if something is already listening on host:port."""
@@ -815,25 +1052,29 @@ def _wait_for_bootstrap_ready(started_pid: int | None = None) -> tuple[bool, int
 def setup():
     ensure_config_dir()
     console.print(Panel.fit("[bold cyan]GhostShell Configuration[/bold cyan]"))
-    existing_config = _load_config()
-    action = questionary.select(
-        "Choose one:",
-        choices=[
-            "Choose AI provider",
-            "Manage GhostShell command patterns",
-            "Manage command store (add/remove commands)",
-        ],
-        pointer="👉",
-    ).ask()
-    if not action:
-        return
-    if action == "Choose AI provider":
-        _configure_provider(existing_config)
-        return
-    if action == "Manage GhostShell command patterns":
-        _manage_pattern_controls(existing_config)
-        return
-    _manage_command_store()
+    while True:
+        existing_config = _load_config()
+        action = _setup_select(
+            "Choose one:",
+            choices=[
+                "Choose AI provider",
+                "Customize LLM budget",
+                "Manage GhostShell command patterns",
+                "Manage command store (add/remove commands)",
+            ],
+        )
+        if _is_back(action) or not action:
+            return
+        if action == "Choose AI provider":
+            _configure_provider(existing_config)
+            continue
+        if action == "Customize LLM budget":
+            _configure_llm_budget(existing_config)
+            continue
+        if action == "Manage GhostShell command patterns":
+            _manage_pattern_controls(existing_config)
+            continue
+        _manage_command_store()
 
 @app.command()
 def enable_startup():

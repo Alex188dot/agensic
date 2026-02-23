@@ -17,7 +17,7 @@ class _FakeVectorDB:
     def normalize_command(self, value: str) -> str:
         return str(value or "").strip()
 
-    def list_command_store(self, history_file: str = ""):
+    def list_command_store(self, history_file: str = "", include_all: bool = False):
         return {
             "commands": [{"command": "git status", "usage_score": 3}],
             "potential_wrong": [],

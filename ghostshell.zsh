@@ -10,9 +10,9 @@ typeset -g -a GHOSTSHELL_SUGGESTION_KINDS
 GHOSTSHELL_SUGGESTION_KINDS=()
 typeset -g GHOSTSHELL_SUGGESTION_INDEX=1
 typeset -g GHOSTSHELL_STATUS_PREFIX="__GHOSTSHELL_STATUS__:"
-typeset -g GHOSTSHELL_MAX_AUTO_AI_CALLS=4
-typeset -g GHOSTSHELL_CTRL_SPACE_HINT="To trigger new LLM suggestions press Ctrl + Space"
-typeset -g GHOSTSHELL_LINE_AUTO_AI_CALLS=0
+typeset -g GHOSTSHELL_MAX_LLM_CALLS_PER_LINE=4
+typeset -g GHOSTSHELL_LLM_BUDGET_REACHED_HINT="LLM budget reached for this command line"
+typeset -g GHOSTSHELL_LINE_LLM_CALLS_USED=0
 typeset -g GHOSTSHELL_LINE_HAS_SPACE=0
 typeset -g GHOSTSHELL_SHOW_CTRL_SPACE_HINT=0
 typeset -g GHOSTSHELL_LAST_FETCH_USED_AI=0
@@ -159,6 +159,7 @@ _ghostshell_reload_disabled_patterns_if_needed() {
     fi
     GHOSTSHELL_CONFIG_MTIME="$current_mtime"
     GHOSTSHELL_DISABLED_PATTERNS=()
+    GHOSTSHELL_MAX_LLM_CALLS_PER_LINE=4
 
     if [[ -z "$current_mtime" ]]; then
         return
@@ -185,6 +186,7 @@ def normalize(value):
 
 patterns = []
 seen = set()
+budget = 4
 try:
     with open(path, 'r', encoding='utf-8') as fh:
         payload = json.load(fh)
@@ -197,11 +199,29 @@ for value in (payload.get('disabled_command_patterns') or []):
         seen.add(normalized)
         patterns.append(normalized)
 
+raw_budget = payload.get('llm_calls_per_line', 4)
+try:
+    parsed_budget = int(raw_budget)
+except Exception:
+    parsed_budget = 4
+if parsed_budget < 0:
+    parsed_budget = 4
+budget = parsed_budget
+
+print(str(budget))
 print('\x1f'.join(patterns))
 " 2>/dev/null)
 
     if [[ -n "$response" ]]; then
-        GHOSTSHELL_DISABLED_PATTERNS=("${(ps:$sep:)response}")
+        local -a response_lines
+        response_lines=("${(@f)response}")
+        if [[ "${response_lines[1]}" == <-> ]]; then
+            GHOSTSHELL_MAX_LLM_CALLS_PER_LINE="${response_lines[1]}"
+        fi
+        local patterns_line="${response_lines[2]}"
+        if [[ -n "$patterns_line" ]]; then
+            GHOSTSHELL_DISABLED_PATTERNS=("${(ps:$sep:)patterns_line}")
+        fi
     fi
 }
 
@@ -957,7 +977,7 @@ _ghostshell_precmd_hook() {
 }
 
 _ghostshell_reset_line_state() {
-    GHOSTSHELL_LINE_AUTO_AI_CALLS=0
+    GHOSTSHELL_LINE_LLM_CALLS_USED=0
     GHOSTSHELL_LINE_HAS_SPACE=0
     GHOSTSHELL_SHOW_CTRL_SPACE_HINT=0
     GHOSTSHELL_LAST_FETCH_USED_AI=0
@@ -981,7 +1001,7 @@ _ghostshell_try_fetch_on_space() {
 
     local allow_ai=1
     local is_manual="${1:-0}"
-    local manual_allow_ai="${2:-1}"
+    local budget_blocked=0
     local trigger_source="space_auto"
 
     if [[ "$is_manual" != "1" ]] && _ghostshell_should_preserve_native_tab; then
@@ -992,28 +1012,23 @@ _ghostshell_try_fetch_on_space() {
     fi
 
     if [[ "$is_manual" == "1" ]]; then
-        allow_ai="$manual_allow_ai"
         trigger_source="manual_ctrl_space"
-    else
-        if (( GHOSTSHELL_LINE_AUTO_AI_CALLS >= GHOSTSHELL_MAX_AUTO_AI_CALLS )); then
-            allow_ai=0
-        fi
+    fi
+    if (( GHOSTSHELL_LINE_LLM_CALLS_USED >= GHOSTSHELL_MAX_LLM_CALLS_PER_LINE )); then
+        allow_ai=0
+        budget_blocked=1
     fi
 
     GHOSTSHELL_LAST_BUFFER="$BUFFER"
     _ghostshell_fetch_suggestions "$allow_ai" "$trigger_source"
 
-    if [[ "$is_manual" != "1" ]]; then
-        if (( GHOSTSHELL_LAST_FETCH_USED_AI == 1 )); then
-            GHOSTSHELL_LINE_AUTO_AI_CALLS=$((GHOSTSHELL_LINE_AUTO_AI_CALLS + 1))
-        fi
-        if (( allow_ai == 0 && ${#GHOSTSHELL_SUGGESTIONS[@]} == 0 )); then
-            GHOSTSHELL_SHOW_CTRL_SPACE_HINT=1
-            _ghostshell_set_status_message "$GHOSTSHELL_CTRL_SPACE_HINT"
-        elif [[ "${GHOSTSHELL_SUGGESTIONS[1]}" != "${GHOSTSHELL_STATUS_PREFIX}${GHOSTSHELL_CTRL_SPACE_HINT}" ]]; then
-            GHOSTSHELL_SHOW_CTRL_SPACE_HINT=0
-        fi
-    else
+    if (( GHOSTSHELL_LAST_FETCH_USED_AI == 1 )); then
+        GHOSTSHELL_LINE_LLM_CALLS_USED=$((GHOSTSHELL_LINE_LLM_CALLS_USED + 1))
+    fi
+    if (( allow_ai == 0 && budget_blocked == 1 && ${#GHOSTSHELL_SUGGESTIONS[@]} == 0 )); then
+        GHOSTSHELL_SHOW_CTRL_SPACE_HINT=1
+        _ghostshell_set_status_message "$GHOSTSHELL_LLM_BUDGET_REACHED_HINT"
+    elif [[ "${GHOSTSHELL_SUGGESTIONS[1]}" != "${GHOSTSHELL_STATUS_PREFIX}${GHOSTSHELL_LLM_BUDGET_REACHED_HINT}" ]]; then
         GHOSTSHELL_SHOW_CTRL_SPACE_HINT=0
     fi
 }
@@ -1409,11 +1424,7 @@ _ghostshell_manual_trigger() {
             zle -R
             return
         fi
-        local manual_allow_ai=0
-        if [[ "$BUFFER" == *[[:space:]]* ]]; then
-            manual_allow_ai=1
-        fi
-        _ghostshell_try_fetch_on_space 1 "$manual_allow_ai"
+        _ghostshell_try_fetch_on_space 1
         _ghostshell_update_display
         zle -R
     fi
