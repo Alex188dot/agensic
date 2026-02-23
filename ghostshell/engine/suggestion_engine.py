@@ -10,6 +10,11 @@ import asyncio
 from pathlib import Path
 from litellm import acompletion
 import requests
+from ghostshell.config.loader import (
+    DEFAULT_TIMEOUT_SECONDS,
+    MAX_TIMEOUT_SECONDS,
+    MIN_TIMEOUT_SECONDS,
+)
 from ghostshell.privacy.guard import PrivacyGuard, PrivacyGuardError
 from .context import RequestContext, Settings, SystemInventory
 
@@ -541,8 +546,10 @@ class SuggestionEngine:
             kwargs["extra_body"] = extra_body
 
         timeout = self._parse_optional_float(config.get("timeout"), "timeout")
-        if timeout is not None and timeout > 0:
-            kwargs["timeout"] = timeout
+        if timeout is None:
+            timeout = DEFAULT_TIMEOUT_SECONDS
+        timeout = max(MIN_TIMEOUT_SECONDS, min(MAX_TIMEOUT_SECONDS, float(timeout)))
+        kwargs["timeout"] = timeout
 
         api_version = config.get("api_version", None)
         if api_version:
@@ -628,7 +635,9 @@ class SuggestionEngine:
                 headers[str(key)] = str(value)
 
         timeout = self._parse_optional_float(config.get("timeout"), "timeout")
-        request_timeout = timeout if timeout is not None and timeout > 0 else 60.0
+        if timeout is None:
+            timeout = DEFAULT_TIMEOUT_SECONDS
+        request_timeout = max(MIN_TIMEOUT_SECONDS, min(MAX_TIMEOUT_SECONDS, float(timeout)))
         endpoint = self._build_lm_studio_rest_endpoint(config)
 
         def _do_request() -> requests.Response:

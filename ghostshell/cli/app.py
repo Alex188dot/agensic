@@ -23,6 +23,13 @@ from questionary.prompts import common
 from questionary.prompts.common import InquirerControl
 from questionary.styles import merge_styles_default
 from questionary import utils
+from ghostshell.config.loader import (
+    DEFAULT_LLM_CALLS_PER_LINE,
+    MAX_LLM_CALLS_PER_LINE,
+    load_config_file,
+    normalize_config_payload,
+    save_config_file,
+)
 
 app = typer.Typer(add_completion=False)
 console = Console()
@@ -34,8 +41,6 @@ PROJECT_ROOT = str(Path(__file__).resolve().parents[2])
 SERVER_SCRIPT = os.path.join(PROJECT_ROOT, "server.py")
 SHELL_CLIENT_SCRIPT = os.path.join(PROJECT_ROOT, "shell_client.py")
 PLIST_PATH = os.path.expanduser("~/Library/LaunchAgents/com.ghostshell.daemon.plist")
-DEFAULT_LLM_CALLS_PER_LINE = 4
-
 
 class _BackSignal:
     pass
@@ -51,6 +56,10 @@ def _setup_style() -> Style:
             Style([("instruction-key", "fg:#ff8c00 bold")]),
         ]
     )
+
+
+def _print_screen_heading(title: str) -> None:
+    console.print(f"[bold cyan]{title}[/bold cyan] [bold #ff8c00](Esc = back)[/bold #ff8c00]")
 
 
 def _attach_escape_back(question: Question) -> Question:
@@ -71,14 +80,13 @@ def _setup_select(message: str, choices: list[str], **kwargs) -> Any:
         message,
         choices=choices,
         pointer="👉",
-        instruction="Esc = back",
         style=_setup_style(),
         **kwargs,
     )
     return _attach_escape_back(question).ask()
 
 
-def _setup_text(message: str, default: str = "", show_back_instruction: bool = True, **kwargs) -> Any:
+def _setup_text(message: str, default: str = "", show_back_instruction: bool = False, **kwargs) -> Any:
     instruction = "Esc = back" if show_back_instruction else None
     question = questionary.text(
         message,
@@ -94,7 +102,6 @@ def _setup_confirm(message: str, default: bool = True, **kwargs) -> Any:
     question = questionary.confirm(
         message,
         default=default,
-        instruction="Esc = back",
         style=_setup_style(),
         **kwargs,
     )
@@ -102,7 +109,6 @@ def _setup_confirm(message: str, default: bool = True, **kwargs) -> Any:
 
 
 def _setup_password(message: str, **kwargs) -> Any:
-    console.print("[bold #ff8c00]Esc[/bold #ff8c00] = back")
     question = questionary.password(
         message,
         style=_setup_style(),
@@ -118,20 +124,10 @@ def ensure_config_dir():
     if not os.path.exists(CONFIG_DIR): os.makedirs(CONFIG_DIR)
 
 def _load_config() -> dict:
-    if not os.path.exists(CONFIG_FILE):
-        return {}
-    try:
-        with open(CONFIG_FILE, "r", encoding="utf-8") as f:
-            payload = json.load(f)
-        if isinstance(payload, dict):
-            return payload
-    except Exception:
-        pass
-    return {}
+    return load_config_file(CONFIG_FILE)
 
 def _save_config(config: dict):
-    with open(CONFIG_FILE, "w", encoding="utf-8") as f:
-        json.dump(config, f, indent=4)
+    save_config_file(config, CONFIG_FILE)
 
 def _normalize_command_pattern(raw: str) -> str:
     value = str(raw or "").strip()
@@ -217,19 +213,25 @@ def _with_disabled_patterns(config: dict, patterns: list[str]) -> dict:
 
 
 def _get_llm_calls_per_line(config: dict) -> int:
-    value = config.get("llm_calls_per_line", DEFAULT_LLM_CALLS_PER_LINE)
-    try:
-        parsed = int(value)
-    except (TypeError, ValueError):
-        return DEFAULT_LLM_CALLS_PER_LINE
-    if parsed < 0:
-        return DEFAULT_LLM_CALLS_PER_LINE
-    return parsed
+    normalized = normalize_config_payload(config)
+    return int(normalized["llm_calls_per_line"])
+
+
+def _is_llm_budget_unlimited(config: dict) -> bool:
+    normalized = normalize_config_payload(config)
+    return bool(normalized["llm_budget_unlimited"])
 
 
 def _with_llm_calls_per_line(config: dict, value: int) -> dict:
-    updated = dict(config or {})
-    updated["llm_calls_per_line"] = max(0, int(value))
+    updated = normalize_config_payload(config)
+    updated["llm_calls_per_line"] = max(0, min(MAX_LLM_CALLS_PER_LINE, int(value)))
+    updated["llm_budget_unlimited"] = False
+    return updated
+
+
+def _with_llm_budget_unlimited(config: dict, enabled: bool) -> dict:
+    updated = normalize_config_payload(config)
+    updated["llm_budget_unlimited"] = bool(enabled)
     return updated
 
 def _disable_pattern_in_config(config: dict, raw_pattern: str) -> tuple[dict, str, bool]:
@@ -268,6 +270,7 @@ def _default_model_for_provider(provider: str) -> str:
     return "gpt-5-mini"
 
 def _manage_pattern_controls(existing_config: dict):
+    _print_screen_heading("Manage GhostShell command patterns")
     while True:
         config = _load_config()
         patterns = _get_disabled_patterns(config)
@@ -316,6 +319,7 @@ def _manage_pattern_controls(existing_config: dict):
         console.print(f"[green]✓ Re-enabled GhostShell for '{selected}'.[/green]")
 
 def _configure_provider(existing_config: dict):
+    _print_screen_heading("Choose AI provider")
     config = dict(existing_config or {})
     provider = ""
     model = ""
@@ -539,27 +543,40 @@ def _ensure_command_store_backend_ready() -> bool:
 
 
 def _configure_llm_budget(existing_config: dict):
-    config = dict(existing_config or {})
+    config = normalize_config_payload(existing_config)
     current = _get_llm_calls_per_line(config)
-    console.print("[bold cyan]Customize LLM budget[/bold cyan] [bold #ff8c00](Esc = back)[/bold #ff8c00]")
+    unlimited = _is_llm_budget_unlimited(config)
+    _print_screen_heading("Customize LLM budget")
+    console.print("Budget range: 0-99 calls per command line")
     console.print("0 = no LLM calls")
-    console.print("Any number > 0 = max LLM calls per command line")
+    console.print("Use 'No budget limit' for unlimited calls")
     console.print("[dim]This limit resets when you submit or clear the command line.[/dim]")
+
+    set_unlimited = _setup_confirm(
+        "Enable 'No budget limit'?",
+        default=unlimited,
+    )
+    if _is_back(set_unlimited):
+        return
+    if set_unlimited:
+        config = _with_llm_budget_unlimited(config, True)
+        _save_config(config)
+        console.print("[green]✓ LLM budget saved.[/green] Unlimited calls per command line")
+        return
 
     while True:
         raw_value = _setup_text(
-            "How many LLM calls are allowed per line?",
+            "How many LLM calls are allowed per line? (0-99)",
             default=str(current),
-            show_back_instruction=False,
         )
         if _is_back(raw_value):
             return
         try:
             parsed = int(str(raw_value).strip())
-            if parsed < 0:
+            if parsed < 0 or parsed > MAX_LLM_CALLS_PER_LINE:
                 raise ValueError
         except ValueError:
-            console.print("[yellow]Please enter a non-negative integer (0, 1, 2, ...).[/yellow]")
+            console.print("[yellow]Please enter an integer from 0 to 99.[/yellow]")
             continue
         config = _with_llm_calls_per_line(config, parsed)
         _save_config(config)
@@ -596,6 +613,7 @@ def _command_store_request(method: str, path: str, payload: dict | None = None) 
     return data
 
 def _manage_command_store_add():
+    _print_screen_heading("Add commands")
     raw = _setup_text(
         "Add commands (comma-separated; spaces are ok):"
     )
@@ -679,8 +697,35 @@ def _checkbox_without_invert(
         show_description=True,
     )
 
+    def _message_tokens(msg: str) -> list[tuple[str, str]]:
+        # Map simple inline tags used by callers to prompt_toolkit style classes.
+        tokens: list[tuple[str, str]] = [("class:question", " ")]
+        i = 0
+        active_style = "class:question"
+        while i < len(msg):
+            if msg.startswith("[green]", i):
+                active_style = "class:usage-high"
+                i += len("[green]")
+                continue
+            if msg.startswith("[/green]", i):
+                active_style = "class:question"
+                i += len("[/green]")
+                continue
+            if msg.startswith("[red]", i):
+                active_style = "class:usage-low"
+                i += len("[red]")
+                continue
+            if msg.startswith("[/red]", i):
+                active_style = "class:question"
+                i += len("[/red]")
+                continue
+            tokens.append((active_style, msg[i]))
+            i += 1
+        return tokens
+
     def get_prompt_tokens():
-        tokens = [("class:qmark", DEFAULT_QUESTION_PREFIX), ("class:question", f" {message}")]
+        tokens = [("class:qmark", DEFAULT_QUESTION_PREFIX)]
+        tokens.extend(_message_tokens(message))
         if ic.is_answered:
             nbr_selected = len(ic.selected_options)
             if nbr_selected == 0:
@@ -705,9 +750,7 @@ def _checkbox_without_invert(
                         ("class:instruction-key", "<space>"),
                         ("class:instruction", " to select, "),
                         ("class:instruction-key", "<a>"),
-                        ("class:instruction", " to select all, "),
-                        ("class:instruction-key", "Esc"),
-                        ("class:instruction", " to go back)"),
+                        ("class:instruction", " to select all)"),
                     ]
                 )
         return tokens
@@ -791,6 +834,7 @@ def _checkbox_without_invert(
     )
 
 def _manage_command_store_remove():
+    _print_screen_heading("Remove commands")
     while True:
         payload = _command_store_request("GET", "/command_store/list?include_all=true")
         if not payload:
@@ -865,7 +909,7 @@ def _manage_command_store_remove():
             return
 
         selected = _checkbox_without_invert(
-            "Select commands to remove (use arrows, Space to select multiple, Enter to continue):",
+            "Select commands to remove ([green]top 10%[/green] in green, [red]bottom 10%[/red] in red):",
             choices=choices,
             pointer="👉",
         ).ask()
@@ -917,6 +961,7 @@ def _manage_command_store():
     if not _ensure_command_store_backend_ready():
         return
 
+    _print_screen_heading("Manage command store")
     while True:
         action = _setup_select(
             "Manage command store:",
@@ -1051,7 +1096,9 @@ def _wait_for_bootstrap_ready(started_pid: int | None = None) -> tuple[bool, int
 @app.command()
 def setup():
     ensure_config_dir()
-    console.print(Panel.fit("[bold cyan]GhostShell Configuration[/bold cyan]"))
+    console.print(
+        Panel.fit("[bold cyan]GhostShell Configuration[/bold cyan] [bold #ff8c00](Esc = back)[/bold #ff8c00]")
+    )
     while True:
         existing_config = _load_config()
         action = _setup_select(

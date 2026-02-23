@@ -136,12 +136,14 @@ Create `~/.ghostshell/config.json`:
   "model": "gpt-4o-mini",
   "api_key": "your-api-key-here",
   "llm_calls_per_line": 4,
+  "llm_budget_unlimited": false,
   "disabled_command_patterns": ["ros2", "kubectl"]
 }
 ```
 
 `disabled_command_patterns` is optional. When set, GhostShell is fully suppressed for matching command families (including in-progress prefixes like `ro` for `ros2`).
-`llm_calls_per_line` is optional. `0` disables LLM calls on that line; any number `> 0` sets the max LLM calls per command line (auto + manual `Ctrl+Space`).
+`llm_calls_per_line` is optional and must be `0-99`. `0` disables LLM calls on that line; any number `> 0` sets the max LLM calls per command line (auto + manual `Ctrl+Space`).
+`llm_budget_unlimited` is optional. When `true`, GhostShell ignores `llm_calls_per_line` for that line.
 
 ### Setup Menu
 
@@ -291,7 +293,7 @@ GhostShell prints a normal text explanation in the terminal.
 3. **Real-time Filtering**: As you type, filters the 20 suggestions
 4. **Typo Recovery**: Word-by-word typo checks run before LLM fallback and return `Did you mean: ...`
 5. **AI Fallback**: Only invoked when vectors return no suggestions and no typo correction is found
-6. **Per-Command Budget**: Configurable in `aiterminal setup` (`Customize LLM budget`): `0` disables LLM calls, `N>0` allows up to `N` LLM calls per command line (auto + manual)
+6. **Per-Command Budget**: Configurable in `aiterminal setup` (`Customize LLM budget`): `0-99` calls per command line, or explicit `No budget limit`
 
 When typo recovery is active, the first ghost suggestion is shown as:
 
@@ -369,8 +371,14 @@ This means:
 - **Auto trigger**: `Space` key only
 - **First AI fallback**: Requires at least one typed `Space`
 - **LLM budget**: Configurable per command line (`llm_calls_per_line`, default `4`)
-- **Budget semantics**: `0` disables LLM calls; any `N>0` allows up to `N` LLM calls per line (auto + manual)
+- **Budget semantics**: `0-99` for explicit budget, or `llm_budget_unlimited=true` for no budget limit
 - **Overflow hint**: `LLM budget reached for this command line`
+
+### LLM Safeguards
+
+- **Rate limiting**: per-client LLM request cap over a 60-second window (`llm_requests_per_minute`, default `120`)
+- **Timeout cap**: outbound LLM timeout is bounded (`timeout`, clamped to `1-30s`, default `20s`)
+- **Input size validation**: server-side max lengths for prompt/intent/command payloads
 
 ### Suggestion Pool
 

@@ -11,6 +11,7 @@ GHOSTSHELL_SUGGESTION_KINDS=()
 typeset -g GHOSTSHELL_SUGGESTION_INDEX=1
 typeset -g GHOSTSHELL_STATUS_PREFIX="__GHOSTSHELL_STATUS__:"
 typeset -g GHOSTSHELL_MAX_LLM_CALLS_PER_LINE=4
+typeset -g GHOSTSHELL_LLM_BUDGET_UNLIMITED=0
 typeset -g GHOSTSHELL_LLM_BUDGET_REACHED_HINT="LLM budget reached for this command line"
 typeset -g GHOSTSHELL_LINE_LLM_CALLS_USED=0
 typeset -g GHOSTSHELL_LINE_HAS_SPACE=0
@@ -160,6 +161,7 @@ _ghostshell_reload_disabled_patterns_if_needed() {
     GHOSTSHELL_CONFIG_MTIME="$current_mtime"
     GHOSTSHELL_DISABLED_PATTERNS=()
     GHOSTSHELL_MAX_LLM_CALLS_PER_LINE=4
+    GHOSTSHELL_LLM_BUDGET_UNLIMITED=0
 
     if [[ -z "$current_mtime" ]]; then
         return
@@ -187,6 +189,7 @@ def normalize(value):
 patterns = []
 seen = set()
 budget = 4
+unlimited = False
 try:
     with open(path, 'r', encoding='utf-8') as fh:
         payload = json.load(fh)
@@ -204,11 +207,13 @@ try:
     parsed_budget = int(raw_budget)
 except Exception:
     parsed_budget = 4
-if parsed_budget < 0:
+if parsed_budget < 0 or parsed_budget > 99:
     parsed_budget = 4
 budget = parsed_budget
+unlimited = bool(payload.get('llm_budget_unlimited', False))
 
 print(str(budget))
+print('1' if unlimited else '0')
 print('\x1f'.join(patterns))
 " 2>/dev/null)
 
@@ -218,7 +223,10 @@ print('\x1f'.join(patterns))
         if [[ "${response_lines[1]}" == <-> ]]; then
             GHOSTSHELL_MAX_LLM_CALLS_PER_LINE="${response_lines[1]}"
         fi
-        local patterns_line="${response_lines[2]}"
+        if [[ "${response_lines[2]}" == "1" ]]; then
+            GHOSTSHELL_LLM_BUDGET_UNLIMITED=1
+        fi
+        local patterns_line="${response_lines[3]}"
         if [[ -n "$patterns_line" ]]; then
             GHOSTSHELL_DISABLED_PATTERNS=("${(ps:$sep:)patterns_line}")
         fi
@@ -1014,7 +1022,7 @@ _ghostshell_try_fetch_on_space() {
     if [[ "$is_manual" == "1" ]]; then
         trigger_source="manual_ctrl_space"
     fi
-    if (( GHOSTSHELL_LINE_LLM_CALLS_USED >= GHOSTSHELL_MAX_LLM_CALLS_PER_LINE )); then
+    if (( GHOSTSHELL_LLM_BUDGET_UNLIMITED == 0 && GHOSTSHELL_LINE_LLM_CALLS_USED >= GHOSTSHELL_MAX_LLM_CALLS_PER_LINE )); then
         allow_ai=0
         budget_blocked=1
     fi

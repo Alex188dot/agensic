@@ -1,4 +1,4 @@
-from fastapi import APIRouter, BackgroundTasks
+from fastapi import APIRouter, BackgroundTasks, HTTPException, Request
 
 from ghostshell.server import deps
 from ghostshell.server.schemas import AssistContext, AssistResponse, Feedback, GenericStatusResponse
@@ -7,8 +7,15 @@ router = APIRouter()
 
 
 @router.post("/assist", response_model=AssistResponse, response_model_exclude_unset=True)
-async def resolve_assist(ctx: AssistContext) -> AssistResponse:
+async def resolve_assist(ctx: AssistContext, request: Request) -> AssistResponse:
     config = deps.load_config()
+    client_id = deps.get_client_id(request)
+    allowed, used, limit = deps.check_and_track_llm_rate_limit(config, client_id)
+    if not allowed:
+        raise HTTPException(
+            status_code=429,
+            detail=f"LLM request rate limit exceeded ({used}/{limit} in 60s).",
+        )
     req_context = deps.RequestContext(
         history_file=deps.get_history_file(ctx.shell),
         cwd=ctx.working_directory,

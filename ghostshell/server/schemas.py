@@ -4,26 +4,26 @@ from pydantic import BaseModel, Field
 
 
 class Context(BaseModel):
-    command_buffer: str
+    command_buffer: str = Field(max_length=4096)
     cursor_position: int
-    working_directory: str
-    shell: str
+    working_directory: str = Field(max_length=2048)
+    shell: str = Field(max_length=128)
     allow_ai: bool = True
     trigger_source: str | None = None
 
 
 class IntentContext(BaseModel):
-    intent_text: str
-    working_directory: str
-    shell: str
+    intent_text: str = Field(max_length=2000)
+    working_directory: str = Field(max_length=2048)
+    shell: str = Field(max_length=128)
     terminal: str | None = None
     platform: str | None = None
 
 
 class AssistContext(BaseModel):
-    prompt_text: str
-    working_directory: str
-    shell: str
+    prompt_text: str = Field(max_length=4000)
+    working_directory: str = Field(max_length=2048)
+    shell: str = Field(max_length=128)
     terminal: str | None = None
     platform: str | None = None
 

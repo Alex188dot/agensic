@@ -107,7 +107,6 @@ class CommandVectorDB:
         self.command_cache_by_exec: Dict[str, set[str]] = defaultdict(set)
         self.token_candidates_by_context: Dict[str, set[str]] = defaultdict(set)
         self.global_token_candidates: set[str] = set()
-        self._history_cache_warmed_for: set[str] = set()
         self.removed_commands: set[str] = self._load_removed_commands()
         self.inserted_commands = self._load_existing_commands(limit=1024)
         self._register_commands(self.inserted_commands)
@@ -582,26 +581,6 @@ class CommandVectorDB:
         # Treat tiny single-edit differences as typos, not semantic misses.
         tiny_edit_typo = Levenshtein.distance(typed_compact, candidate_compact) <= 1
         return not tiny_edit_typo
-
-    def _warm_prefix_cache_from_history(self, history_path: Path):
-        key = str(history_path)
-        if key in self._history_cache_warmed_for:
-            return
-        if not history_path.exists() or not history_path.is_file():
-            return
-
-        commands: set[str] = set()
-        try:
-            with open(history_path, "r", encoding="utf-8", errors="ignore") as f:
-                for line in f:
-                    cmd = self.normalize_command(self._parse_history_line(line))
-                    if cmd:
-                        commands.add(cmd)
-            self._register_commands(commands)
-            self._history_cache_warmed_for.add(key)
-            logger.info(f"Warmed lexical prefix cache with {len(commands)} commands from history")
-        except Exception as exc:
-            logger.warning(f"Could not warm lexical prefix cache from history: {exc}")
 
     @staticmethod
     def tokenize_command(command: str) -> List[str]:
@@ -1119,7 +1098,6 @@ class CommandVectorDB:
             return
 
         logger.info(f"Syncing database from history: {history_file}")
-        self._warm_prefix_cache_from_history(history_path)
 
         try:
             stat = history_path.stat()
@@ -2045,7 +2023,6 @@ class CommandVectorDB:
                 self.command_cache_by_exec.clear()
                 self.token_candidates_by_context.clear()
                 self.global_token_candidates.clear()
-                self._history_cache_warmed_for.clear()
                 self.removed_commands.clear()
 
             self.model = None

@@ -126,6 +126,29 @@ class ServerContractTests(unittest.TestCase):
             self.assertEqual(assist_response.status_code, 200)
             self.assertIn("answer", assist_response.json())
 
+    def test_assist_rate_limit_response(self):
+        with patch.object(deps, "check_and_track_llm_rate_limit", return_value=(False, 120, 120)):
+            response = self.client.post(
+                "/assist",
+                json={
+                    "prompt_text": "hi",
+                    "working_directory": "/tmp",
+                    "shell": "zsh",
+                },
+            )
+            self.assertEqual(response.status_code, 429)
+
+    def test_assist_prompt_length_validation(self):
+        response = self.client.post(
+            "/assist",
+            json={
+                "prompt_text": "x" * 5001,
+                "working_directory": "/tmp",
+                "shell": "zsh",
+            },
+        )
+        self.assertEqual(response.status_code, 422)
+
     def test_command_store_contracts(self):
         fake_db = _FakeVectorDB()
 
