@@ -1020,9 +1020,24 @@ class CommandVectorDB:
     def _load_existing_commands(self, limit: int = 1024) -> set:
         commands = set()
         try:
+            query_limit = int(limit or 0)
+            if query_limit <= 0:
+                with self._io_lock:
+                    query_limit = int(getattr(self.collection.stats, "doc_count", 0) or 0)
+            if query_limit <= 0:
+                return commands
             with self._io_lock:
-                query = zvec.VectorQuery("embedding", vector=[0.0] * self.dimensions)
-                results = self.collection.query(query, topk=min(limit, 1024))
+                # Prefer scalar-only query to enumerate docs for listing tasks.
+                # Fallback to vector query for engines that require vectors.
+                try:
+                    results = self.collection.query(
+                        vectors=None,
+                        topk=query_limit,
+                        output_fields=["command"],
+                    )
+                except Exception:
+                    query = zvec.VectorQuery("embedding", vector=[0.0] * self.dimensions)
+                    results = self.collection.query(query, topk=query_limit)
             for res in results:
                 cmd = res.fields.get("command", "")
                 if cmd:
@@ -1516,13 +1531,15 @@ class CommandVectorDB:
 
         return suspicious
 
-    def list_command_store(self, history_file: str = "") -> Dict[str, object]:
+    def list_command_store(self, history_file: str = "", include_all: bool = False) -> Dict[str, object]:
         history_counts = self._collect_history_command_counts(history_file) if history_file else {}
 
         commands = set(history_counts.keys())
         with self._io_lock:
             commands.update(self.command_cache)
             commands.update(self.inserted_commands)
+        if include_all:
+            commands.update(self._load_existing_commands(limit=0))
 
         filtered = sorted(
             command

@@ -11,6 +11,16 @@ import shlex
 from pathlib import Path
 from rich.console import Console
 from rich.panel import Panel
+from prompt_toolkit.application import Application
+from prompt_toolkit.key_binding import KeyBindings
+from prompt_toolkit.keys import Keys
+from prompt_toolkit.styles import Style
+from questionary import Separator, Question
+from questionary.constants import DEFAULT_QUESTION_PREFIX
+from questionary.prompts import common
+from questionary.prompts.common import InquirerControl
+from questionary.styles import merge_styles_default
+from questionary import utils
 
 app = typer.Typer(add_completion=False)
 console = Console()
@@ -386,18 +396,172 @@ def _manage_command_store_add():
         f"unblocked_from_removed={unblocked_removed}"
     )
 
-def _format_command_store_choice(item: dict, show_reason: bool = False) -> str:
+def _percentile(sorted_values: list[int], q: float) -> float:
+    if not sorted_values:
+        return 0.0
+    if len(sorted_values) == 1:
+        return float(sorted_values[0])
+    q = max(0.0, min(1.0, q))
+    pos = q * (len(sorted_values) - 1)
+    lo = int(pos)
+    hi = min(lo + 1, len(sorted_values) - 1)
+    frac = pos - lo
+    return float(sorted_values[lo] + (sorted_values[hi] - sorted_values[lo]) * frac)
+
+def _format_command_store_choice(
+    item: dict,
+    show_reason: bool = False,
+    low_cutoff: float | None = None,
+    high_cutoff: float | None = None,
+):
     command = str(item.get("command", "") or "").strip()
     usage = int(item.get("usage_score", 0) or 0)
-    label = f"{command} [usage:{usage}]"
+    usage_style = "class:text"
+    if low_cutoff is not None and usage <= low_cutoff:
+        usage_style = "class:usage-low"
+    elif high_cutoff is not None and usage >= high_cutoff:
+        usage_style = "class:usage-high"
+    label: list[tuple[str, str]] = [
+        ("class:text", f"{command} [usage_score:"),
+        (usage_style, str(usage)),
+        ("class:text", "]"),
+    ]
     if show_reason:
         reason = str(item.get("reason", "") or "").strip()
         if reason:
-            label = f"{label} ({reason})"
+            label.append(("class:text", f" ({reason})"))
     return label
 
+def _checkbox_without_invert(
+    message: str,
+    choices: list,
+    pointer: str = "👉",
+    instruction: str | None = None,
+):
+    # Custom checkbox prompt that keeps "a" (toggle all) but removes "i" (invert).
+    merged_style = merge_styles_default(
+        [
+            Style([("bottom-toolbar", "noreverse")]),
+            Style([("instruction-key", "fg:#ff8c00 bold")]),
+            Style([("usage-high", "fg:#22c55e bold")]),
+            Style([("usage-low", "fg:#ef4444 bold")]),
+        ]
+    )
+    ic = InquirerControl(
+        choices,
+        default=None,
+        pointer=pointer,
+        initial_choice=None,
+        show_description=True,
+    )
+
+    def get_prompt_tokens():
+        tokens = [("class:qmark", DEFAULT_QUESTION_PREFIX), ("class:question", f" {message}")]
+        if ic.is_answered:
+            nbr_selected = len(ic.selected_options)
+            if nbr_selected == 0:
+                tokens.append(("class:answer", "done"))
+            elif nbr_selected == 1:
+                selected_title = ic.get_selected_values()[0].title
+                if isinstance(selected_title, list):
+                    tokens.append(("class:answer", "".join([token[1] for token in selected_title])))
+                else:
+                    tokens.append(("class:answer", f"[{selected_title}]"))
+            else:
+                tokens.append(("class:answer", f"done ({nbr_selected} selections)"))
+        else:
+            if instruction:
+                tokens.append(("class:instruction", instruction))
+            else:
+                tokens.extend(
+                    [
+                        ("class:instruction", "(Use "),
+                        ("class:instruction-key", "arrow keys"),
+                        ("class:instruction", " to move, "),
+                        ("class:instruction-key", "<space>"),
+                        ("class:instruction", " to select, "),
+                        ("class:instruction-key", "<a>"),
+                        ("class:instruction", " to select all)"),
+                    ]
+                )
+        return tokens
+
+    def get_selected_values():
+        return [c.value for c in ic.get_selected_values()]
+
+    def perform_validation(_selected_values):
+        ic.error_message = None
+        return True
+
+    layout = common.create_inquirer_layout(ic, get_prompt_tokens)
+    bindings = KeyBindings()
+
+    @bindings.add(Keys.ControlQ, eager=True)
+    @bindings.add(Keys.ControlC, eager=True)
+    def _abort(event):
+        event.app.exit(exception=KeyboardInterrupt, style="class:aborting")
+
+    @bindings.add(" ", eager=True)
+    def _toggle(_event):
+        pointed_choice = ic.get_pointed_at().value
+        if pointed_choice in ic.selected_options:
+            ic.selected_options.remove(pointed_choice)
+        else:
+            ic.selected_options.append(pointed_choice)
+        perform_validation(get_selected_values())
+
+    @bindings.add("a", eager=True)
+    def _toggle_all(_event):
+        all_selected = True
+        for c in ic.choices:
+            if not isinstance(c, Separator) and c.value not in ic.selected_options and not c.disabled:
+                ic.selected_options.append(c.value)
+                all_selected = False
+        if all_selected:
+            ic.selected_options = []
+        perform_validation(get_selected_values())
+
+    def _move_cursor_down(_event):
+        ic.select_next()
+        while not ic.is_selection_valid():
+            ic.select_next()
+
+    def _move_cursor_up(_event):
+        ic.select_previous()
+        while not ic.is_selection_valid():
+            ic.select_previous()
+
+    bindings.add(Keys.Down, eager=True)(_move_cursor_down)
+    bindings.add(Keys.Up, eager=True)(_move_cursor_up)
+    bindings.add("j", eager=True)(_move_cursor_down)
+    bindings.add("k", eager=True)(_move_cursor_up)
+    bindings.add(Keys.ControlN, eager=True)(_move_cursor_down)
+    bindings.add(Keys.ControlP, eager=True)(_move_cursor_up)
+
+    @bindings.add(Keys.ControlM, eager=True)
+    def _submit(event):
+        selected_values = get_selected_values()
+        ic.submission_attempted = True
+        if perform_validation(selected_values):
+            ic.is_answered = True
+            event.app.exit(result=selected_values)
+
+    @bindings.add(Keys.Any)
+    def _other(_event):
+        # Disallow all other text input, including "i".
+        return
+
+    return Question(
+        Application(
+            layout=layout,
+            key_bindings=bindings,
+            style=merged_style,
+            **utils.used_kwargs({}, Application.__init__),
+        )
+    )
+
 def _manage_command_store_remove():
-    payload = _command_store_request("GET", "/command_store/list")
+    payload = _command_store_request("GET", "/command_store/list?include_all=true")
     if not payload:
         return
 
@@ -407,6 +571,15 @@ def _manage_command_store_remove():
         potential_wrong = []
     if not isinstance(commands, list):
         commands = []
+
+    usage_values: list[int] = []
+    for item in potential_wrong + commands:
+        if not isinstance(item, dict):
+            continue
+        usage_values.append(int(item.get("usage_score", 0) or 0))
+    usage_values.sort()
+    low_cutoff = _percentile(usage_values, 0.10) if usage_values else None
+    high_cutoff = _percentile(usage_values, 0.90) if usage_values else None
 
     choices: list = []
     seen: set[str] = set()
@@ -422,7 +595,12 @@ def _manage_command_store_remove():
             seen.add(command)
             choices.append(
                 questionary.Choice(
-                    title=_format_command_store_choice(item, show_reason=True),
+                    title=_format_command_store_choice(
+                        item,
+                        show_reason=True,
+                        low_cutoff=low_cutoff,
+                        high_cutoff=high_cutoff,
+                    ),
                     value=command,
                 )
             )
@@ -437,7 +615,12 @@ def _manage_command_store_remove():
         seen.add(command)
         regular_choices.append(
             questionary.Choice(
-                title=_format_command_store_choice(item, show_reason=False),
+                title=_format_command_store_choice(
+                    item,
+                    show_reason=False,
+                    low_cutoff=low_cutoff,
+                    high_cutoff=high_cutoff,
+                ),
                 value=command,
             )
         )
@@ -450,7 +633,7 @@ def _manage_command_store_remove():
         console.print("[yellow]No commands available in command store.[/yellow]")
         return
 
-    selected = questionary.checkbox(
+    selected = _checkbox_without_invert(
         "Select commands to remove (use arrows, Space to select multiple, Enter to continue):",
         choices=choices,
         pointer="👉",

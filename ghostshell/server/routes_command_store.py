@@ -36,11 +36,11 @@ def log_command(data: dict, background_tasks: BackgroundTasks):
 
 
 @router.get("/command_store/list")
-def command_store_list(shell: str = ""):
+def command_store_list(shell: str = "", include_all: bool = False):
     target_shell = (shell or os.environ.get("SHELL", "zsh")).strip()
     history_file = deps.get_history_file(target_shell)
     vector_db = deps.engine._ensure_vector_db()
-    payload = vector_db.list_command_store(history_file=history_file)
+    payload = vector_db.list_command_store(history_file=history_file, include_all=include_all)
     return {
         "status": "ok",
         "history_file": history_file,
