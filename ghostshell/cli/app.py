@@ -318,7 +318,7 @@ def _manage_pattern_controls(existing_config: dict):
         _save_config(updated)
         console.print(f"[green]✓ Re-enabled GhostShell for '{selected}'.[/green]")
 
-def _configure_provider(existing_config: dict):
+def _configure_provider(existing_config: dict) -> bool:
     _print_screen_heading("Choose AI provider")
     config = dict(existing_config or {})
     provider = ""
@@ -338,7 +338,7 @@ def _configure_provider(existing_config: dict):
                 choices=["openai", "groq", "ollama", "lm_studio", "custom", "gemini", "anthropic", "azure"],
             )
             if _is_back(provider) or not provider:
-                return
+                return False
             step = 1
             continue
 
@@ -502,18 +502,9 @@ def _configure_provider(existing_config: dict):
                 continue
             if enable_boot:
                 enable_startup()
-                return
-            step = 7
-            continue
-
-        if step == 7:
-            should_start = _setup_confirm("Start daemon now?", default=False)
-            if _is_back(should_start):
-                step = 6
-                continue
-            if should_start:
+            else:
                 start()
-            return
+            return True
 
 def _ensure_command_store_backend_ready() -> bool:
     if not is_port_open():
@@ -1113,7 +1104,9 @@ def setup():
         if _is_back(action) or not action:
             return
         if action == "Choose AI provider":
-            _configure_provider(existing_config)
+            completed = _configure_provider(existing_config)
+            if completed:
+                return
             continue
         if action == "Customize LLM budget":
             _configure_llm_budget(existing_config)
@@ -1162,10 +1155,21 @@ def enable_startup():
         stop()
 
     # Load the service immediately.
-    os.system(f"launchctl unload {PLIST_PATH} 2>/dev/null")
-    os.system(f"launchctl load {PLIST_PATH}")
-    
-    console.print(f"[bold green]✔ GhostShell started and set to start automatically![/bold green]")
+    subprocess.run(["launchctl", "unload", PLIST_PATH], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, check=False)
+    load_res = subprocess.run(["launchctl", "load", PLIST_PATH], capture_output=True, text=True, check=False)
+    if load_res.returncode != 0:
+        err_text = (load_res.stderr or load_res.stdout or "launchctl load failed").strip()
+        console.print(f"[red]✗ Failed to enable start on boot:[/red] {err_text}")
+        raise typer.Exit(code=1)
+
+    ready, indexed, error = _wait_for_bootstrap_ready()
+    if ready:
+        console.print("[green]✔ Command index ready[/green]")
+        console.print("[bold green]✔ GhostShell started and set to start automatically![/bold green]")
+        return
+
+    console.print(f"[red]✗ Startup failed before readiness:[/red] {error}")
+    raise typer.Exit(code=1)
 
 @app.command()
 def start():
