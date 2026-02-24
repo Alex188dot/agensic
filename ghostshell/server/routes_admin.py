@@ -6,6 +6,7 @@ from ghostshell.server.schemas import (
     RepairExportResponse,
     RepairImportPayload,
     RepairImportResponse,
+    RepairRecoverResponse,
     StatusResponse,
 )
 
@@ -55,4 +56,23 @@ def repair_import(payload: RepairImportPayload) -> RepairImportResponse:
         "commands_imported": int(result.get("commands_imported", 0) or 0),
         "feedback_imported": int(result.get("feedback_imported", 0) or 0),
         "removed_imported": int(result.get("removed_imported", 0) or 0),
+    }
+
+
+@router.post("/repair/recover", response_model=RepairRecoverResponse, response_model_exclude_unset=True)
+def repair_recover() -> RepairRecoverResponse:
+    result = deps.engine.recover_state_from_snapshot()
+    if not isinstance(result, dict):
+        raise HTTPException(status_code=503, detail="repair_recover_failed")
+    if not bool(result.get("ok", False)):
+        reason = str(result.get("reason", "") or result.get("restore_error", "") or "repair_recover_failed")
+        raise HTTPException(status_code=503, detail=reason)
+    replay = result.get("replay", {}) if isinstance(result.get("replay"), dict) else {}
+    return {
+        "status": "ok",
+        "restored": bool(result.get("restored", False)),
+        "replay_total": int(replay.get("total", 0) or 0),
+        "replay_applied": int(replay.get("applied", 0) or 0),
+        "replay_skipped": int(replay.get("skipped", 0) or 0),
+        "reason": "",
     }

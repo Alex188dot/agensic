@@ -66,7 +66,12 @@ class CommandVectorDB:
     SEMANTIC_MIN_SCORE = 55.0
     WORD_TYPO_ROOT_CONTEXT = "__root__"
 
-    def __init__(self, db_path: str = None, model_name: str = "all-MiniLM-L6-v2"):
+    def __init__(
+        self,
+        db_path: str = None,
+        model_name: str = "all-MiniLM-L6-v2",
+        state_store=None,
+    ):
         _update_runtime_init_status(
             phase="starting",
             model_download_in_progress=False,
@@ -90,6 +95,7 @@ class CommandVectorDB:
             "removed_commands.json",
         )
         self.model_name = model_name
+        self.state_store = state_store
         self.dimensions = 384
         self._io_lock = threading.RLock()
         self._is_closed = False
@@ -102,7 +108,9 @@ class CommandVectorDB:
         self.model = self._load_model()
         self._set_init_phase("initializing_db")
         self.collection = self._init_command_collection(self.db_path)
-        self.feedback_collection = self._init_feedback_collection(self.feedback_db_path)
+        self.feedback_collection = None
+        if self.state_store is None:
+            self.feedback_collection = self._init_feedback_collection(self.feedback_db_path)
         self.command_cache: set[str] = set()
         self.command_cache_by_exec: Dict[str, set[str]] = defaultdict(set)
         self.token_candidates_by_context: Dict[str, set[str]] = defaultdict(set)
@@ -138,6 +146,12 @@ class CommandVectorDB:
             }
 
     def _load_removed_commands(self) -> set[str]:
+        if self.state_store is not None:
+            try:
+                return set(self.state_store.list_removed_commands())
+            except Exception as exc:
+                logger.warning(f"Could not read removed commands from SQLite: {exc}")
+                return set()
         if not os.path.exists(self.removed_commands_path):
             return set()
         try:
@@ -156,6 +170,8 @@ class CommandVectorDB:
             return set()
 
     def _save_removed_commands(self):
+        if self.state_store is not None:
+            return
         try:
             os.makedirs(os.path.dirname(self.removed_commands_path), exist_ok=True)
             tmp_path = f"{self.removed_commands_path}.tmp"
@@ -174,6 +190,12 @@ class CommandVectorDB:
     def mark_removed_commands(self, commands: List[str]) -> int:
         if not commands:
             return 0
+        if self.state_store is not None:
+            clean = [self.normalize_command(raw) for raw in commands]
+            clean = [value for value in clean if value]
+            added = int(self.state_store.mark_removed_commands(clean) or 0)
+            self.removed_commands = self._load_removed_commands()
+            return added
         added = 0
         with self._io_lock:
             for raw in commands:
@@ -191,6 +213,12 @@ class CommandVectorDB:
     def unmark_removed_commands(self, commands: List[str]) -> int:
         if not commands:
             return 0
+        if self.state_store is not None:
+            clean = [self.normalize_command(raw) for raw in commands]
+            clean = [value for value in clean if value]
+            removed = int(self.state_store.unmark_removed_commands(clean) or 0)
+            self.removed_commands = self._load_removed_commands()
+            return removed
         removed = 0
         with self._io_lock:
             for raw in commands:
@@ -1103,12 +1131,16 @@ class CommandVectorDB:
 
         try:
             stat = history_path.stat()
-            state = self._load_index_state()
             history_key = str(history_path)
+            state = (
+                self.state_store.get_history_index_state(history_key)
+                if self.state_store is not None
+                else self._load_index_state()
+            ) or {}
             saved_offset = state.get("offset")
             saved_offset_int = int(saved_offset) if isinstance(saved_offset, int) else 0
 
-            if not state and self.inserted_commands:
+            if self.state_store is None and not state and self.inserted_commands:
                 self._save_index_state(
                     {
                         "history_file": history_key,
@@ -1139,14 +1171,24 @@ class CommandVectorDB:
                 history_path, start_offset
             )
             if not command_counts:
-                self._save_index_state(
-                    {
-                        "history_file": history_key,
-                        "inode": stat.st_ino,
-                        "device": stat.st_dev,
-                        "offset": stat.st_size,
-                    }
-                )
+                if self.state_store is not None:
+                    self.state_store.set_history_index_state(
+                        history_file=history_key,
+                        inode=stat.st_ino,
+                        device=stat.st_dev,
+                        offset=stat.st_size,
+                    )
+                    if not self.inserted_commands:
+                        self.insert_commands(self.state_store.list_all_commands(include_removed=False))
+                else:
+                    self._save_index_state(
+                        {
+                            "history_file": history_key,
+                            "inode": stat.st_ino,
+                            "device": stat.st_dev,
+                            "offset": stat.st_size,
+                        }
+                    )
                 self._set_init_phase("ready")
                 return
 
@@ -1154,19 +1196,31 @@ class CommandVectorDB:
             logger.info(
                 f"Found {total_occurrences} new history entries across {len(command_counts)} unique commands"
             )
-            inserted = self.upsert_history_commands(command_counts)
+            if self.state_store is not None:
+                inserted = int(self.state_store.apply_history_counts(command_counts) or 0)
+                self.insert_commands(list(command_counts.keys()))
+            else:
+                inserted = self.upsert_history_commands(command_counts)
             if inserted < 0:
                 logger.warning("History sync failed, keeping previous history pointer")
                 return
 
-            self._save_index_state(
-                {
-                    "history_file": history_key,
-                    "inode": stat.st_ino,
-                    "device": stat.st_dev,
-                    "offset": end_offset,
-                }
-            )
+            if self.state_store is not None:
+                self.state_store.set_history_index_state(
+                    history_file=history_key,
+                    inode=stat.st_ino,
+                    device=stat.st_dev,
+                    offset=end_offset,
+                )
+            else:
+                self._save_index_state(
+                    {
+                        "history_file": history_key,
+                        "inode": stat.st_ino,
+                        "device": stat.st_dev,
+                        "offset": end_offset,
+                    }
+                )
             self._set_init_phase("ready")
         except Exception as exc:
             logger.error(f"Error reading history file: {exc}")
@@ -1254,6 +1308,13 @@ class CommandVectorDB:
             logger.debug("Skipping removed command execute_count update")
             return
         self._register_commands([normalized])
+        if self.state_store is not None:
+            try:
+                self.state_store.record_execute(normalized, delta=1)
+            except Exception as exc:
+                logger.error(f"Failed to record execute_count in SQLite: {exc}")
+            self.insert_commands([normalized])
+            return
         self._increment_execute_count(normalized)
 
     def upsert_history_commands(self, command_counts: Dict[str, int]) -> int:
@@ -1278,6 +1339,15 @@ class CommandVectorDB:
 
         if not normalized_counts:
             return 0
+
+        if self.state_store is not None:
+            try:
+                inserted = int(self.state_store.apply_history_counts(normalized_counts) or 0)
+                self.insert_commands(list(normalized_counts.keys()))
+                return inserted
+            except Exception as exc:
+                logger.error(f"Error upserting history commands to SQLite: {exc}")
+                return -1
 
         self._register_commands(normalized_counts.keys())
         commands = list(normalized_counts.keys())
@@ -1513,6 +1583,8 @@ class CommandVectorDB:
 
     def list_command_store(self, history_file: str = "", include_all: bool = False) -> Dict[str, object]:
         history_counts = self._collect_history_command_counts(history_file) if history_file else {}
+        if self.state_store is not None:
+            self.removed_commands = self._load_removed_commands()
 
         commands = set(history_counts.keys())
         with self._io_lock:
@@ -1520,6 +1592,11 @@ class CommandVectorDB:
             commands.update(self.inserted_commands)
         if include_all:
             commands.update(self._load_existing_commands(limit=0))
+        if self.state_store is not None:
+            try:
+                commands.update(self.state_store.list_all_commands(include_removed=True))
+            except Exception as exc:
+                logger.warning(f"Could not read commands from SQLite for listing: {exc}")
 
         filtered = sorted(
             command
@@ -1528,11 +1605,21 @@ class CommandVectorDB:
             and not self.is_blocked_command(command)
             and not self.is_removed_command(command)
         )
-        fields = self._fetch_command_doc_fields(filtered)
+        fields = self._fetch_command_doc_fields(filtered) if self.state_store is None else {}
+        sqlite_fields = {}
+        if self.state_store is not None:
+            try:
+                sqlite_fields = self.state_store.get_command_stats(filtered)
+            except Exception as exc:
+                logger.warning(f"Could not read command stats from SQLite for listing: {exc}")
+                sqlite_fields = {}
 
         entries: List[Dict[str, object]] = []
         for command in filtered:
-            doc_fields = fields.get(command, {})
+            if self.state_store is not None:
+                doc_fields = sqlite_fields.get(command, {})
+            else:
+                doc_fields = fields.get(command, {})
             accept_count = int(doc_fields.get("accept_count", 0) or 0)
             execute_count = int(doc_fields.get("execute_count", 0) or 0)
             stored_history = int(doc_fields.get("history_count", 0) or 0)
@@ -1598,6 +1685,12 @@ class CommandVectorDB:
                 "unblocked_removed": unblocked_removed,
             }
 
+        if self.state_store is not None:
+            try:
+                self.state_store.add_manual_commands(eligible)
+            except Exception as exc:
+                logger.warning(f"Could not persist manual commands in SQLite: {exc}")
+
         ids = [self.command_doc_id(command) for command in eligible]
         with self._io_lock:
             existing = self.collection.fetch(ids)
@@ -1653,6 +1746,8 @@ class CommandVectorDB:
         }
 
     def export_repair_snapshot(self, include_feedback: bool = True) -> Dict[str, object]:
+        if self.state_store is not None:
+            return self.state_store.export_payload()
         commands = sorted(self._load_existing_commands(limit=0))
         command_rows: List[Dict[str, object]] = []
         for command in commands:
@@ -1729,6 +1824,21 @@ class CommandVectorDB:
     def import_repair_snapshot(self, payload: Dict[str, object]) -> Dict[str, int]:
         if not isinstance(payload, dict):
             return {"commands_imported": 0, "feedback_imported": 0, "removed_imported": 0}
+
+        if self.state_store is not None:
+            result = self.state_store.import_payload(payload)
+            try:
+                commands = self.state_store.list_all_commands(include_removed=False)
+                self.insert_commands(commands)
+            except Exception as exc:
+                logger.warning(f"Could not seed zvec cache from SQLite after import: {exc}")
+            self.removed_commands = self._load_removed_commands()
+            self._rebuild_token_indexes()
+            return {
+                "commands_imported": int(result.get("commands_imported", 0) or 0),
+                "feedback_imported": int(result.get("feedback_imported", 0) or 0),
+                "removed_imported": int(result.get("removed_imported", 0) or 0),
+            }
 
         raw_commands = payload.get("commands", [])
         raw_feedback = payload.get("feedback", [])
@@ -1879,15 +1989,23 @@ class CommandVectorDB:
             return False
         try:
             stat = history_path.stat()
-            with self._io_lock:
-                self._save_index_state(
-                    {
-                        "history_file": str(history_path),
-                        "inode": stat.st_ino,
-                        "device": stat.st_dev,
-                        "offset": stat.st_size,
-                    }
+            if self.state_store is not None:
+                self.state_store.set_history_index_state(
+                    history_file=str(history_path),
+                    inode=stat.st_ino,
+                    device=stat.st_dev,
+                    offset=stat.st_size,
                 )
+            else:
+                with self._io_lock:
+                    self._save_index_state(
+                        {
+                            "history_file": str(history_path),
+                            "inode": stat.st_ino,
+                            "device": stat.st_dev,
+                            "offset": stat.st_size,
+                        }
+                    )
             return True
         except Exception as exc:
             logger.warning(f"Could not align history index state: {exc}")
@@ -2039,29 +2157,40 @@ class CommandVectorDB:
         history_counts: Dict[str, int] = {}
 
         try:
-            with self._io_lock:
-                command_docs = self.collection.fetch(command_ids)
-                for suffix, command_id in zip(candidates, command_ids):
-                    doc = command_docs.get(command_id)
-                    if doc is None:
-                        global_counts[suffix] = 0
-                        execute_counts[suffix] = 0
-                        history_counts[suffix] = 0
-                    else:
-                        global_counts[suffix] = int(doc.fields.get("accept_count", 0) or 0)
-                        execute_counts[suffix] = int(doc.fields.get("execute_count", 0) or 0)
-                        history_counts[suffix] = int(doc.fields.get("history_count", 0) or 0)
-
+            if self.state_store is not None:
+                stats = self.state_store.get_command_stats(full_commands)
+                for suffix, full_command in filtered_pairs:
+                    row = stats.get(full_command, {})
+                    global_counts[suffix] = int(row.get("accept_count", 0) or 0)
+                    execute_counts[suffix] = int(row.get("execute_count", 0) or 0)
+                    history_counts[suffix] = int(row.get("history_count", 0) or 0)
+                context_counts = self.state_store.get_feedback_counts(context_keys, candidates)
                 for suffix in candidates:
-                    context_counts[suffix] = 0
+                    context_counts[suffix] = int(context_counts.get(suffix, 0) or 0)
+            else:
+                with self._io_lock:
+                    command_docs = self.collection.fetch(command_ids)
+                    for suffix, command_id in zip(candidates, command_ids):
+                        doc = command_docs.get(command_id)
+                        if doc is None:
+                            global_counts[suffix] = 0
+                            execute_counts[suffix] = 0
+                            history_counts[suffix] = 0
+                        else:
+                            global_counts[suffix] = int(doc.fields.get("accept_count", 0) or 0)
+                            execute_counts[suffix] = int(doc.fields.get("execute_count", 0) or 0)
+                            history_counts[suffix] = int(doc.fields.get("history_count", 0) or 0)
 
-                for context_key in context_keys:
-                    stat_ids = [self.context_stat_doc_id(context_key, suffix) for suffix in candidates]
-                    stat_docs = self.feedback_collection.fetch(stat_ids)
-                    for suffix, stat_id in zip(candidates, stat_ids):
-                        doc = stat_docs.get(stat_id)
-                        if doc is not None:
-                            context_counts[suffix] += int(doc.fields.get("accept_count", 0) or 0)
+                    for suffix in candidates:
+                        context_counts[suffix] = 0
+
+                    for context_key in context_keys:
+                        stat_ids = [self.context_stat_doc_id(context_key, suffix) for suffix in candidates]
+                        stat_docs = self.feedback_collection.fetch(stat_ids)
+                        for suffix, stat_id in zip(candidates, stat_ids):
+                            doc = stat_docs.get(stat_id)
+                            if doc is not None:
+                                context_counts[suffix] += int(doc.fields.get("accept_count", 0) or 0)
 
             reranked = self.rerank_suffixes_from_counts(
                 candidates=candidates,
@@ -2226,6 +2355,16 @@ class CommandVectorDB:
         # Store both 1-token and 2-token contexts derived from the finalized command.
         context_keys = self.extract_context_keys(full_command)
         now_ts = int(time.time())
+
+        if self.state_store is not None:
+            try:
+                pairs = [(context_key, context_payload) for context_key in context_keys if context_key]
+                self.state_store.record_feedback(full_command, pairs, ts=now_ts)
+                self.insert_commands([full_command])
+                return
+            except Exception as exc:
+                logger.warning(f"Failed to record feedback in SQLite: {exc}")
+                return
 
         try:
             with self._io_lock:

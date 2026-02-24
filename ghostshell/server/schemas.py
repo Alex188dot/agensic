@@ -55,6 +55,12 @@ class BootstrapStatus(BaseModel):
     storage_state: str = "unknown"
     storage_error_code: str = ""
     storage_error_detail: str = ""
+    state_backend: str = "sqlite"
+    sqlite_state: str = "unknown"
+    journal_state: str = "unavailable"
+    snapshot_state: str = "missing"
+    auto_recover_attempted: bool = False
+    auto_recover_result: str = "skipped"
 
 
 class PredictResponse(BaseModel):
@@ -95,6 +101,15 @@ class RepairImportResponse(BaseModel):
     commands_imported: int = 0
     feedback_imported: int = 0
     removed_imported: int = 0
+
+
+class RepairRecoverResponse(BaseModel):
+    status: str = "ok"
+    restored: bool = False
+    replay_total: int = 0
+    replay_applied: int = 0
+    replay_skipped: int = 0
+    reason: str = ""
 
 
 class LogCommandResponse(BaseModel):

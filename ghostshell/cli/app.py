@@ -50,6 +50,9 @@ REPAIR_LOG_FILE = os.path.join(REPAIR_DIR, "repair.log")
 ZVEC_COMMANDS_PATH = os.path.join(CONFIG_DIR, "zvec_commands")
 ZVEC_FEEDBACK_PATH = os.path.join(CONFIG_DIR, "zvec_feedback_stats")
 LAST_INDEXED_PATH = os.path.join(CONFIG_DIR, "last_indexed_line")
+STATE_SQLITE_PATH = os.path.join(CONFIG_DIR, "state.sqlite")
+EVENTS_DIR = os.path.join(CONFIG_DIR, "events")
+SNAPSHOTS_DIR = os.path.join(CONFIG_DIR, "snapshots")
 
 class _BackSignal:
     pass
@@ -1536,6 +1539,10 @@ def doctor():
             console.print(f"[green]✓ Bootstrap:[/green] ready")
 
         storage_state, storage_code, storage_detail = _extract_storage_health(payload)
+        sqlite_state = str(bootstrap.get("sqlite_state", "unknown") or "unknown")
+        journal_state = str(bootstrap.get("journal_state", "unavailable") or "unavailable")
+        snapshot_state = str(bootstrap.get("snapshot_state", "missing") or "missing")
+        auto_recover = str(bootstrap.get("auto_recover_result", "skipped") or "skipped")
         if storage_state == "corrupt":
             issues.append(storage_code or "vector_db_corrupt")
             console.print("[red]✗ Storage health:[/red] corrupt")
@@ -1548,6 +1555,10 @@ def doctor():
             console.print("[green]✓ Storage health:[/green] repaired")
         else:
             console.print("[yellow]⚠ Storage health:[/yellow] unknown")
+        console.print(
+            f"[dim]State backend: sqlite={sqlite_state}, journal={journal_state}, "
+            f"snapshot={snapshot_state}, auto_recover={auto_recover}[/dim]"
+        )
 
     if os.path.exists(SHELL_CLIENT_SCRIPT):
         sample_payload = {
@@ -1638,36 +1649,6 @@ def doctor():
 def _run_fix_safe() -> int:
     started = time.time()
     _append_repair_log("fix_safe_started", {})
-    snapshot: dict | None = None
-    snapshot_file = ""
-    partial = False
-
-    if is_port_open():
-        exported, export_error = _repair_export_snapshot()
-        if exported is not None:
-            snapshot = exported
-            try:
-                snapshot_file = _write_snapshot_artifact(snapshot)
-            except Exception as exc:
-                partial = True
-                console.print(f"[yellow]Could not write repair snapshot artifact:[/yellow] {exc}")
-            _append_repair_log(
-                "fix_safe_snapshot_exported",
-                {
-                    "commands": len(snapshot.get("commands", [])) if isinstance(snapshot, dict) else 0,
-                    "feedback": len(snapshot.get("feedback", [])) if isinstance(snapshot, dict) else 0,
-                    "artifact": snapshot_file,
-                },
-            )
-        else:
-            partial = True
-            console.print(f"[yellow]Snapshot export unavailable:[/yellow] {export_error}")
-            _append_repair_log("fix_safe_snapshot_export_failed", {"error": export_error})
-    else:
-        partial = True
-        console.print("[yellow]Daemon is offline; continuing without export snapshot.[/yellow]")
-        _append_repair_log("fix_safe_snapshot_skipped", {"reason": "daemon_offline"})
-
     stop()
 
     failed_paths: list[str] = []
@@ -1692,45 +1673,89 @@ def _run_fix_safe() -> int:
         _append_repair_log("fix_safe_restart_failed", {"exit_code": int(exc.exit_code or 1)})
         raise
 
-    imported_commands = 0
-    imported_feedback = 0
-    imported_removed = 0
-    if snapshot is not None:
-        imported, import_error = _repair_import_snapshot(snapshot)
-        if imported is None:
-            partial = True
-            console.print(f"[yellow]Could not replay snapshot:[/yellow] {import_error}")
-            _append_repair_log("fix_safe_replay_failed", {"error": import_error})
-        else:
-            imported_commands = int(imported.get("commands_imported", 0) or 0)
-            imported_feedback = int(imported.get("feedback_imported", 0) or 0)
-            imported_removed = int(imported.get("removed_imported", 0) or 0)
-            if str(imported.get("status", "ok") or "ok") != "ok":
-                partial = True
-            _append_repair_log(
-                "fix_safe_replay_complete",
-                {
-                    "commands_imported": imported_commands,
-                    "feedback_imported": imported_feedback,
-                    "removed_imported": imported_removed,
-                },
-            )
-    else:
-        partial = True
-
     elapsed = round(time.time() - started, 2)
     console.print("[green]Safe repair complete.[/green]")
-    if snapshot_file:
-        console.print(f"[dim]Snapshot artifact: {snapshot_file}[/dim]")
-    console.print(
-        f"[dim]Replayed metadata: commands={imported_commands}, "
-        f"feedback={imported_feedback}, removed={imported_removed}[/dim]"
-    )
-    if partial:
-        console.print("[yellow]Completed with warnings; some metadata may not have been preserved.[/yellow]")
+    console.print(f"[dim]SQLite state preserved at: {STATE_SQLITE_PATH}[/dim]")
     console.print(f"[dim]Elapsed: {elapsed}s[/dim]")
-    _append_repair_log("fix_safe_finished", {"partial": partial, "elapsed_s": elapsed})
-    return 10 if partial else 0
+    _append_repair_log("fix_safe_finished", {"partial": False, "elapsed_s": elapsed})
+    return 0
+
+
+def _run_fix_recover() -> int:
+    started = time.time()
+    _append_repair_log("fix_recover_started", {})
+    stop()
+
+    try:
+        from ghostshell.state import EventJournal, SnapshotManager, SQLiteStateStore
+    except Exception as exc:
+        console.print(f"[red]Recover failed: state backend import error:[/red] {exc}")
+        _append_repair_log("fix_recover_failed", {"error": str(exc)})
+        return 1
+
+    journal = EventJournal(EVENTS_DIR)
+    snapshots = SnapshotManager(STATE_SQLITE_PATH, SNAPSHOTS_DIR)
+    restored, row, reason = snapshots.restore_latest()
+    if not restored:
+        console.print(
+            "[red]Recover failed:[/red] no usable snapshot found. "
+            "Try [bold]aiterminal fix --safe[/bold] instead."
+        )
+        _append_repair_log("fix_recover_failed", {"error": reason or "no_snapshot"})
+        return 1
+
+    try:
+        store = SQLiteStateStore(STATE_SQLITE_PATH, journal=journal)
+        snapshot_ts = int((row or {}).get("snapshot_ts", 0) or 0)
+        replay = journal.replay(
+            lambda event: store.apply_event(event, append_to_journal=False),
+            since_ts=max(0, snapshot_ts),
+        )
+    except Exception as exc:
+        console.print(f"[red]Recover failed while replaying journal:[/red] {exc}")
+        _append_repair_log("fix_recover_failed", {"error": str(exc)})
+        return 1
+
+    failed_paths: list[str] = []
+    for path in [
+        ZVEC_COMMANDS_PATH,
+        ZVEC_FEEDBACK_PATH,
+        LAST_INDEXED_PATH,
+        f"{LAST_INDEXED_PATH}.tmp",
+    ]:
+        ok, err = _remove_path(path)
+        if not ok:
+            failed_paths.append(f"{path}: {err}")
+    if failed_paths:
+        for item in failed_paths:
+            console.print(f"[red]Failed to remove:[/red] {item}")
+        _append_repair_log("fix_recover_remove_failed", {"failed_paths": failed_paths})
+        return 1
+
+    try:
+        start()
+    except typer.Exit as exc:
+        _append_repair_log("fix_recover_restart_failed", {"exit_code": int(exc.exit_code or 1)})
+        raise
+
+    elapsed = round(time.time() - started, 2)
+    console.print("[green]Recovery complete.[/green]")
+    console.print(
+        f"[dim]Journal replay: total={int(replay.get('total', 0) or 0)}, "
+        f"applied={int(replay.get('applied', 0) or 0)}, "
+        f"skipped={int(replay.get('skipped', 0) or 0)}[/dim]"
+    )
+    console.print(f"[dim]Elapsed: {elapsed}s[/dim]")
+    _append_repair_log(
+        "fix_recover_finished",
+        {
+            "elapsed_s": elapsed,
+            "replay_total": int(replay.get("total", 0) or 0),
+            "replay_applied": int(replay.get("applied", 0) or 0),
+            "replay_skipped": int(replay.get("skipped", 0) or 0),
+        },
+    )
+    return 0
 
 
 def _run_fix_factory_reset() -> int:
@@ -1760,7 +1785,7 @@ def _run_fix_factory_reset() -> int:
 @app.command()
 def fix(
     safe: bool = typer.Option(False, "--safe", help="Rebuild vector index and preserve metadata when possible."),
-    recover: bool = typer.Option(False, "--recover", help="Restore from snapshot+journal (not available in v1)."),
+    recover: bool = typer.Option(False, "--recover", help="Restore SQLite from latest snapshot, replay journal, then rebuild vector cache."),
     factory_reset: bool = typer.Option(False, "--factory-reset", help="Fully wipe GhostShell state."),
 ):
     """Repair GhostShell storage state."""
@@ -1778,12 +1803,8 @@ def fix(
 
     try:
         if recover:
-            console.print(
-                "[yellow]Recover mode is not available in this version.[/yellow] "
-                "Use [bold]aiterminal fix --safe[/bold]."
-            )
-            _append_repair_log("fix_recover_unavailable", {})
-            raise typer.Exit(code=20)
+            code = _run_fix_recover()
+            raise typer.Exit(code=code)
         if factory_reset:
             code = _run_fix_factory_reset()
             raise typer.Exit(code=code)

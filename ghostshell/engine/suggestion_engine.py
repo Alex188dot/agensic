@@ -11,6 +11,7 @@ import subprocess
 from pathlib import Path
 from litellm import acompletion
 import requests
+from ghostshell.state import EventJournal, SnapshotManager, SnapshotScheduler, SQLiteStateStore
 from ghostshell.config.loader import (
     DEFAULT_TIMEOUT_SECONDS,
     MAX_TIMEOUT_SECONDS,
@@ -40,6 +41,105 @@ class SuggestionEngine:
         self._storage_error_detail = ""
         self._vector_db_retry_not_before = 0.0
         self._vector_db_retry_reason = ""
+        self.state_backend = "sqlite"
+        self.sqlite_state = "unknown"
+        self.journal_state = "unavailable"
+        self.snapshot_state = "missing"
+        self.auto_recover_attempted = False
+        self.auto_recover_result = "skipped"
+        self.state_store = None
+        self.event_journal = None
+        self.snapshot_manager = None
+        self.snapshot_scheduler = None
+        self._init_state_runtime()
+
+    def _init_state_runtime(self) -> None:
+        home = os.path.expanduser("~/.ghostshell")
+        sqlite_path = os.path.join(home, "state.sqlite")
+        events_dir = os.path.join(home, "events")
+        snapshots_dir = os.path.join(home, "snapshots")
+        try:
+            self.event_journal = EventJournal(events_dir)
+            self.state_store = SQLiteStateStore(sqlite_path, journal=self.event_journal)
+            self.snapshot_manager = SnapshotManager(sqlite_path, snapshots_dir)
+            self.snapshot_scheduler = SnapshotScheduler(
+                self.snapshot_manager,
+                self.event_journal,
+                interval_seconds=300,
+                retention_seconds=24 * 3600,
+                max_total_bytes=200 * 1024 * 1024,
+            )
+            self.journal_state = "healthy"
+            self.snapshot_state = self._compute_snapshot_state()
+
+            ok, message = self.state_store.integrity_check()
+            if ok:
+                mode = self.state_store.access_mode()
+                if mode == "read_only":
+                    self.sqlite_state = "read_only"
+                    self.auto_recover_attempted = False
+                    self.auto_recover_result = "skipped"
+                    self._set_storage_health(
+                        "unknown",
+                        "sqlite_read_only",
+                        "SQLite opened in read-only mode",
+                    )
+                else:
+                    self.sqlite_state = "healthy"
+                    self.auto_recover_attempted = False
+                    self.auto_recover_result = "skipped"
+            else:
+                self.sqlite_state = "recovering"
+                self.auto_recover_attempted = True
+                result = self.state_store.recover_from_latest_snapshot(
+                    self.snapshot_manager,
+                    self.event_journal,
+                )
+                if bool(result.get("ok", False)):
+                    self.sqlite_state = "healthy"
+                    self.auto_recover_result = "ok"
+                    self.snapshot_state = self._compute_snapshot_state()
+                else:
+                    self.sqlite_state = "corrupt"
+                    self.auto_recover_result = "failed"
+                    sanitized = self.privacy_guard.sanitize_for_log(
+                        str(result.get("restore_error", "") or message)
+                    )
+                    self.state_store = None
+                    self._set_storage_health("corrupt", "sqlite_recover_failed", sanitized)
+
+            if self.snapshot_scheduler is not None:
+                self.snapshot_scheduler.start()
+        except Exception as exc:
+            sanitized = self.privacy_guard.sanitize_for_log(str(exc))
+            self.state_store = None
+            self.event_journal = None
+            self.snapshot_manager = None
+            self.snapshot_scheduler = None
+            self.sqlite_state = "corrupt"
+            self.journal_state = "unavailable"
+            self.snapshot_state = "missing"
+            self.auto_recover_attempted = True
+            self.auto_recover_result = "failed"
+            self._set_storage_health("corrupt", "sqlite_init_failed", sanitized)
+            logger.error("Failed to initialize SQLite state backend: %s", sanitized)
+
+    def _compute_snapshot_state(self) -> str:
+        if self.snapshot_manager is None:
+            return "missing"
+        try:
+            latest = self.snapshot_manager.latest_snapshot()
+            if latest is None:
+                return "missing"
+            ts = int(latest.get("snapshot_ts", 0) or 0)
+            if ts <= 0:
+                return "missing"
+            age_seconds = max(0, int(time.time()) - ts)
+            if age_seconds > (2 * 3600):
+                return "stale"
+            return "healthy"
+        except Exception:
+            return "missing"
 
     @staticmethod
     def _classify_storage_issue(message: str) -> tuple[str, str]:
@@ -155,7 +255,7 @@ class SuggestionEngine:
                     raise RuntimeError(retry_reason or "Vector DB retry backoff active")
                 try:
                     from ghostshell.vector_db import CommandVectorDB
-                    self.vector_db = CommandVectorDB()
+                    self.vector_db = CommandVectorDB(state_store=self.state_store)
                     self._vector_db_ready.set()
                     self._clear_vector_db_backoff()
                 except Exception as exc:
@@ -255,6 +355,11 @@ class SuggestionEngine:
             storage_state = self._storage_state
             storage_error_code = self._storage_error_code
             storage_error_detail = self._storage_error_detail
+            sqlite_state = self.sqlite_state
+            journal_state = self.journal_state
+            snapshot_state = self.snapshot_state
+            auto_recover_attempted = self.auto_recover_attempted
+            auto_recover_result = self.auto_recover_result
 
         running = bool(thread and thread.is_alive())
         ready = bool(
@@ -325,6 +430,8 @@ class SuggestionEngine:
                 storage_error_code = ""
                 storage_error_detail = ""
 
+        snapshot_state = self._compute_snapshot_state() if self.snapshot_manager is not None else snapshot_state
+
         return {
             "running": running,
             "ready": ready,
@@ -337,16 +444,58 @@ class SuggestionEngine:
             "storage_state": storage_state or "unknown",
             "storage_error_code": storage_error_code or "",
             "storage_error_detail": storage_error_detail or "",
+            "state_backend": self.state_backend,
+            "sqlite_state": sqlite_state or "unknown",
+            "journal_state": journal_state or "unavailable",
+            "snapshot_state": snapshot_state or "missing",
+            "auto_recover_attempted": bool(auto_recover_attempted),
+            "auto_recover_result": auto_recover_result or "skipped",
         }
 
     def export_repair_snapshot(self) -> dict:
+        if self.state_store is not None:
+            snapshot = self.state_store.export_payload()
+            if self.snapshot_manager is not None:
+                latest = self.snapshot_manager.latest_snapshot()
+                snapshot["latest_snapshot"] = latest or {}
+            return snapshot
         vector_db = self._ensure_vector_db()
         return vector_db.export_repair_snapshot(include_feedback=True)
 
     def import_repair_snapshot(self, payload: dict) -> dict:
+        if self.state_store is not None:
+            result = self.state_store.import_payload(payload if isinstance(payload, dict) else {})
+            self.sqlite_state = "healthy"
+            self.auto_recover_result = "ok"
+            self._set_storage_health("repaired", "", "")
+            return result
         vector_db = self._ensure_vector_db()
         result = vector_db.import_repair_snapshot(payload if isinstance(payload, dict) else {})
         self._set_storage_health("repaired", "", "")
+        return result
+
+    def recover_state_from_snapshot(self) -> dict:
+        if self.state_store is None or self.snapshot_manager is None:
+            return {
+                "ok": False,
+                "reason": "state_backend_unavailable",
+                "replay": {"total": 0, "applied": 0, "skipped": 0},
+            }
+        result = self.state_store.recover_from_latest_snapshot(
+            self.snapshot_manager,
+            self.event_journal,
+        )
+        if bool(result.get("ok", False)):
+            self.sqlite_state = "healthy"
+            self.auto_recover_attempted = True
+            self.auto_recover_result = "ok"
+            self._set_storage_health("repaired", "", "")
+        else:
+            self.sqlite_state = "corrupt"
+            self.auto_recover_attempted = True
+            self.auto_recover_result = "failed"
+            reason = str(result.get("restore_error", "") or "recover_failed")
+            self._set_storage_health("corrupt", "sqlite_recover_failed", reason)
         return result
 
     def _safe_tail(self, path: str, max_lines: int) -> list[str]:
@@ -1339,3 +1488,5 @@ class SuggestionEngine:
             self.vector_db.close()
             self.vector_db = None
             self._vector_db_ready.clear()
+        if self.snapshot_scheduler is not None:
+            self.snapshot_scheduler.stop()
