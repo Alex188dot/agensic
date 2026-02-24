@@ -852,6 +852,8 @@ class CommandVectorDB:
                 "corrupt",
                 "invalid checksum",
                 "vector indexer not found",
+                "segment not found",
+                "segment.cc",
                 "failed to open index",
             ]
         )
@@ -1648,6 +1650,227 @@ class CommandVectorDB:
             "normalized": len(normalized_unique),
             "vector_removed": len(existing_ids),
             "guarded": guarded,
+        }
+
+    def export_repair_snapshot(self, include_feedback: bool = True) -> Dict[str, object]:
+        commands = sorted(self._load_existing_commands(limit=0))
+        command_rows: List[Dict[str, object]] = []
+        for command in commands:
+            if not command:
+                continue
+            if self.is_blocked_command(command) or self.is_removed_command(command):
+                continue
+            command_id = self.command_doc_id(command)
+            with self._io_lock:
+                doc = self.collection.fetch([command_id]).get(command_id)
+            if doc is None:
+                continue
+            fields = dict(doc.fields or {})
+            command_rows.append(
+                {
+                    "command": command,
+                    "accept_count": int(fields.get("accept_count", 0) or 0),
+                    "execute_count": int(fields.get("execute_count", 0) or 0),
+                    "history_count": int(fields.get("history_count", 0) or 0),
+                    "last_accepted_at": int(fields.get("last_accepted_at", 0) or 0),
+                }
+            )
+
+        feedback_rows: List[Dict[str, object]] = []
+        if include_feedback and self.feedback_collection is not None:
+            try:
+                with self._io_lock:
+                    doc_count = int(getattr(self.feedback_collection.stats, "doc_count", 0) or 0)
+                    if doc_count > 0:
+                        try:
+                            results = self.feedback_collection.query(
+                                vectors=None,
+                                topk=doc_count,
+                                output_fields=[
+                                    "context_key",
+                                    "suggestion_suffix",
+                                    "accept_count",
+                                    "last_accepted_at",
+                                ],
+                            )
+                        except Exception:
+                            query = zvec.VectorQuery("embedding_dummy", vector=[0.0])
+                            results = self.feedback_collection.query(query, topk=doc_count)
+                    else:
+                        results = []
+                for item in results:
+                    fields = dict(item.fields or {})
+                    context_key = str(fields.get("context_key", "") or "")
+                    suggestion_suffix = str(fields.get("suggestion_suffix", "") or "")
+                    if not context_key or not suggestion_suffix:
+                        continue
+                    feedback_rows.append(
+                        {
+                            "context_key": context_key,
+                            "suggestion_suffix": suggestion_suffix,
+                            "accept_count": int(fields.get("accept_count", 0) or 0),
+                            "last_accepted_at": int(fields.get("last_accepted_at", 0) or 0),
+                        }
+                    )
+            except Exception as exc:
+                logger.warning(f"Failed to export feedback snapshot: {exc}")
+
+        with self._io_lock:
+            removed = sorted(self.removed_commands)
+
+        return {
+            "schema_version": 1,
+            "commands": command_rows,
+            "feedback": feedback_rows,
+            "removed_commands": removed,
+            "exported_at": int(time.time()),
+        }
+
+    def import_repair_snapshot(self, payload: Dict[str, object]) -> Dict[str, int]:
+        if not isinstance(payload, dict):
+            return {"commands_imported": 0, "feedback_imported": 0, "removed_imported": 0}
+
+        raw_commands = payload.get("commands", [])
+        raw_feedback = payload.get("feedback", [])
+        raw_removed = payload.get("removed_commands", [])
+
+        command_rows = raw_commands if isinstance(raw_commands, list) else []
+        feedback_rows = raw_feedback if isinstance(raw_feedback, list) else []
+        removed_rows = raw_removed if isinstance(raw_removed, list) else []
+
+        imported_commands = 0
+        imported_feedback = 0
+
+        command_ids: List[str] = []
+        command_map: Dict[str, Dict[str, int | str]] = {}
+        for row in command_rows:
+            if not isinstance(row, dict):
+                continue
+            command = self.normalize_command(str(row.get("command", "") or ""))
+            if not command:
+                continue
+            if self.is_blocked_command(command):
+                continue
+            if self.is_removed_command(command):
+                continue
+            command_map[command] = {
+                "command": command,
+                "accept_count": int(row.get("accept_count", 0) or 0),
+                "execute_count": int(row.get("execute_count", 0) or 0),
+                "history_count": int(row.get("history_count", 0) or 0),
+                "last_accepted_at": int(row.get("last_accepted_at", 0) or 0),
+            }
+        commands = list(command_map.keys())
+        command_ids = [self.command_doc_id(command) for command in commands]
+
+        new_commands: List[str] = []
+        now_ts = int(time.time())
+        with self._io_lock:
+            existing = self.collection.fetch(command_ids) if command_ids else {}
+            for command, command_id in zip(commands, command_ids):
+                row = command_map[command]
+                existing_doc = existing.get(command_id)
+                if existing_doc is None:
+                    new_commands.append(command)
+                    continue
+                fields = dict(existing_doc.fields or {})
+                accept = max(int(fields.get("accept_count", 0) or 0), int(row["accept_count"]))
+                execute = max(int(fields.get("execute_count", 0) or 0), int(row["execute_count"]))
+                history = max(int(fields.get("history_count", 0) or 0), int(row["history_count"]))
+                last_accepted_at = max(
+                    int(fields.get("last_accepted_at", 0) or 0), int(row["last_accepted_at"])
+                )
+                self.collection.update(
+                    zvec.Doc(
+                        id=command_id,
+                        fields={
+                            "accept_count": accept,
+                            "execute_count": execute,
+                            "history_count": history,
+                            "last_accepted_at": last_accepted_at,
+                        },
+                    )
+                )
+                imported_commands += 1
+
+        if new_commands:
+            embeddings = self.model.encode(new_commands, show_progress_bar=False)
+            docs = []
+            for command, emb in zip(new_commands, embeddings):
+                row = command_map.get(command, {})
+                last_accepted_at = int(row.get("last_accepted_at", 0) or 0)
+                timestamp = last_accepted_at if last_accepted_at > 0 else now_ts
+                docs.append(
+                    zvec.Doc(
+                        id=self.command_doc_id(command),
+                        fields={
+                            "command": command,
+                            "timestamp": timestamp,
+                            "accept_count": int(row.get("accept_count", 0) or 0),
+                            "history_count": int(row.get("history_count", 0) or 0),
+                            "execute_count": int(row.get("execute_count", 0) or 0),
+                            "last_accepted_at": timestamp,
+                        },
+                        vectors={"embedding": emb},
+                    )
+                )
+            with self._io_lock:
+                for i in range(0, len(docs), 100):
+                    self.collection.insert(docs[i : i + 100])
+            self.inserted_commands.update(new_commands)
+            self._register_commands(new_commands)
+            imported_commands += len(new_commands)
+
+        if self.feedback_collection is not None:
+            for row in feedback_rows:
+                if not isinstance(row, dict):
+                    continue
+                context_key = str(row.get("context_key", "") or "")
+                suggestion_suffix = str(row.get("suggestion_suffix", "") or "")
+                if not context_key or not suggestion_suffix:
+                    continue
+                stat_id = self.context_stat_doc_id(context_key, suggestion_suffix)
+                incoming_accept = int(row.get("accept_count", 0) or 0)
+                incoming_last = int(row.get("last_accepted_at", 0) or 0)
+                with self._io_lock:
+                    existing_doc = self.feedback_collection.fetch([stat_id]).get(stat_id)
+                    if existing_doc is None:
+                        self.feedback_collection.insert(
+                            zvec.Doc(
+                                id=stat_id,
+                                fields={
+                                    "context_key": context_key,
+                                    "suggestion_suffix": suggestion_suffix,
+                                    "accept_count": incoming_accept,
+                                    "last_accepted_at": incoming_last,
+                                },
+                                vectors={"embedding_dummy": [0.0]},
+                            )
+                        )
+                    else:
+                        fields = dict(existing_doc.fields or {})
+                        merged_accept = max(
+                            int(fields.get("accept_count", 0) or 0), incoming_accept
+                        )
+                        merged_last = max(
+                            int(fields.get("last_accepted_at", 0) or 0), incoming_last
+                        )
+                        self.feedback_collection.update(
+                            zvec.Doc(
+                                id=stat_id,
+                                fields={
+                                    "accept_count": merged_accept,
+                                    "last_accepted_at": merged_last,
+                                },
+                            )
+                        )
+                imported_feedback += 1
+
+        removed_imported = self.mark_removed_commands([str(x or "") for x in removed_rows])
+        return {
+            "commands_imported": imported_commands,
+            "feedback_imported": imported_feedback,
+            "removed_imported": removed_imported,
         }
 
     def align_history_index_state_to_end(self, history_file: str) -> bool:

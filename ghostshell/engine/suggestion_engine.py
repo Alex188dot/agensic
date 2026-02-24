@@ -7,6 +7,7 @@ import threading
 import time
 import platform
 import asyncio
+import subprocess
 from pathlib import Path
 from litellm import acompletion
 import requests
@@ -34,44 +35,169 @@ class SuggestionEngine:
         self._bootstrap_history_file = ""
         self._bootstrap_completed_for = ""
         self._bootstrap_error = ""
+        self._storage_state = "unknown"
+        self._storage_error_code = ""
+        self._storage_error_detail = ""
+        self._vector_db_retry_not_before = 0.0
+        self._vector_db_retry_reason = ""
 
-    def _ensure_vector_db(self):
+    @staticmethod
+    def _classify_storage_issue(message: str) -> tuple[str, str]:
+        text = str(message or "").strip()
+        low = text.lower()
+        corruption_tokens = (
+            "segment not found",
+            "segment.cc",
+            "vector indexer not found",
+            "invalid checksum",
+            "checksum",
+            "corrupt",
+            "failed to open index",
+        )
+        if any(token in low for token in corruption_tokens):
+            return ("corrupt", "vector_db_corrupt")
+        return ("unknown", "")
+
+    def _set_storage_health(self, state: str, code: str = "", detail: str = "") -> None:
+        with self._bootstrap_lock:
+            self._storage_state = str(state or "unknown")
+            self._storage_error_code = str(code or "")
+            self._storage_error_detail = str(detail or "")
+
+    @staticmethod
+    def _is_lock_file_error(message: str) -> bool:
+        low = str(message or "").lower()
+        return "lock file" in low or "can't open lock file" in low
+
+    def _set_vector_db_backoff(self, reason: str, cooldown_seconds: float = 4.0) -> None:
+        with self._bootstrap_lock:
+            self._vector_db_retry_not_before = time.monotonic() + max(0.5, cooldown_seconds)
+            self._vector_db_retry_reason = str(reason or "Vector DB temporarily unavailable")
+
+    def _clear_vector_db_backoff(self) -> None:
+        with self._bootstrap_lock:
+            self._vector_db_retry_not_before = 0.0
+            self._vector_db_retry_reason = ""
+
+    def _vector_db_retry_window(self) -> tuple[float, str]:
+        with self._bootstrap_lock:
+            return (self._vector_db_retry_not_before, self._vector_db_retry_reason)
+
+    @staticmethod
+    def _zvec_lock_paths() -> list[str]:
+        root = os.path.expanduser("~/.ghostshell")
+        return [
+            os.path.join(root, "zvec_commands", "LOCK"),
+            os.path.join(root, "zvec_commands", "idmap.0", "LOCK"),
+            os.path.join(root, "zvec_feedback_stats", "LOCK"),
+            os.path.join(root, "zvec_feedback_stats", "idmap.0", "LOCK"),
+        ]
+
+    def _remove_stale_zvec_locks(self) -> int:
+        if shutil.which("lsof") is None:
+            return 0
+        removed = 0
+        for path in self._zvec_lock_paths():
+            if not os.path.exists(path):
+                continue
+            owner_pids: list[int] = []
+            inspection_failed = False
+            try:
+                probe = subprocess.run(
+                    ["lsof", "-t", path],
+                    capture_output=True,
+                    text=True,
+                    check=False,
+                    timeout=1.2,
+                )
+                if probe.returncode == 0 and probe.stdout.strip():
+                    for line in probe.stdout.splitlines():
+                        value = line.strip()
+                        if value.isdigit():
+                            owner_pids.append(int(value))
+            except Exception:
+                inspection_failed = True
+            if inspection_failed:
+                continue
+
+            alive_owners = []
+            for pid in owner_pids:
+                try:
+                    os.kill(pid, 0)
+                    alive_owners.append(pid)
+                except ProcessLookupError:
+                    continue
+                except Exception:
+                    alive_owners.append(pid)
+
+            if alive_owners:
+                continue
+
+            try:
+                os.remove(path)
+                removed += 1
+            except OSError:
+                continue
+        return removed
+
+    def _ensure_vector_db(self, force_retry: bool = False):
         if self.vector_db is not None:
             return self.vector_db
 
         with self._vector_db_lock:
             if self.vector_db is None:
-                from ghostshell.vector_db import CommandVectorDB
-                self.vector_db = CommandVectorDB()
-                self._vector_db_ready.set()
+                retry_not_before, retry_reason = self._vector_db_retry_window()
+                if (
+                    not force_retry
+                    and retry_not_before > 0
+                    and time.monotonic() < retry_not_before
+                ):
+                    raise RuntimeError(retry_reason or "Vector DB retry backoff active")
+                try:
+                    from ghostshell.vector_db import CommandVectorDB
+                    self.vector_db = CommandVectorDB()
+                    self._vector_db_ready.set()
+                    self._clear_vector_db_backoff()
+                except Exception as exc:
+                    message = self.privacy_guard.sanitize_for_log(str(exc))
+                    if self._is_lock_file_error(message):
+                        self._set_vector_db_backoff(message, cooldown_seconds=4.0)
+                    self.vector_db = None
+                    self._vector_db_ready.clear()
+                    raise
         return self.vector_db
 
     def _bootstrap_worker(self, history_file: str):
         try:
             logger.info("Starting vector DB bootstrap in background")
-            max_lock_retries = 20
-            attempt = 0
-            while True:
-                try:
-                    vector_db = self._ensure_vector_db()
-                    break
-                except Exception as lock_exc:
-                    sanitized = self.privacy_guard.sanitize_for_log(str(lock_exc))
-                    if "lock file" in sanitized.lower() and attempt < max_lock_retries:
-                        attempt += 1
+            try:
+                vector_db = self._ensure_vector_db()
+            except Exception as lock_exc:
+                sanitized = self.privacy_guard.sanitize_for_log(str(lock_exc))
+                if self._is_lock_file_error(sanitized):
+                    removed = self._remove_stale_zvec_locks()
+                    if removed > 0:
                         logger.warning(
-                            "Vector DB lock busy; retrying bootstrap (%d/%d)",
-                            attempt,
-                            max_lock_retries,
+                            "Removed %d stale zvec lock file(s); retrying bootstrap once",
+                            removed,
                         )
-                        time.sleep(0.25)
-                        continue
+                        vector_db = self._ensure_vector_db(force_retry=True)
+                    else:
+                        self._set_vector_db_backoff(sanitized, cooldown_seconds=4.0)
+                        raise
+                else:
                     raise
             if history_file:
                 vector_db.initialize_from_history(history_file)
+            self._set_storage_health("healthy", "", "")
             logger.info("Background history sync complete")
         except Exception as e:
             sanitized = self.privacy_guard.sanitize_for_log(str(e))
+            state, code = self._classify_storage_issue(sanitized)
+            if state == "corrupt":
+                self._set_storage_health("corrupt", code, sanitized)
+            else:
+                self._set_storage_health("unknown", "", sanitized)
             with self._bootstrap_lock:
                 self._bootstrap_error = sanitized
             logger.error(
@@ -89,6 +215,14 @@ class SuggestionEngine:
 
         history_file = os.path.expanduser(history_file)
         with self._bootstrap_lock:
+            retry_not_before = self._vector_db_retry_not_before
+            if (
+                retry_not_before > 0
+                and time.monotonic() < retry_not_before
+                and self._bootstrap_completed_for == history_file
+                and not self._vector_db_ready.is_set()
+            ):
+                return
             if (
                 self._bootstrap_completed_for == history_file
                 and self._vector_db_ready.is_set()
@@ -118,6 +252,9 @@ class SuggestionEngine:
             history_file = self._bootstrap_history_file
             completed_for = self._bootstrap_completed_for
             bootstrap_error = self._bootstrap_error
+            storage_state = self._storage_state
+            storage_error_code = self._storage_error_code
+            storage_error_detail = self._storage_error_detail
 
         running = bool(thread and thread.is_alive())
         ready = bool(
@@ -167,12 +304,26 @@ class SuggestionEngine:
             except Exception:
                 pass
 
+        if phase == "error" and error:
+            state, code = self._classify_storage_issue(error)
+            if state == "corrupt":
+                storage_state = "corrupt"
+                storage_error_code = code
+                storage_error_detail = error
+
         if bootstrap_error:
             phase = "error"
             error = bootstrap_error
+            if storage_state not in {"corrupt"}:
+                storage_state = "unknown"
+                storage_error_detail = bootstrap_error
         elif ready and phase != "error":
             phase = "ready"
             error = ""
+            if storage_state not in {"corrupt"}:
+                storage_state = "healthy"
+                storage_error_code = ""
+                storage_error_detail = ""
 
         return {
             "running": running,
@@ -183,7 +334,20 @@ class SuggestionEngine:
             "model_download_in_progress": model_download_in_progress,
             "model_download_needed": model_download_needed,
             "error": error,
+            "storage_state": storage_state or "unknown",
+            "storage_error_code": storage_error_code or "",
+            "storage_error_detail": storage_error_detail or "",
         }
+
+    def export_repair_snapshot(self) -> dict:
+        vector_db = self._ensure_vector_db()
+        return vector_db.export_repair_snapshot(include_feedback=True)
+
+    def import_repair_snapshot(self, payload: dict) -> dict:
+        vector_db = self._ensure_vector_db()
+        result = vector_db.import_repair_snapshot(payload if isinstance(payload, dict) else {})
+        self._set_storage_health("repaired", "", "")
+        return result
 
     def _safe_tail(self, path: str, max_lines: int) -> list[str]:
         if not path: return []
@@ -265,10 +429,11 @@ class SuggestionEngine:
         try:
             matches = self.vector_db.get_prefix_or_semantic_matches(prefix, topk=100)
         except Exception as e:
-            logger.error(
-                "Vector DB lookup failed: %s",
-                self.privacy_guard.sanitize_for_log(str(e)),
-            )
+            sanitized = self.privacy_guard.sanitize_for_log(str(e))
+            state, code = self._classify_storage_issue(sanitized)
+            if state == "corrupt":
+                self._set_storage_health("corrupt", code, sanitized)
+            logger.error("Vector DB lookup failed: %s", sanitized)
             return []
 
         first_mode = matches[0].get("match_mode", "") if matches else ""

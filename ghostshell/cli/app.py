@@ -1,8 +1,10 @@
 import typer
 import json
 import os
+import shutil
 import subprocess
 import sys
+import time
 import requests
 import questionary
 import socket
@@ -41,6 +43,13 @@ PROJECT_ROOT = str(Path(__file__).resolve().parents[2])
 SERVER_SCRIPT = os.path.join(PROJECT_ROOT, "server.py")
 SHELL_CLIENT_SCRIPT = os.path.join(PROJECT_ROOT, "shell_client.py")
 PLIST_PATH = os.path.expanduser("~/Library/LaunchAgents/com.ghostshell.daemon.plist")
+LOCKS_DIR = os.path.join(CONFIG_DIR, "locks")
+FIX_LOCK_FILE = os.path.join(LOCKS_DIR, "fix.lock")
+REPAIR_DIR = os.path.join(CONFIG_DIR, "repair")
+REPAIR_LOG_FILE = os.path.join(REPAIR_DIR, "repair.log")
+ZVEC_COMMANDS_PATH = os.path.join(CONFIG_DIR, "zvec_commands")
+ZVEC_FEEDBACK_PATH = os.path.join(CONFIG_DIR, "zvec_feedback_stats")
+LAST_INDEXED_PATH = os.path.join(CONFIG_DIR, "last_indexed_line")
 
 class _BackSignal:
     pass
@@ -129,6 +138,167 @@ def _load_config() -> dict:
 
 def _save_config(config: dict):
     save_config_file(config, CONFIG_FILE)
+
+
+def _repair_cli_enabled() -> bool:
+    config = _load_config()
+    return bool(config.get("repair_cli_enabled", True))
+
+
+def _append_repair_log(event: str, details: dict | None = None) -> None:
+    try:
+        os.makedirs(REPAIR_DIR, exist_ok=True)
+        payload = {
+            "ts": int(time.time()),
+            "event": str(event or "unknown"),
+            "details": details or {},
+        }
+        with open(REPAIR_LOG_FILE, "a", encoding="utf-8") as f:
+            f.write(json.dumps(payload, separators=(",", ":")) + "\n")
+    except Exception:
+        pass
+
+
+def _extract_storage_health(payload: dict | None) -> tuple[str, str, str]:
+    if not isinstance(payload, dict):
+        return ("unknown", "", "")
+    bootstrap = payload.get("bootstrap", {})
+    if not isinstance(bootstrap, dict):
+        return ("unknown", "", "")
+    state = str(bootstrap.get("storage_state", "unknown") or "unknown").strip().lower()
+    code = str(bootstrap.get("storage_error_code", "") or "").strip()
+    detail = str(bootstrap.get("storage_error_detail", "") or "").strip()
+    if not state:
+        state = "unknown"
+    return (state, code, detail)
+
+
+def _print_storage_corruption_banner(payload: dict | None) -> None:
+    state, code, detail = _extract_storage_health(payload)
+    if state != "corrupt":
+        return
+    text = detail or "Detected inconsistent semantic index files."
+    if len(text) > 180:
+        text = text[:180].rstrip() + "..."
+    body = (
+        "[bold red]Command semantic index appears corrupted.[/bold red]\n"
+        f"[red]Reason:[/red] {text}\n"
+        f"[red]Code:[/red] {code or 'vector_db_corrupt'}\n\n"
+        "[red]Available fixes:[/red]\n"
+        "  aiterminal fix --safe    (recommended)\n"
+        "  aiterminal fix --recover\n"
+        "  aiterminal fix --factory-reset"
+    )
+    console.print(Panel.fit(body, border_style="red", title="Storage Health"))
+    _append_repair_log(
+        "corruption_banner_printed",
+        {"code": code or "vector_db_corrupt", "detail": text},
+    )
+
+
+def _run_storage_preflight_if_enabled(invoked_subcommand: str | None) -> None:
+    if not _repair_cli_enabled():
+        return
+    if "--help" in sys.argv or "-h" in sys.argv:
+        return
+    if invoked_subcommand in {"fix"}:
+        return
+    payload = _fetch_daemon_status()
+    _print_storage_corruption_banner(payload)
+
+
+def _remove_path(path: str) -> tuple[bool, str]:
+    target = os.path.expanduser(path)
+    if not os.path.exists(target):
+        return (True, "")
+    try:
+        if os.path.isdir(target):
+            shutil.rmtree(target)
+        else:
+            os.remove(target)
+        return (True, "")
+    except Exception as exc:
+        return (False, str(exc))
+
+
+def _acquire_fix_lock() -> tuple[int | None, str]:
+    os.makedirs(LOCKS_DIR, exist_ok=True)
+    flags = os.O_CREAT | os.O_EXCL | os.O_WRONLY
+    try:
+        fd = os.open(FIX_LOCK_FILE, flags, 0o600)
+        os.write(fd, str(os.getpid()).encode("utf-8"))
+        return (fd, "")
+    except FileExistsError:
+        return (None, "Another repair operation is already running.")
+    except Exception as exc:
+        return (None, str(exc))
+
+
+def _release_fix_lock(fd: int | None) -> None:
+    if fd is not None:
+        try:
+            os.close(fd)
+        except Exception:
+            pass
+    try:
+        if os.path.exists(FIX_LOCK_FILE):
+            os.remove(FIX_LOCK_FILE)
+    except Exception:
+        pass
+
+
+def _repair_export_snapshot() -> tuple[dict | None, str]:
+    try:
+        response = requests.post("http://127.0.0.1:22000/repair/export", timeout=20)
+    except Exception as exc:
+        return (None, str(exc))
+    if response.status_code != 200:
+        return (None, f"http_{response.status_code}")
+    try:
+        payload = response.json()
+    except Exception:
+        return (None, "bad_json")
+    if not isinstance(payload, dict):
+        return (None, "bad_shape")
+    status = str(payload.get("status", "") or "").strip().lower()
+    if status and status != "ok":
+        return (None, f"status_{status}")
+    snapshot = payload.get("snapshot", {})
+    if not isinstance(snapshot, dict):
+        return (None, "bad_snapshot")
+    return (snapshot, "")
+
+
+def _repair_import_snapshot(snapshot: dict) -> tuple[dict | None, str]:
+    try:
+        response = requests.post(
+            "http://127.0.0.1:22000/repair/import",
+            json={"snapshot": snapshot},
+            timeout=35,
+        )
+    except Exception as exc:
+        return (None, str(exc))
+    if response.status_code != 200:
+        return (None, f"http_{response.status_code}")
+    try:
+        payload = response.json()
+    except Exception:
+        return (None, "bad_json")
+    if not isinstance(payload, dict):
+        return (None, "bad_shape")
+    status = str(payload.get("status", "") or "").strip().lower()
+    if status and status != "ok":
+        return (None, f"status_{status}")
+    return (payload, "")
+
+
+def _write_snapshot_artifact(snapshot: dict) -> str:
+    os.makedirs(REPAIR_DIR, exist_ok=True)
+    stamp = int(time.time())
+    out_path = os.path.join(REPAIR_DIR, f"snapshot-{stamp}.json")
+    with open(out_path, "w", encoding="utf-8") as f:
+        json.dump(snapshot, f, indent=2)
+    return out_path
 
 def _normalize_command_pattern(raw: str) -> str:
     value = str(raw or "").strip()
@@ -1072,6 +1242,15 @@ def _wait_for_bootstrap_ready(started_pid: int | None = None) -> tuple[bool, int
                 last_indexed = int(bootstrap.get("indexed_commands", 0) or 0)
                 phase = str(bootstrap.get("phase") or "starting")
                 error = str(bootstrap.get("error") or "").strip()
+                storage_state = str(bootstrap.get("storage_state", "unknown") or "unknown")
+                storage_error = str(bootstrap.get("storage_error_detail", "") or "").strip()
+                if storage_state == "corrupt":
+                    return (
+                        False,
+                        last_indexed,
+                        storage_error
+                        or "Detected corrupted vector storage. Run `aiterminal fix --safe`.",
+                    )
                 if bootstrap.get("ready"):
                     return (True, last_indexed, "")
                 if phase == "error":
@@ -1356,6 +1535,20 @@ def doctor():
             indexed = int(bootstrap.get("indexed_commands", 0) or 0)
             console.print(f"[green]✓ Bootstrap:[/green] ready")
 
+        storage_state, storage_code, storage_detail = _extract_storage_health(payload)
+        if storage_state == "corrupt":
+            issues.append(storage_code or "vector_db_corrupt")
+            console.print("[red]✗ Storage health:[/red] corrupt")
+            if storage_detail:
+                console.print(f"[yellow]  detail:[/yellow] {storage_detail}")
+            console.print("[yellow]  fix:[/yellow] aiterminal fix --safe")
+        elif storage_state == "healthy":
+            console.print("[green]✓ Storage health:[/green] healthy")
+        elif storage_state == "repaired":
+            console.print("[green]✓ Storage health:[/green] repaired")
+        else:
+            console.print("[yellow]⚠ Storage health:[/yellow] unknown")
+
     if os.path.exists(SHELL_CLIENT_SCRIPT):
         sample_payload = {
             "command_buffer": "git st",
@@ -1441,6 +1634,164 @@ def doctor():
 
     console.print("[green]Doctor result:[/green] OK")
 
+
+def _run_fix_safe() -> int:
+    started = time.time()
+    _append_repair_log("fix_safe_started", {})
+    snapshot: dict | None = None
+    snapshot_file = ""
+    partial = False
+
+    if is_port_open():
+        exported, export_error = _repair_export_snapshot()
+        if exported is not None:
+            snapshot = exported
+            try:
+                snapshot_file = _write_snapshot_artifact(snapshot)
+            except Exception as exc:
+                partial = True
+                console.print(f"[yellow]Could not write repair snapshot artifact:[/yellow] {exc}")
+            _append_repair_log(
+                "fix_safe_snapshot_exported",
+                {
+                    "commands": len(snapshot.get("commands", [])) if isinstance(snapshot, dict) else 0,
+                    "feedback": len(snapshot.get("feedback", [])) if isinstance(snapshot, dict) else 0,
+                    "artifact": snapshot_file,
+                },
+            )
+        else:
+            partial = True
+            console.print(f"[yellow]Snapshot export unavailable:[/yellow] {export_error}")
+            _append_repair_log("fix_safe_snapshot_export_failed", {"error": export_error})
+    else:
+        partial = True
+        console.print("[yellow]Daemon is offline; continuing without export snapshot.[/yellow]")
+        _append_repair_log("fix_safe_snapshot_skipped", {"reason": "daemon_offline"})
+
+    stop()
+
+    failed_paths: list[str] = []
+    for path in [
+        ZVEC_COMMANDS_PATH,
+        ZVEC_FEEDBACK_PATH,
+        LAST_INDEXED_PATH,
+        f"{LAST_INDEXED_PATH}.tmp",
+    ]:
+        ok, err = _remove_path(path)
+        if not ok:
+            failed_paths.append(f"{path}: {err}")
+    if failed_paths:
+        for item in failed_paths:
+            console.print(f"[red]Failed to remove:[/red] {item}")
+        _append_repair_log("fix_safe_remove_failed", {"failed_paths": failed_paths})
+        raise typer.Exit(code=1)
+
+    try:
+        start()
+    except typer.Exit as exc:
+        _append_repair_log("fix_safe_restart_failed", {"exit_code": int(exc.exit_code or 1)})
+        raise
+
+    imported_commands = 0
+    imported_feedback = 0
+    imported_removed = 0
+    if snapshot is not None:
+        imported, import_error = _repair_import_snapshot(snapshot)
+        if imported is None:
+            partial = True
+            console.print(f"[yellow]Could not replay snapshot:[/yellow] {import_error}")
+            _append_repair_log("fix_safe_replay_failed", {"error": import_error})
+        else:
+            imported_commands = int(imported.get("commands_imported", 0) or 0)
+            imported_feedback = int(imported.get("feedback_imported", 0) or 0)
+            imported_removed = int(imported.get("removed_imported", 0) or 0)
+            if str(imported.get("status", "ok") or "ok") != "ok":
+                partial = True
+            _append_repair_log(
+                "fix_safe_replay_complete",
+                {
+                    "commands_imported": imported_commands,
+                    "feedback_imported": imported_feedback,
+                    "removed_imported": imported_removed,
+                },
+            )
+    else:
+        partial = True
+
+    elapsed = round(time.time() - started, 2)
+    console.print("[green]Safe repair complete.[/green]")
+    if snapshot_file:
+        console.print(f"[dim]Snapshot artifact: {snapshot_file}[/dim]")
+    console.print(
+        f"[dim]Replayed metadata: commands={imported_commands}, "
+        f"feedback={imported_feedback}, removed={imported_removed}[/dim]"
+    )
+    if partial:
+        console.print("[yellow]Completed with warnings; some metadata may not have been preserved.[/yellow]")
+    console.print(f"[dim]Elapsed: {elapsed}s[/dim]")
+    _append_repair_log("fix_safe_finished", {"partial": partial, "elapsed_s": elapsed})
+    return 10 if partial else 0
+
+
+def _run_fix_factory_reset() -> int:
+    confirmed = _setup_confirm(
+        "Factory reset deletes GhostShell data (history index, feedback, config). Continue?",
+        default=False,
+    )
+    if _is_back(confirmed) or not confirmed:
+        console.print("[yellow]Factory reset cancelled.[/yellow]")
+        return 1
+
+    _append_repair_log("fix_factory_reset_started", {})
+    stop()
+    ok, err = _remove_path(CONFIG_DIR)
+    if not ok:
+        console.print(f"[red]Factory reset failed:[/red] {err}")
+        _append_repair_log("fix_factory_reset_failed", {"error": err})
+        return 1
+    ensure_config_dir()
+    _save_config(normalize_config_payload({}))
+    start()
+    console.print("[green]Factory reset complete.[/green]")
+    _append_repair_log("fix_factory_reset_finished", {})
+    return 0
+
+
+@app.command()
+def fix(
+    safe: bool = typer.Option(False, "--safe", help="Rebuild vector index and preserve metadata when possible."),
+    recover: bool = typer.Option(False, "--recover", help="Restore from snapshot+journal (not available in v1)."),
+    factory_reset: bool = typer.Option(False, "--factory-reset", help="Fully wipe GhostShell state."),
+):
+    """Repair GhostShell storage state."""
+    selected = [flag for flag in (safe, recover, factory_reset) if flag]
+    if len(selected) > 1:
+        console.print("[red]Choose exactly one mode:[/red] --safe, --recover, or --factory-reset")
+        raise typer.Exit(code=1)
+    if not selected:
+        safe = True
+
+    lock_fd, lock_err = _acquire_fix_lock()
+    if lock_fd is None:
+        console.print(f"[red]Could not start repair:[/red] {lock_err}")
+        raise typer.Exit(code=1)
+
+    try:
+        if recover:
+            console.print(
+                "[yellow]Recover mode is not available in this version.[/yellow] "
+                "Use [bold]aiterminal fix --safe[/bold]."
+            )
+            _append_repair_log("fix_recover_unavailable", {})
+            raise typer.Exit(code=20)
+        if factory_reset:
+            code = _run_fix_factory_reset()
+            raise typer.Exit(code=code)
+        code = _run_fix_safe()
+        raise typer.Exit(code=code)
+    finally:
+        _release_fix_lock(lock_fd)
+
 @app.command("shortcuts")
 def shortcuts_command():
     """Show keyboard shortcuts."""
@@ -1455,6 +1806,7 @@ def main(
     if shortcuts:
         show_shortcuts()
         raise typer.Exit()
+    _run_storage_preflight_if_enabled(ctx.invoked_subcommand)
     if ctx.invoked_subcommand is None:
         console.print("[bold cyan]GhostShell[/bold cyan] - Use --help for commands.")
 

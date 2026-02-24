@@ -52,6 +52,9 @@ class BootstrapStatus(BaseModel):
     model_download_in_progress: bool = False
     model_download_needed: bool = False
     error: str = ""
+    storage_state: str = "unknown"
+    storage_error_code: str = ""
+    storage_error_detail: str = ""
 
 
 class PredictResponse(BaseModel):
@@ -76,6 +79,22 @@ class AssistResponse(BaseModel):
 
 class GenericStatusResponse(BaseModel):
     status: str
+
+
+class RepairExportResponse(BaseModel):
+    status: str = "ok"
+    snapshot: dict[str, Any] = Field(default_factory=dict)
+
+
+class RepairImportPayload(BaseModel):
+    snapshot: dict[str, Any] = Field(default_factory=dict)
+
+
+class RepairImportResponse(BaseModel):
+    status: str = "ok"
+    commands_imported: int = 0
+    feedback_imported: int = 0
+    removed_imported: int = 0
 
 
 class LogCommandResponse(BaseModel):
