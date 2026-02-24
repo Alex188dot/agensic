@@ -1821,12 +1821,8 @@ def shortcuts_command():
 @app.callback(invoke_without_command=True)
 def main(
     ctx: typer.Context,
-    shortcuts: bool = typer.Option(False, "--shortcuts", help="Show keyboard shortcuts help")
 ):
     """GhostShell: AI-powered terminal autocomplete."""
-    if shortcuts:
-        show_shortcuts()
-        raise typer.Exit()
     _run_storage_preflight_if_enabled(ctx.invoked_subcommand)
     if ctx.invoked_subcommand is None:
         console.print("[bold cyan]GhostShell[/bold cyan] - Use --help for commands.")
@@ -1834,17 +1830,16 @@ def main(
 def show_shortcuts():
     """Display the shortcuts help panel."""
     rows = [
-        ("Accept inline suggestion", "Tab", "-", "Accept full suggestion (native completion in path/script contexts)"),
-        ("Trigger suggestion", "Ctrl+Space", "-", "Manual trigger"),
-        ("Partial accept (word)", "Option+Right", "-", "Accept next word"),
-        ("Cycle suggestions", "Ctrl+N / Ctrl+P", "-", "Next / previous"),
+        ("Accept inline suggestion", "Tab", "Accept full suggestion (native completion in path/script contexts)"),
+        ("Trigger suggestion", "Ctrl+Space", "Manual trigger"),
+        ("Partial accept (word)", "Option+Right", "Accept next word"),
+        ("Cycle suggestions", "Ctrl+N / Ctrl+P", "Next / previous"),
     ]
     separator = "-" * 60
     lines = []
-    for action, primary, fallback, notes in rows:
+    for action, primary, notes in rows:
         lines.append(f"[bold green]{action}[/bold green]")
         lines.append(f"Primary : {primary}")
-        lines.append(f"Fallback: {fallback}")
         lines.append(f"Notes   : {notes}")
         lines.append(separator)
 
@@ -1853,7 +1848,7 @@ def show_shortcuts():
         Panel(
             shortcuts_text,
             title="[bold cyan]GhostShell Shortcuts[/bold cyan]",
-            subtitle="Use `aiterminal shortcuts` or `aiterminal --shortcuts`",
+            subtitle="Use `aiterminal shortcuts`",
             expand=False,
         )
     )
