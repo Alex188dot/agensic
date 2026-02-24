@@ -25,6 +25,7 @@ from questionary.prompts import common
 from questionary.prompts.common import InquirerControl
 from questionary.styles import merge_styles_default
 from questionary import utils
+from ghostshell.version import __version__
 from ghostshell.config.loader import (
     DEFAULT_LLM_CALLS_PER_LINE,
     MAX_LLM_CALLS_PER_LINE,
@@ -1821,8 +1822,17 @@ def shortcuts_command():
 @app.callback(invoke_without_command=True)
 def main(
     ctx: typer.Context,
+    version: bool = typer.Option(
+        False,
+        "--version",
+        help="Show GhostShell version and exit",
+        is_eager=True,
+    ),
 ):
     """GhostShell: AI-powered terminal autocomplete."""
+    if version:
+        console.print(f"GhostShell {__version__}")
+        raise typer.Exit()
     _run_storage_preflight_if_enabled(ctx.invoked_subcommand)
     if ctx.invoked_subcommand is None:
         console.print("[bold cyan]GhostShell[/bold cyan] - Use --help for commands.")
