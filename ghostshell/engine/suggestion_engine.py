@@ -1108,12 +1108,15 @@ class SuggestionEngine:
             "Context provided below (History, CWD). "
             "Provide 3 completions for the user's buffer. "
             "JSON output keys: option_1, option_2, option_3. "
-            "Values must be full command completions (suffixes or full replacements logic handled by client, but prefer full logical command). "
+            "Each option must be an object with keys: text, type. "
+            "type must be 'add' (append text to current buffer) or 'replace' (replace whole command). "
+            "text must be the command text for that type. "
             "Do not output explanations."
             f"\n--- CONTEXT ---\n{context_str}"
         )
 
         suggestions = ["", "", ""]
+        ai_pool_meta: list[dict[str, str]] = []
         privacy_blocked = False
 
         try:
@@ -1162,26 +1165,70 @@ class SuggestionEngine:
                     try: parsed = json.loads(match.group(0))
                     except: pass
             
-            raw_sugg = []
+            raw_sugg: list[object] = []
             if isinstance(parsed, dict):
                 raw_sugg = [parsed.get("option_1", ""), parsed.get("option_2", ""), parsed.get("option_3", "")]
             else:
                 raw_sugg = raw.split("|")
 
-            clean = []
-            for s in raw_sugg:
-                if not s: continue
-                s = str(s).strip()
-                s = s.replace("```", "").strip()
-                # Remove quotes if wrapped
-                if (s.startswith('"') and s.endswith('"')) or (s.startswith("'") and s.endswith("'")):
-                    s = s[1:-1]
-                # Remove buffer overlap if model included it
-                if s.startswith(ctx.buffer):
-                    s = s[len(ctx.buffer):]
-                clean.append(s)
+            def _mode_from_type(value: object) -> str:
+                normalized = str(value or "").strip().lower()
+                if normalized in {"replace", "replace_full"}:
+                    return "replace_full"
+                return "suffix_append"
 
-            suggestions = self._filter_blocked_candidates(ctx.buffer, clean)
+            seen_ai: set[tuple[str, str]] = set()
+            for idx, item in enumerate(raw_sugg, start=1):
+                option_type = "add"
+                option_text: object = item
+                if isinstance(parsed, dict):
+                    type_key = f"option_{idx}_type"
+                    if isinstance(item, dict):
+                        option_text = item.get("text", item.get("command", item.get("value", "")))
+                        option_type = str(item.get("type", item.get("mode", parsed.get(type_key, "add"))) or "add")
+                    else:
+                        option_type = str(parsed.get(type_key, "add") or "add")
+
+                suggestion = str(option_text or "").strip().replace("```", "").strip()
+                if not suggestion:
+                    continue
+                if (suggestion.startswith('"') and suggestion.endswith('"')) or (
+                    suggestion.startswith("'") and suggestion.endswith("'")
+                ):
+                    suggestion = suggestion[1:-1]
+                mode = _mode_from_type(option_type)
+
+                if mode == "suffix_append":
+                    if suggestion.startswith(ctx.buffer):
+                        suggestion = suggestion[len(ctx.buffer):]
+                    filtered = self._filter_blocked_candidates(ctx.buffer, [suggestion])
+                    if not filtered:
+                        continue
+                    accept_text = filtered[0]
+                else:
+                    filtered = self._filter_blocked_full_commands([suggestion])
+                    if not filtered:
+                        continue
+                    accept_text = filtered[0]
+
+                if not accept_text:
+                    continue
+                dedupe_key = (mode, accept_text)
+                if dedupe_key in seen_ai:
+                    continue
+                seen_ai.add(dedupe_key)
+                ai_pool_meta.append(
+                    {
+                        "display_text": accept_text,
+                        "accept_text": accept_text,
+                        "accept_mode": mode,
+                        "kind": "normal",
+                    }
+                )
+                if len(ai_pool_meta) >= 20:
+                    break
+
+            suggestions = [entry.get("accept_text", "") for entry in ai_pool_meta[:3]]
 
         except PrivacyGuardError as e:
             logger.warning(
@@ -1190,31 +1237,22 @@ class SuggestionEngine:
             )
             privacy_blocked = True
             suggestions = []
+            ai_pool_meta = []
         except Exception as e:
             logger.error(
                 "LLM Error: %s",
                 self.privacy_guard.sanitize_for_log(str(e)),
             )
             suggestions = []
+            ai_pool_meta = []
 
         # Pad to 3
         while len(suggestions) < 3:
             suggestions.append("")
 
-        # For AI suggestions, pool is same as suggestions (no filtering needed)
-        pool = _pad_pool(suggestions, size=20)
-        pool_meta: list[dict[str, str]] = []
-        for suffix in suggestions:
-            if not suffix:
-                continue
-            pool_meta.append(
-                {
-                    "display_text": suffix,
-                    "accept_text": suffix,
-                    "accept_mode": "suffix_append",
-                    "kind": "normal",
-                }
-            )
+        # For AI suggestions, pool mirrors parsed AI metadata.
+        pool = _pad_pool([entry.get("accept_text", "") for entry in ai_pool_meta], size=20)
+        pool_meta = ai_pool_meta[:20]
 
         return (suggestions[:3], pool, pool_meta, not privacy_blocked)
 

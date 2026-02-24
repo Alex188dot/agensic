@@ -77,6 +77,14 @@ def _normalize_predict_response(result: Any) -> dict[str, Any] | None:
     clean_modes: list[str] = []
     clean_kinds: list[str] = []
 
+    def _normalize_mode(value: Any) -> str:
+        mode = str(value or "suffix_append").strip().lower()
+        if mode in {"replace", "replace_full"}:
+            return "replace_full"
+        if mode in {"add", "suffix_append"}:
+            return "suffix_append"
+        return "suffix_append"
+
     if isinstance(pool_meta, list):
         for item in pool_meta:
             if not isinstance(item, dict):
@@ -87,7 +95,7 @@ def _normalize_predict_response(result: Any) -> dict[str, Any] | None:
             seen.add(accept_text)
             clean_pool.append(accept_text)
             clean_display.append(str(item.get("display_text", accept_text) or accept_text))
-            clean_modes.append(str(item.get("accept_mode", "suffix_append") or "suffix_append"))
+            clean_modes.append(_normalize_mode(item.get("accept_mode", "suffix_append")))
             clean_kinds.append(str(item.get("kind", "normal") or "normal"))
             if len(clean_pool) >= 20:
                 break
