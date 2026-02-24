@@ -47,6 +47,10 @@ class ServerContractTests(unittest.TestCase):
             raise unittest.SkipTest(f"Server dependencies unavailable: {SERVER_IMPORT_ERROR}")
         cls.client = TestClient(app)
 
+    def setUp(self):
+        deps.reset_shutdown_state()
+        deps.set_uvicorn_server(None)
+
     def test_status_contract(self):
         with patch.object(deps.engine, "get_bootstrap_status", return_value={"ready": True, "phase": "ready"}):
             response = self.client.get("/status")
@@ -54,6 +58,7 @@ class ServerContractTests(unittest.TestCase):
             body = response.json()
             self.assertEqual(body["status"], "ok")
             self.assertIn("bootstrap", body)
+            self.assertIn("shutdown", body)
 
     def test_predict_contract(self):
         async def _fake_get_suggestions(config, req_context, allow_ai=True):
@@ -167,6 +172,100 @@ class ServerContractTests(unittest.TestCase):
             )
             self.assertEqual(remove_response.status_code, 200)
             self.assertEqual(remove_response.json()["status"], "ok")
+
+    def test_shutdown_gating_routes(self):
+        deps.begin_shutdown("test")
+
+        predict = self.client.post(
+            "/predict",
+            json={
+                "command_buffer": "git",
+                "cursor_position": 3,
+                "working_directory": "/tmp",
+                "shell": "zsh",
+                "allow_ai": False,
+            },
+        )
+        self.assertEqual(predict.status_code, 503)
+        self.assertEqual(predict.json().get("detail"), "daemon_shutting_down")
+
+        assist = self.client.post(
+            "/assist",
+            json={
+                "prompt_text": "hi",
+                "working_directory": "/tmp",
+                "shell": "zsh",
+            },
+        )
+        self.assertEqual(assist.status_code, 503)
+        self.assertEqual(assist.json().get("detail"), "daemon_shutting_down")
+
+        intent = self.client.post(
+            "/intent",
+            json={
+                "intent_text": "list files",
+                "working_directory": "/tmp",
+                "shell": "zsh",
+            },
+        )
+        self.assertEqual(intent.status_code, 503)
+        self.assertEqual(intent.json().get("detail"), "daemon_shutting_down")
+
+        feedback = self.client.post(
+            "/feedback",
+            json={
+                "command_buffer": "git",
+                "accepted_suggestion": " status",
+                "accept_mode": "suffix_append",
+            },
+        )
+        self.assertEqual(feedback.status_code, 503)
+        self.assertEqual(feedback.json().get("detail"), "daemon_shutting_down")
+
+        log_command = self.client.post(
+            "/log_command",
+            json={
+                "command": "git status",
+                "source": "runtime",
+                "exit_code": 0,
+            },
+        )
+        self.assertEqual(log_command.status_code, 503)
+        self.assertEqual(log_command.json().get("detail"), "daemon_shutting_down")
+
+        list_response = self.client.get("/command_store/list")
+        self.assertEqual(list_response.status_code, 503)
+        self.assertEqual(list_response.json().get("detail"), "daemon_shutting_down")
+
+        add_response = self.client.post("/command_store/add", json={"commands": ["git status"]})
+        self.assertEqual(add_response.status_code, 503)
+        self.assertEqual(add_response.json().get("detail"), "daemon_shutting_down")
+
+        remove_response = self.client.post(
+            "/command_store/remove",
+            json={"commands": ["git status"], "shell": "zsh"},
+        )
+        self.assertEqual(remove_response.status_code, 503)
+        self.assertEqual(remove_response.json().get("detail"), "daemon_shutting_down")
+
+        status_response = self.client.get("/status")
+        self.assertEqual(status_response.status_code, 200)
+        self.assertTrue(bool(status_response.json().get("shutdown", {}).get("shutting_down")))
+
+        shutdown_response = self.client.post("/shutdown")
+        self.assertEqual(shutdown_response.status_code, 200)
+
+    def test_shutdown_route_sets_should_exit(self):
+        class _FakeServer:
+            def __init__(self) -> None:
+                self.should_exit = False
+
+        server = _FakeServer()
+        deps.set_uvicorn_server(server)
+        response = self.client.post("/shutdown")
+        self.assertEqual(response.status_code, 200)
+        self.assertTrue(server.should_exit)
+        self.assertTrue(deps.shutdown_snapshot().get("shutting_down"))
 
 
 if __name__ == "__main__":

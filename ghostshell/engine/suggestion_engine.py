@@ -1512,15 +1512,20 @@ class SuggestionEngine:
                 self.privacy_guard.sanitize_for_log(str(e)),
             )
     
-    def close(self):
+    def close(self, join_timeout_seconds: float = 20.0, shutdown_reason: str = ""):
         """Clean up resources."""
         with self._bootstrap_lock:
             thread = self._bootstrap_thread
 
+        timeout_seconds = max(0.1, float(join_timeout_seconds))
         if thread and thread.is_alive() and thread is not threading.current_thread():
-            thread.join(timeout=20)
+            thread.join(timeout=timeout_seconds)
             if thread.is_alive():
-                logger.warning("History bootstrap thread did not finish before shutdown")
+                logger.warning(
+                    "History bootstrap thread did not finish before shutdown (bootstrap_thread_alive=true timeout_seconds=%.2f reason=%s)",
+                    timeout_seconds,
+                    str(shutdown_reason or "unknown"),
+                )
 
         if self.vector_db is not None:
             self.vector_db.close()

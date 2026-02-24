@@ -1,10 +1,12 @@
 import json
 import logging
 import os
-import warnings
 import threading
 import time
 from collections import defaultdict, deque
+from typing import Any, Callable
+
+from fastapi import HTTPException
 
 os.environ["TOKENIZERS_PARALLELISM"] = "false"
 os.environ.setdefault("OMP_NUM_THREADS", "1")
@@ -12,10 +14,6 @@ os.environ.setdefault("MKL_NUM_THREADS", "1")
 os.environ.setdefault("OPENBLAS_NUM_THREADS", "1")
 os.environ.setdefault("VECLIB_MAXIMUM_THREADS", "1")
 os.environ.setdefault("NUMEXPR_NUM_THREADS", "1")
-# os.environ.setdefault(
-#     "PYTHONWARNINGS",
-#     "ignore:resource_tracker:UserWarning",
-# )
 
 from ghostshell.engine import RequestContext, SuggestionEngine
 from ghostshell.config.loader import normalize_config_payload
@@ -30,12 +28,6 @@ logging.basicConfig(
 )
 logger = logging.getLogger("ghostshell")
 
-# warnings.filterwarnings(
-#     "ignore",
-#     message=r"resource_tracker: There appear to be \d+ leaked semaphore objects to clean up at shutdown",
-#     category=UserWarning,
-# )
-
 CONFIG_DIR = os.path.expanduser("~/.ghostshell")
 CONFIG_FILE = os.path.join(CONFIG_DIR, "config.json")
 
@@ -45,11 +37,147 @@ uvicorn_server = None
 _RATE_LIMIT_LOCK = threading.Lock()
 _RATE_LIMIT_WINDOW_SECONDS = 60.0
 _RATE_LIMIT_STATE: dict[str, deque[float]] = defaultdict(deque)
+_ENV_SETTINGS_LOG_LOCK = threading.Lock()
+_ENV_SETTINGS_LOGGED = False
+
+
+class ShutdownCoordinator:
+    def __init__(self) -> None:
+        self._lock = threading.Lock()
+        self.shutting_down = False
+        self.shutdown_reason = ""
+        self.shutdown_started_monotonic = 0.0
+        self.active_requests = 0
+        self.active_background_jobs = 0
+
+    def begin_shutdown(self, reason: str = "") -> bool:
+        reason_value = str(reason or "").strip() or "unknown"
+        with self._lock:
+            if self.shutting_down:
+                return False
+            self.shutting_down = True
+            self.shutdown_reason = reason_value
+            self.shutdown_started_monotonic = time.monotonic()
+            return True
+
+    def is_shutting_down(self) -> bool:
+        with self._lock:
+            return bool(self.shutting_down)
+
+    def try_acquire_request_slot(self) -> bool:
+        with self._lock:
+            if self.shutting_down:
+                return False
+            self.active_requests += 1
+            return True
+
+    def release_request_slot(self) -> None:
+        with self._lock:
+            if self.active_requests > 0:
+                self.active_requests -= 1
+
+    def acquire_background_job_slot(self) -> None:
+        with self._lock:
+            self.active_background_jobs += 1
+
+    def release_background_job_slot(self) -> None:
+        with self._lock:
+            if self.active_background_jobs > 0:
+                self.active_background_jobs -= 1
+
+    def active_jobs_total(self) -> int:
+        with self._lock:
+            return int(self.active_requests + self.active_background_jobs)
+
+    def snapshot(self) -> dict[str, Any]:
+        with self._lock:
+            return {
+                "shutting_down": bool(self.shutting_down),
+                "reason": self.shutdown_reason,
+                "shutdown_started_monotonic": float(self.shutdown_started_monotonic),
+                "active_requests": int(self.active_requests),
+                "active_background_jobs": int(self.active_background_jobs),
+                "active_jobs_total": int(self.active_requests + self.active_background_jobs),
+            }
+
+    def reset(self) -> None:
+        with self._lock:
+            self.shutting_down = False
+            self.shutdown_reason = ""
+            self.shutdown_started_monotonic = 0.0
+            self.active_requests = 0
+            self.active_background_jobs = 0
+
+
+shutdown_coordinator = ShutdownCoordinator()
 
 
 def set_uvicorn_server(server):
     global uvicorn_server
     uvicorn_server = server
+
+
+def log_parallelism_settings_once() -> None:
+    global _ENV_SETTINGS_LOGGED
+    with _ENV_SETTINGS_LOG_LOCK:
+        if _ENV_SETTINGS_LOGGED:
+            return
+        _ENV_SETTINGS_LOGGED = True
+    logger.info(
+        "Parallelism settings: TOKENIZERS_PARALLELISM=%s OMP_NUM_THREADS=%s MKL_NUM_THREADS=%s OPENBLAS_NUM_THREADS=%s VECLIB_MAXIMUM_THREADS=%s NUMEXPR_NUM_THREADS=%s",
+        os.environ.get("TOKENIZERS_PARALLELISM", ""),
+        os.environ.get("OMP_NUM_THREADS", ""),
+        os.environ.get("MKL_NUM_THREADS", ""),
+        os.environ.get("OPENBLAS_NUM_THREADS", ""),
+        os.environ.get("VECLIB_MAXIMUM_THREADS", ""),
+        os.environ.get("NUMEXPR_NUM_THREADS", ""),
+    )
+
+
+def begin_shutdown(reason: str) -> bool:
+    started = shutdown_coordinator.begin_shutdown(reason)
+    if started:
+        logger.info("Shutdown phase started (reason=%s)", str(reason or "unknown"))
+    return started
+
+
+def shutdown_snapshot() -> dict[str, Any]:
+    return shutdown_coordinator.snapshot()
+
+
+def reject_if_shutting_down() -> None:
+    if shutdown_coordinator.is_shutting_down():
+        raise HTTPException(status_code=503, detail="daemon_shutting_down")
+
+
+def enter_request_or_503() -> None:
+    if not shutdown_coordinator.try_acquire_request_slot():
+        raise HTTPException(status_code=503, detail="daemon_shutting_down")
+
+
+def release_request_slot() -> None:
+    shutdown_coordinator.release_request_slot()
+
+
+def run_background_task(task: Callable[..., Any], *args: Any, **kwargs: Any) -> None:
+    shutdown_coordinator.acquire_background_job_slot()
+    try:
+        task(*args, **kwargs)
+    finally:
+        shutdown_coordinator.release_background_job_slot()
+
+
+def wait_for_active_jobs_to_drain(timeout_seconds: float = 5.0, poll_interval_seconds: float = 0.05) -> bool:
+    deadline = time.monotonic() + max(0.0, float(timeout_seconds))
+    while time.monotonic() < deadline:
+        if shutdown_coordinator.active_jobs_total() == 0:
+            return True
+        time.sleep(max(0.01, float(poll_interval_seconds)))
+    return shutdown_coordinator.active_jobs_total() == 0
+
+
+def reset_shutdown_state() -> None:
+    shutdown_coordinator.reset()
 
 
 def load_config() -> dict:

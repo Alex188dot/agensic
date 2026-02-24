@@ -63,6 +63,14 @@ class BootstrapStatus(BaseModel):
     auto_recover_result: str = "skipped"
 
 
+class ShutdownStatus(BaseModel):
+    shutting_down: bool = False
+    reason: str = ""
+    active_requests: int = 0
+    active_background_jobs: int = 0
+    active_jobs_total: int = 0
+
+
 class PredictResponse(BaseModel):
     suggestions: list[str]
     pool: list[str]
@@ -157,3 +165,4 @@ class CommandStoreRemoveResponse(BaseModel):
 class StatusResponse(BaseModel):
     status: str
     bootstrap: BootstrapStatus
+    shutdown: ShutdownStatus | None = None

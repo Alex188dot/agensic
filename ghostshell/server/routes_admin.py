@@ -16,15 +16,18 @@ router = APIRouter()
 @router.get("/status", response_model=StatusResponse, response_model_exclude_unset=True)
 def daemon_status() -> StatusResponse:
     bootstrap = deps.engine.get_bootstrap_status()
+    shutdown = deps.shutdown_snapshot()
     return {
         "status": "ok",
         "bootstrap": bootstrap,
+        "shutdown": shutdown,
     }
 
 
 @router.post("/shutdown", response_model=GenericStatusResponse, response_model_exclude_unset=True)
 async def shutdown() -> GenericStatusResponse:
     deps.logger.info("Shutdown request received.")
+    deps.begin_shutdown("api_shutdown")
     if deps.uvicorn_server is not None:
         deps.uvicorn_server.should_exit = True
     else:
