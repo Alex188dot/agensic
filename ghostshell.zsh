@@ -1425,6 +1425,18 @@ _ghostshell_cycle_prev() {
     fi
 }
 
+_ghostshell_down_line_or_history() {
+    _ghostshell_clear_suggestions
+    zle down-line-or-history
+    zle -R
+}
+
+_ghostshell_up_line_or_history() {
+    _ghostshell_clear_suggestions
+    zle up-line-or-history
+    zle -R
+}
+
 # --- Manual Trigger (Ctrl+Space) ---
 _ghostshell_manual_trigger() {
     if [[ ${#BUFFER} -ge 2 ]]; then
@@ -1472,6 +1484,8 @@ zle -N _ghostshell_cycle_prev
 zle -N _ghostshell_partial_accept
 zle -N _ghostshell_manual_trigger
 zle -N _ghostshell_accept_line
+zle -N _ghostshell_down_line_or_history
+zle -N _ghostshell_up_line_or_history
 zle -N self-insert _ghostshell_self_insert
 zle -N backward-delete-char _ghostshell_backward_delete_char
 zle -N _ghostshell_interrupt
@@ -1533,6 +1547,10 @@ _ghostshell_bind_widget '^N' _ghostshell_cycle_next
 _ghostshell_bind_widget '^C' _ghostshell_interrupt
 _ghostshell_bind_widget '^[' _ghostshell_escape
 _ghostshell_bind_widget '^M' _ghostshell_accept_line       # Enter
+_ghostshell_bind_widget '^[[A' _ghostshell_up_line_or_history
+_ghostshell_bind_widget '^[[B' _ghostshell_down_line_or_history
+_ghostshell_bind_widget '^OA' _ghostshell_up_line_or_history
+_ghostshell_bind_widget '^OB' _ghostshell_down_line_or_history
 
 # --- Partial Accept (Option+Right) ---
 _ghostshell_bind_widget '^[[1;3C' _ghostshell_partial_accept
