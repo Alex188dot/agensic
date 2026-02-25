@@ -618,7 +618,11 @@ class SuggestionEngine:
                     continue
                 suffixes.append(cmd[len(prefix):])
             if self.vector_db is not None and suffixes:
-                suffixes = self.vector_db.rerank_candidates(ctx.buffer, suffixes)
+                suffixes = self.vector_db.rerank_candidates(
+                    ctx.buffer,
+                    suffixes,
+                    working_directory=ctx.cwd,
+                )
             suffixes = self._filter_blocked_candidates(ctx.buffer, suffixes)
             for suffix in suffixes:
                 candidates.append(
@@ -1089,7 +1093,7 @@ class SuggestionEngine:
                 suggestions.append("")
 
             pool = _pad_pool(pool, size=20)
-            logger.info(f"Vector DB returned {len(vector_candidates)} matches")
+            logger.debug(f"Vector DB returned {len(vector_candidates)} matches")
             return (suggestions, pool, pool_meta, False)
 
         # If no vector matches, this is a new/unknown command - invoke AI
@@ -1462,20 +1466,31 @@ class SuggestionEngine:
             )
             return "I couldn't generate a response right now. Try again."
 
-    def log_feedback(self, buffer: str, accepted: str, accept_mode: str = "suffix_append"):
+    def log_feedback(
+        self,
+        buffer: str,
+        accepted: str,
+        accept_mode: str = "suffix_append",
+        working_directory: str | None = None,
+    ):
         if not buffer:
             return
         mode = (accept_mode or "suffix_append").strip().lower()
         try:
             vector_db = self._ensure_vector_db()
-            vector_db.record_feedback(buffer, accepted, mode)
+            vector_db.record_feedback(
+                buffer,
+                accepted,
+                mode,
+                working_directory=working_directory,
+            )
             if mode == "replace_full":
                 full_command = (accepted or "").replace("\n", " ").replace("\r", " ").strip()
             else:
                 full_command = f"{buffer}{accepted}".replace("\n", " ").replace("\r", " ").strip()
             if full_command:
                 sanitized = self.privacy_guard.sanitize_text(full_command, context="log_feedback")
-                logger.info(
+                logger.debug(
                     "Feedback recorded for: %s (redactions=%d)",
                     sanitized.text,
                     sanitized.redaction_count,
@@ -1486,7 +1501,13 @@ class SuggestionEngine:
                 self.privacy_guard.sanitize_for_log(str(e)),
             )
     
-    def log_executed_command(self, command: str, exit_code: int | None = None, source: str = "unknown"):
+    def log_executed_command(
+        self,
+        command: str,
+        exit_code: int | None = None,
+        source: str = "unknown",
+        working_directory: str | None = None,
+    ):
         """
         Log a command that was executed by the user.
         This adds it to the vector database for future suggestions.
@@ -1505,7 +1526,10 @@ class SuggestionEngine:
             if vector_db.is_blocked_command(normalized_command):
                 logger.debug("Skipping blocked command from runtime logging")
                 return
-            vector_db.insert_command(normalized_command)
+            vector_db.insert_command(
+                normalized_command,
+                working_directory=working_directory,
+            )
         except Exception as e:
             logger.error(
                 "Failed to log command to vector DB: %s",

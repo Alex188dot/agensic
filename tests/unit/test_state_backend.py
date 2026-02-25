@@ -13,7 +13,11 @@ class StateBackendTests(unittest.TestCase):
             store = SQLiteStateStore(db_path, journal=journal)
 
             store.record_execute("git status")
-            store.record_feedback("git status", [("git", " status")])
+            store.record_feedback(
+                "git status",
+                [("git", " status")],
+                repo_task_pairs=[("repo_abc", "git status", " status")],
+            )
             stats = store.get_command_stats(["git status"])
 
             self.assertIn("git status", stats)
@@ -22,6 +26,19 @@ class StateBackendTests(unittest.TestCase):
 
             context_counts = store.get_feedback_counts(["git"], [" status"])
             self.assertEqual(context_counts[" status"], 1)
+            repo_counts = store.get_repo_feedback_counts("repo_abc", "git status", [" status"])
+            self.assertEqual(repo_counts[" status"], 1)
+
+            store.record_execute(
+                "git status",
+                repo_task_pair=("repo_abc", "git status", "git status"),
+            )
+            repo_execute_counts = store.get_repo_execute_feedback_counts(
+                "repo_abc",
+                "git status",
+                ["git status"],
+            )
+            self.assertEqual(repo_execute_counts["git status"], 1)
 
     def test_snapshot_restore_and_journal_replay(self):
         with tempfile.TemporaryDirectory() as tmp:

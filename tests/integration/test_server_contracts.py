@@ -173,6 +173,26 @@ class ServerContractTests(unittest.TestCase):
             self.assertEqual(remove_response.status_code, 200)
             self.assertEqual(remove_response.json()["status"], "ok")
 
+    def test_log_command_accepts_working_directory(self):
+        with patch.object(deps.engine, "log_executed_command") as log_exec:
+            response = self.client.post(
+                "/log_command",
+                json={
+                    "command": "git status",
+                    "source": "runtime",
+                    "exit_code": 0,
+                    "working_directory": "/tmp/repo-x",
+                },
+            )
+            self.assertEqual(response.status_code, 200)
+            self.assertEqual(response.json().get("status"), "ok")
+            self.assertTrue(log_exec.called)
+            args = log_exec.call_args[0]
+            self.assertEqual(args[0], "git status")
+            self.assertEqual(args[1], 0)
+            self.assertEqual(args[2], "runtime")
+            self.assertEqual(args[3], "/tmp/repo-x")
+
     def test_shutdown_gating_routes(self):
         deps.begin_shutdown("test")
 
@@ -217,6 +237,7 @@ class ServerContractTests(unittest.TestCase):
                 "command_buffer": "git",
                 "accepted_suggestion": " status",
                 "accept_mode": "suffix_append",
+                "working_directory": "/tmp",
             },
         )
         self.assertEqual(feedback.status_code, 503)

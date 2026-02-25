@@ -34,6 +34,7 @@ def log_command(data: dict, background_tasks: BackgroundTasks) -> LogCommandResp
         source = str(data.get("source", "unknown") or "unknown").strip().lower()
         if source not in {"runtime", "history", "unknown"}:
             return {"status": "ignored", "reason": "invalid_source"}
+        working_directory = str(data.get("working_directory", "") or "").strip() or None
 
         config = deps.load_config()
         patterns = deps.disabled_patterns_from_config(config)
@@ -46,6 +47,7 @@ def log_command(data: dict, background_tasks: BackgroundTasks) -> LogCommandResp
             command,
             exit_code,
             source,
+            working_directory,
         )
         return {"status": "ok"}
     finally:

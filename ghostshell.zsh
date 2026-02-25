@@ -925,7 +925,8 @@ _ghostshell_send_feedback() {
     (
         local escaped_buf="${buffer//\'/\'\\\'\'}"
         local escaped_acc="${accepted//\'/\'\\\'\'}"
-        local json_data="{\"command_buffer\": \"$escaped_buf\", \"accepted_suggestion\": \"$escaped_acc\", \"accept_mode\": \"${accept_mode}\"}"
+        local escaped_pwd="${PWD//\'/\'\\\'\'}"
+        local json_data="{\"command_buffer\": \"$escaped_buf\", \"accepted_suggestion\": \"$escaped_acc\", \"accept_mode\": \"${accept_mode}\", \"working_directory\": \"$escaped_pwd\"}"
         curl -s -X POST "http://127.0.0.1:22000/feedback" \
              -H "Content-Type: application/json" \
              -d "$json_data" > /dev/null 2>&1
@@ -939,7 +940,8 @@ _ghostshell_log_command() {
     # Log executed command to vector DB
     (
         local escaped_cmd="${command//\'/\'\\\'\'}"
-        local json_data="{\"command\": \"$escaped_cmd\", \"exit_code\": ${exit_code}, \"source\": \"${source}\"}"
+        local escaped_pwd="${PWD//\'/\'\\\'\'}"
+        local json_data="{\"command\": \"$escaped_cmd\", \"exit_code\": ${exit_code}, \"source\": \"${source}\", \"working_directory\": \"$escaped_pwd\"}"
         curl -s -X POST "http://127.0.0.1:22000/log_command" \
              -H "Content-Type: application/json" \
              -d "$json_data" > /dev/null 2>&1

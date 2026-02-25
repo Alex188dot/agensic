@@ -56,7 +56,7 @@ async def predict_completion(ctx: Context, request: Request) -> PredictResponse:
             ctx.command_buffer,
             context="server_predict",
         )
-        deps.logger.info(
+        deps.logger.debug(
             "Req[%s] allow_ai=%s used_ai=%s suggestions=%s buffer='%s' redactions=%d",
             source,
             ctx.allow_ai,

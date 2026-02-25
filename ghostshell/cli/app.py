@@ -1831,7 +1831,7 @@ def main(
 ):
     """GhostShell: AI-powered terminal autocomplete."""
     if version:
-        console.print(f"GhostShell {__version__}")
+        console.print(f"GhostShell {__version__}", highlight=False)
         raise typer.Exit()
     _run_storage_preflight_if_enabled(ctx.invoked_subcommand)
     if ctx.invoked_subcommand is None:

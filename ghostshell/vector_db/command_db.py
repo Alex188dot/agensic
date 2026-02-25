@@ -6,6 +6,7 @@ import math
 import os
 import shlex
 import shutil
+import subprocess
 import threading
 import time
 from collections import defaultdict
@@ -55,10 +56,17 @@ class CommandVectorDB:
     This implementation assumes a fresh v2 schema and does not run migrations.
     """
 
-    SCORE_ALPHA = 1.10
+    SCORE_ALPHA = 1.25
     SCORE_BETA = 0.35
+    SCORE_ACCEPT = 0.35
     SCORE_EXECUTE = 0.20
     SCORE_HISTORY = 0.10
+    ENABLE_REPO_CONFIDENCE_TIERS = True
+    REPO_CONF_MEDIUM_MIN_ACCEPTS = 3
+    REPO_CONF_MEDIUM_MIN_DISTINCT = 2
+    REPO_CONF_HIGH_MIN_ACCEPTS = 6
+    REPO_EXECUTE_CAP = 3
+    HELP_DAMPENING_PENALTY = 0.25
     BLOCKED_EXECUTABLES = {"rm"}
     PREFIX_SCAN_LIMIT = 2000
     SEMANTIC_VECTOR_TOPN = 80
@@ -100,6 +108,7 @@ class CommandVectorDB:
         self._io_lock = threading.RLock()
         self._is_closed = False
         self._status_lock = threading.Lock()
+        self._repo_identity_cache: Dict[str, Tuple[float, str]] = {}
         self._init_phase = "starting"
         self._model_download_in_progress = False
         self._model_download_needed = False
@@ -693,6 +702,136 @@ class CommandVectorDB:
         return keys
 
     @staticmethod
+    def _stable_key(prefix: str, payload: str) -> str:
+        digest = hashlib.sha256((payload or "").encode("utf-8")).hexdigest()[:24]
+        return f"{prefix}_{digest}"
+
+    @staticmethod
+    def _canonical_remote_url(remote: str) -> str:
+        value = str(remote or "").strip().lower()
+        if value.endswith(".git"):
+            value = value[:-4]
+        return value
+
+    @staticmethod
+    def _safe_git_output(cwd: str, args: List[str], timeout_sec: float = 0.12) -> str:
+        if not cwd:
+            return ""
+        try:
+            proc = subprocess.run(
+                ["git", *args],
+                cwd=cwd,
+                capture_output=True,
+                text=True,
+                check=False,
+                timeout=timeout_sec,
+            )
+        except Exception:
+            return ""
+        if proc.returncode != 0:
+            return ""
+        return (proc.stdout or "").strip()
+
+    def resolve_repo_key(self, working_directory: str) -> str:
+        cwd = os.path.abspath(os.path.expanduser(str(working_directory or "").strip()))
+        if not cwd:
+            return ""
+        now = time.monotonic()
+        cached = self._repo_identity_cache.get(cwd)
+        if cached is not None:
+            ts, key = cached
+            if (now - ts) <= 30.0:
+                return key
+        git_root = self._safe_git_output(cwd, ["rev-parse", "--show-toplevel"])
+        if git_root:
+            remote = self._canonical_remote_url(
+                self._safe_git_output(cwd, ["config", "--get", "remote.origin.url"])
+            )
+            payload = f"{git_root.lower()}\x1f{remote}"
+            key = self._stable_key("repo", payload)
+            self._repo_identity_cache[cwd] = (now, key)
+            return key
+
+        fallback = self._stable_key("cwd", cwd.lower())
+        self._repo_identity_cache[cwd] = (now, fallback)
+        return fallback
+
+    @staticmethod
+    def extract_task_key(command: str) -> str:
+        normalized = CommandVectorDB.normalize_command(command)
+        tokens = normalized.split()
+        if not tokens:
+            return ""
+
+        i = 0
+        while i < len(tokens):
+            token = tokens[i]
+            if "=" in token and not token.startswith("="):
+                i += 1
+                continue
+            break
+        if i >= len(tokens):
+            return ""
+
+        executable = os.path.basename(tokens[i]).strip().lower()
+        if not executable:
+            return ""
+        scripting_execs = {
+            "python",
+            "python3",
+            "node",
+            "ruby",
+            "perl",
+            "bash",
+            "sh",
+            "zsh",
+            "pwsh",
+        }
+        if executable in scripting_execs:
+            return executable
+
+        subcmd = ""
+        if i + 1 < len(tokens):
+            candidate = tokens[i + 1].strip().lower()
+            if candidate and not candidate.startswith("-") and not ("=" in candidate and not candidate.startswith("=")):
+                subcmd = candidate
+        if subcmd:
+            return f"{executable} {subcmd}"
+        return executable
+
+    @classmethod
+    def repo_confidence_tier(
+        cls,
+        total_repo_accepts: int,
+        distinct_repo_suffixes: int,
+        total_repo_execute_signal: int = 0,
+    ) -> str:
+        # Execute-derived signal contributes modestly to tier gating.
+        effective_signal = int(total_repo_accepts or 0) + min(int(total_repo_execute_signal or 0), 2)
+        if effective_signal >= cls.REPO_CONF_HIGH_MIN_ACCEPTS:
+            return "HIGH"
+        if (
+            effective_signal >= cls.REPO_CONF_MEDIUM_MIN_ACCEPTS
+            and distinct_repo_suffixes >= cls.REPO_CONF_MEDIUM_MIN_DISTINCT
+        ):
+            return "MEDIUM"
+        return "LOW"
+
+    @staticmethod
+    def _has_help_intent(buffer_context: str) -> bool:
+        low = CommandVectorDB.normalize_command(buffer_context).lower()
+        if not low:
+            return False
+        return (" help" in f" {low}") or ("--help" in low) or ("--h" in low)
+
+    @staticmethod
+    def _is_help_like_command(command: str) -> bool:
+        low = CommandVectorDB.normalize_command(command).lower()
+        if not low:
+            return False
+        return low.endswith(" --help") or low.endswith(" help")
+
+    @staticmethod
     def command_doc_id(command: str) -> str:
         normalized = CommandVectorDB.normalize_command(command)
         digest = hashlib.sha256(normalized.encode("utf-8")).hexdigest()[:60]
@@ -777,20 +916,23 @@ class CommandVectorDB:
     @staticmethod
     def blend_rank_score(
         rank: int,
+        repo_task_count: int,
         context_count: int,
         accept_count: int,
         execute_count: int = 0,
         history_count: int = 0,
         alpha: float = SCORE_ALPHA,
         beta: float = SCORE_BETA,
+        eta: float = SCORE_ACCEPT,
         gamma: float = SCORE_EXECUTE,
         delta: float = SCORE_HISTORY,
     ) -> float:
         base = 1.0 / float(rank + 1)
-        return base + (alpha * math.log1p(max(context_count, 0))) + (
-            beta * math.log1p(max(accept_count, 0))
-        ) + (gamma * math.log1p(max(execute_count, 0))) + (
-            delta * math.log1p(max(history_count, 0))
+        return base + (alpha * math.log1p(max(repo_task_count, 0))) + (
+            beta * math.log1p(max(context_count, 0))
+        ) + (eta * math.log1p(max(accept_count, 0))) + (
+            gamma * math.log1p(max(execute_count, 0))
+        ) + (delta * math.log1p(max(history_count, 0))
         )
 
     @staticmethod
@@ -798,25 +940,30 @@ class CommandVectorDB:
         candidates: List[str],
         global_counts: Dict[str, int],
         context_counts: Dict[str, int],
+        repo_task_counts: Optional[Dict[str, int]] = None,
         execute_counts: Optional[Dict[str, int]] = None,
         history_counts: Optional[Dict[str, int]] = None,
         alpha: float = SCORE_ALPHA,
         beta: float = SCORE_BETA,
+        eta: float = SCORE_ACCEPT,
         gamma: float = SCORE_EXECUTE,
         delta: float = SCORE_HISTORY,
     ) -> List[str]:
+        repo_task_counts = repo_task_counts or {}
         execute_counts = execute_counts or {}
         history_counts = history_counts or {}
         scored = []
         for rank, suffix in enumerate(candidates):
             final_score = CommandVectorDB.blend_rank_score(
                 rank=rank,
+                repo_task_count=repo_task_counts.get(suffix, 0),
                 context_count=context_counts.get(suffix, 0),
                 accept_count=global_counts.get(suffix, 0),
                 execute_count=execute_counts.get(suffix, 0),
                 history_count=history_counts.get(suffix, 0),
                 alpha=alpha,
                 beta=beta,
+                eta=eta,
                 gamma=gamma,
                 delta=delta,
             )
@@ -824,6 +971,40 @@ class CommandVectorDB:
 
         scored.sort(key=lambda item: item[2], reverse=True)
         return [suffix for _, suffix, _ in scored]
+
+    @staticmethod
+    def _apply_repo_tier_order(
+        sorted_entries: List[Tuple[int, str, float]],
+        repo_hit_suffixes: set[str],
+        tier: str,
+    ) -> Tuple[List[str], bool, bool, str]:
+        if not sorted_entries:
+            return ([], False, False, "none")
+
+        repo_entries = [item for item in sorted_entries if item[1] in repo_hit_suffixes]
+        non_repo_entries = [item for item in sorted_entries if item[1] not in repo_hit_suffixes]
+        if not repo_entries:
+            return ([suffix for _, suffix, _ in sorted_entries], False, False, "none")
+
+        enforced_top1 = False
+        enforced_top3 = False
+        strategy = "none"
+        ordered_entries = list(sorted_entries)
+
+        if tier == "HIGH":
+            prefix = (repo_entries + non_repo_entries)[:3]
+            used = {id(item) for item in prefix}
+            remaining = [item for item in sorted_entries if id(item) not in used]
+            ordered_entries = prefix + remaining
+            enforced_top3 = True
+            strategy = "top3_repo_first"
+        elif tier == "MEDIUM":
+            best_repo = repo_entries[0]
+            ordered_entries = [best_repo] + [item for item in sorted_entries if item is not best_repo]
+            enforced_top1 = True
+            strategy = "top1_repo_anchor"
+
+        return ([suffix for _, suffix, _ in ordered_entries], enforced_top1, enforced_top3, strategy)
 
     def _load_model(self) -> SentenceTransformer:
         logger.info(f"Loading embedding model: {self.model_name}")
@@ -1297,7 +1478,7 @@ class CommandVectorDB:
             logger.error(f"Error inserting commands: {exc}")
             return 0
 
-    def insert_command(self, command: str):
+    def insert_command(self, command: str, working_directory: str | None = None):
         normalized = self.normalize_command(command)
         if not normalized:
             return
@@ -1310,7 +1491,17 @@ class CommandVectorDB:
         self._register_commands([normalized])
         if self.state_store is not None:
             try:
-                self.state_store.record_execute(normalized, delta=1)
+                repo_task_pair = None
+                if working_directory:
+                    repo_key = self.resolve_repo_key(working_directory)
+                    task_key = self.extract_task_key(normalized)
+                    if repo_key and task_key:
+                        repo_task_pair = (repo_key, task_key, normalized)
+                self.state_store.record_execute(
+                    normalized,
+                    delta=1,
+                    repo_task_pair=repo_task_pair,
+                )
             except Exception as exc:
                 logger.error(f"Failed to record execute_count in SQLite: {exc}")
             self.insert_commands([normalized])
@@ -2128,7 +2319,12 @@ class CommandVectorDB:
             for item in top
         ][:3]
 
-    def rerank_candidates(self, buffer_context: str, candidates: List[str]) -> List[str]:
+    def rerank_candidates(
+        self,
+        buffer_context: str,
+        candidates: List[str],
+        working_directory: str | None = None,
+    ) -> List[str]:
         if not candidates:
             return []
 
@@ -2147,17 +2343,23 @@ class CommandVectorDB:
             return []
 
         candidates = [suffix for suffix, _ in filtered_pairs]
+        full_command_by_suffix = {suffix: full_command for suffix, full_command in filtered_pairs}
         context_keys = self.extract_context_keys(buffer_context)
         full_commands = [full_command for _, full_command in filtered_pairs]
         command_ids = [self.command_doc_id(command) for command in full_commands]
 
         global_counts: Dict[str, int] = {}
         context_counts: Dict[str, int] = {}
+        repo_accept_counts: Dict[str, int] = {}
+        repo_execute_counts: Dict[str, int] = {}
+        repo_task_counts: Dict[str, int] = {}
         execute_counts: Dict[str, int] = {}
         history_counts: Dict[str, int] = {}
+        repo_key = ""
 
         try:
             if self.state_store is not None:
+                repo_key = self.resolve_repo_key(working_directory or "")
                 stats = self.state_store.get_command_stats(full_commands)
                 for suffix, full_command in filtered_pairs:
                     row = stats.get(full_command, {})
@@ -2167,6 +2369,36 @@ class CommandVectorDB:
                 context_counts = self.state_store.get_feedback_counts(context_keys, candidates)
                 for suffix in candidates:
                     context_counts[suffix] = int(context_counts.get(suffix, 0) or 0)
+                    repo_accept_counts[suffix] = 0
+                    repo_execute_counts[suffix] = 0
+                    repo_task_counts[suffix] = 0
+                if repo_key:
+                    suffixes_by_task: Dict[str, List[str]] = defaultdict(list)
+                    commands_by_task: Dict[str, List[str]] = defaultdict(list)
+                    for suffix, full_command in filtered_pairs:
+                        task_key = self.extract_task_key(full_command)
+                        if task_key:
+                            suffixes_by_task[task_key].append(suffix)
+                            commands_by_task[task_key].append(full_command)
+                            full_command_by_suffix[suffix] = full_command
+                    for task_key, task_suffixes in suffixes_by_task.items():
+                        accept_counts = self.state_store.get_repo_feedback_counts(
+                            repo_key=repo_key,
+                            task_key=task_key,
+                            suffixes=task_suffixes,
+                        )
+                        execute_counts_for_commands = self.state_store.get_repo_execute_feedback_counts(
+                            repo_key=repo_key,
+                            task_key=task_key,
+                            commands=commands_by_task.get(task_key, []),
+                        )
+                        for suffix in task_suffixes:
+                            accept_v = int(accept_counts.get(suffix, 0) or 0)
+                            full_command = full_command_by_suffix.get(suffix, "")
+                            execute_v = int(execute_counts_for_commands.get(full_command, 0) or 0)
+                            repo_accept_counts[suffix] = accept_v
+                            repo_execute_counts[suffix] = execute_v
+                            repo_task_counts[suffix] = accept_v + min(execute_v, self.REPO_EXECUTE_CAP)
             else:
                 with self._io_lock:
                     command_docs = self.collection.fetch(command_ids)
@@ -2183,6 +2415,9 @@ class CommandVectorDB:
 
                     for suffix in candidates:
                         context_counts[suffix] = 0
+                        repo_accept_counts[suffix] = 0
+                        repo_execute_counts[suffix] = 0
+                        repo_task_counts[suffix] = 0
 
                     for context_key in context_keys:
                         stat_ids = [self.context_stat_doc_id(context_key, suffix) for suffix in candidates]
@@ -2192,28 +2427,74 @@ class CommandVectorDB:
                             if doc is not None:
                                 context_counts[suffix] += int(doc.fields.get("accept_count", 0) or 0)
 
-            reranked = self.rerank_suffixes_from_counts(
-                candidates=candidates,
-                global_counts=global_counts,
-                context_counts=context_counts,
-                execute_counts=execute_counts,
-                history_counts=history_counts,
-                alpha=self.SCORE_ALPHA,
-                beta=self.SCORE_BETA,
-                gamma=self.SCORE_EXECUTE,
-                delta=self.SCORE_HISTORY,
+            help_intent = self._has_help_intent(buffer_context)
+            ranked_entries: List[Tuple[int, str, float]] = []
+            for rank, suffix in enumerate(candidates):
+                score = self.blend_rank_score(
+                    rank=rank,
+                    repo_task_count=repo_task_counts.get(suffix, 0),
+                    context_count=context_counts.get(suffix, 0),
+                    accept_count=global_counts.get(suffix, 0),
+                    execute_count=execute_counts.get(suffix, 0),
+                    history_count=history_counts.get(suffix, 0),
+                    alpha=self.SCORE_ALPHA,
+                    beta=self.SCORE_BETA,
+                    eta=self.SCORE_ACCEPT,
+                    gamma=self.SCORE_EXECUTE,
+                    delta=self.SCORE_HISTORY,
+                )
+                full_command = full_command_by_suffix.get(suffix, "")
+                if not help_intent and self._is_help_like_command(full_command):
+                    score -= self.HELP_DAMPENING_PENALTY
+                ranked_entries.append((rank, suffix, score))
+            ranked_entries.sort(key=lambda item: (item[2], -item[0]), reverse=True)
+
+            total_repo_accepts = sum(int(repo_accept_counts.get(suffix, 0) or 0) for suffix in candidates)
+            total_repo_execute_signal = sum(
+                min(int(repo_execute_counts.get(suffix, 0) or 0), self.REPO_EXECUTE_CAP)
+                for suffix in candidates
+            )
+            distinct_repo_suffixes = sum(1 for suffix in candidates if int(repo_task_counts.get(suffix, 0) or 0) > 0)
+            tier = self.repo_confidence_tier(
+                total_repo_accepts,
+                distinct_repo_suffixes,
+                total_repo_execute_signal,
+            )
+            repo_hit_suffixes = {suffix for suffix in candidates if int(repo_task_counts.get(suffix, 0) or 0) > 0}
+            if not self.ENABLE_REPO_CONFIDENCE_TIERS:
+                tier = "LOW"
+            reranked, enforced_top1, enforced_top3, tier_strategy = self._apply_repo_tier_order(
+                ranked_entries,
+                repo_hit_suffixes,
+                tier,
             )
             if (
-                any(context_counts.values())
+                any(repo_task_counts.values())
+                or any(context_counts.values())
                 or any(global_counts.values())
                 or any(execute_counts.values())
                 or any(history_counts.values())
             ):
+                top3 = reranked[:3]
+                repo_top3 = sum(1 for suffix in top3 if suffix in repo_hit_suffixes)
                 preview = ", ".join(
-                    f"{suffix.strip() or '<empty>'}(ctx={context_counts.get(suffix, 0)},acc={global_counts.get(suffix, 0)},exec={execute_counts.get(suffix, 0)},hist={history_counts.get(suffix, 0)})"
+                    f"{suffix.strip() or '<empty>'}(repo={repo_task_counts.get(suffix, 0)},repo_acc={repo_accept_counts.get(suffix, 0)},repo_exec={repo_execute_counts.get(suffix, 0)},ctx={context_counts.get(suffix, 0)},acc={global_counts.get(suffix, 0)},exec={execute_counts.get(suffix, 0)},hist={history_counts.get(suffix, 0)})"
                     for suffix in reranked[:3]
                 )
-                logger.info(f"Feedback rerank for '{self.normalize_command(buffer_context)}': {preview}")
+                logger.debug(
+                    "Feedback rerank for '%s': tier=%s strategy=%s repo_hits=%d repo_accepts=%d distinct_repo=%d top3_repo=%d enforce_top1=%s enforce_top3=%s help_intent=%s %s",
+                    self.normalize_command(buffer_context),
+                    tier,
+                    tier_strategy,
+                    len(repo_hit_suffixes),
+                    total_repo_accepts,
+                    distinct_repo_suffixes,
+                    repo_top3,
+                    enforced_top1,
+                    enforced_top3,
+                    help_intent,
+                    preview,
+                )
             return reranked
         except Exception as exc:
             logger.warning(f"Falling back to vector order; reranking failed: {exc}")
@@ -2328,7 +2609,13 @@ class CommandVectorDB:
             )
         )
 
-    def record_feedback(self, buffer_context: str, accepted_suggestion: str, accept_mode: str = "suffix_append"):
+    def record_feedback(
+        self,
+        buffer_context: str,
+        accepted_suggestion: str,
+        accept_mode: str = "suffix_append",
+        working_directory: str | None = None,
+    ):
         accepted_suggestion = accepted_suggestion or ""
         mode = (accept_mode or "suffix_append").strip().lower()
         if mode == "replace_full":
@@ -2354,12 +2641,22 @@ class CommandVectorDB:
 
         # Store both 1-token and 2-token contexts derived from the finalized command.
         context_keys = self.extract_context_keys(full_command)
+        task_key = self.extract_task_key(full_command)
+        repo_key = self.resolve_repo_key(working_directory or "") if working_directory else ""
         now_ts = int(time.time())
 
         if self.state_store is not None:
             try:
                 pairs = [(context_key, context_payload) for context_key in context_keys if context_key]
-                self.state_store.record_feedback(full_command, pairs, ts=now_ts)
+                repo_task_pairs: List[Tuple[str, str, str]] = []
+                if repo_key and task_key and context_payload:
+                    repo_task_pairs.append((repo_key, task_key, context_payload))
+                self.state_store.record_feedback(
+                    full_command,
+                    pairs,
+                    repo_task_pairs=repo_task_pairs,
+                    ts=now_ts,
+                )
                 self.insert_commands([full_command])
                 return
             except Exception as exc:

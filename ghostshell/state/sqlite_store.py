@@ -54,6 +54,24 @@ class SQLiteStateStore:
                     PRIMARY KEY (context_key, suggestion_suffix)
                 );
 
+                CREATE TABLE IF NOT EXISTS repo_feedback_context (
+                    repo_key TEXT NOT NULL,
+                    task_key TEXT NOT NULL,
+                    suggestion_suffix TEXT NOT NULL,
+                    accept_count INTEGER NOT NULL DEFAULT 0,
+                    last_accepted_at INTEGER NOT NULL DEFAULT 0,
+                    PRIMARY KEY (repo_key, task_key, suggestion_suffix)
+                );
+
+                CREATE TABLE IF NOT EXISTS repo_feedback_execute_context (
+                    repo_key TEXT NOT NULL,
+                    task_key TEXT NOT NULL,
+                    suggestion_suffix TEXT NOT NULL,
+                    execute_count INTEGER NOT NULL DEFAULT 0,
+                    last_executed_at INTEGER NOT NULL DEFAULT 0,
+                    PRIMARY KEY (repo_key, task_key, suggestion_suffix)
+                );
+
                 CREATE TABLE IF NOT EXISTS removed_commands (
                     command TEXT PRIMARY KEY,
                     removed_at INTEGER NOT NULL
@@ -203,6 +221,40 @@ class SQLiteStateStore:
                         """,
                         (context_key, suffix, delta, ts),
                     )
+            elif scope == "repo_context":
+                repo_key = str(event.get("repo_key", "") or "").strip()
+                task_key = str(event.get("task_key", "") or "").strip()
+                suffix = str(event.get("suggestion_suffix", "") or "")
+                if repo_key and task_key and suffix:
+                    delta = max(1, int(event.get("delta", 1) or 1))
+                    conn.execute(
+                        """
+                        INSERT INTO repo_feedback_context(repo_key, task_key, suggestion_suffix, accept_count, last_accepted_at)
+                        VALUES(?, ?, ?, ?, ?)
+                        ON CONFLICT(repo_key, task_key, suggestion_suffix)
+                        DO UPDATE SET
+                            accept_count = repo_feedback_context.accept_count + excluded.accept_count,
+                            last_accepted_at = MAX(repo_feedback_context.last_accepted_at, excluded.last_accepted_at)
+                        """,
+                        (repo_key, task_key, suffix, delta, ts),
+                    )
+            elif scope == "repo_context_execute":
+                repo_key = str(event.get("repo_key", "") or "").strip()
+                task_key = str(event.get("task_key", "") or "").strip()
+                suffix = str(event.get("suggestion_suffix", "") or "")
+                if repo_key and task_key and suffix:
+                    delta = max(1, int(event.get("delta", 1) or 1))
+                    conn.execute(
+                        """
+                        INSERT INTO repo_feedback_execute_context(repo_key, task_key, suggestion_suffix, execute_count, last_executed_at)
+                        VALUES(?, ?, ?, ?, ?)
+                        ON CONFLICT(repo_key, task_key, suggestion_suffix)
+                        DO UPDATE SET
+                            execute_count = repo_feedback_execute_context.execute_count + excluded.execute_count,
+                            last_executed_at = MAX(repo_feedback_execute_context.last_executed_at, excluded.last_executed_at)
+                        """,
+                        (repo_key, task_key, suffix, delta, ts),
+                    )
         elif etype == "history_upsert":
             if command:
                 delta = max(1, int(event.get("delta", 1) or 1))
@@ -306,22 +358,48 @@ class SQLiteStateStore:
             events.append({"type": "manual_add", "command": normalized, "ts": ts})
         return self.apply_events(events, append_to_journal=True)
 
-    def record_execute(self, command: str, delta: int = 1, ts: Optional[int] = None) -> bool:
+    def record_execute(
+        self,
+        command: str,
+        delta: int = 1,
+        ts: Optional[int] = None,
+        repo_task_pair: Optional[Tuple[str, str, str]] = None,
+    ) -> bool:
         normalized = self._clean_command(command)
         if not normalized:
             return False
-        event = {
-            "type": "command_execute",
-            "command": normalized,
-            "delta": max(1, int(delta or 1)),
-            "ts": int(ts or time.time()),
-        }
-        return self.apply_event(event, append_to_journal=True)
+        now_ts = int(ts or time.time())
+        events: List[Dict[str, object]] = [
+            {
+                "type": "command_execute",
+                "command": normalized,
+                "delta": max(1, int(delta or 1)),
+                "ts": now_ts,
+            }
+        ]
+        if repo_task_pair is not None:
+            rk = str(repo_task_pair[0] or "").strip()
+            tk = str(repo_task_pair[1] or "").strip()
+            sf = str(repo_task_pair[2] or "")
+            if rk and tk and sf:
+                events.append(
+                    {
+                        "type": "feedback_accept",
+                        "scope": "repo_context_execute",
+                        "repo_key": rk,
+                        "task_key": tk,
+                        "suggestion_suffix": sf,
+                        "delta": max(1, int(delta or 1)),
+                        "ts": now_ts,
+                    }
+                )
+        return self.apply_events(events, append_to_journal=True) > 0
 
     def record_feedback(
         self,
         command: str,
         context_pairs: List[Tuple[str, str]],
+        repo_task_pairs: Optional[List[Tuple[str, str, str]]] = None,
         ts: Optional[int] = None,
     ) -> int:
         normalized = self._clean_command(command)
@@ -347,6 +425,23 @@ class SQLiteStateStore:
                     "type": "feedback_accept",
                     "scope": "context",
                     "context_key": ck,
+                    "suggestion_suffix": sf,
+                    "delta": 1,
+                    "ts": now_ts,
+                }
+            )
+        for repo_key, task_key, suffix in (repo_task_pairs or []):
+            rk = str(repo_key or "").strip()
+            tk = str(task_key or "").strip()
+            sf = str(suffix or "")
+            if not rk or not tk or not sf:
+                continue
+            events.append(
+                {
+                    "type": "feedback_accept",
+                    "scope": "repo_context",
+                    "repo_key": rk,
+                    "task_key": tk,
                     "suggestion_suffix": sf,
                     "delta": 1,
                     "ts": now_ts,
@@ -430,6 +525,68 @@ class SQLiteStateStore:
                     out[suffix] = int(row["total"] or 0)
         return out
 
+    def get_repo_feedback_counts(
+        self,
+        repo_key: str,
+        task_key: str,
+        suffixes: List[str],
+    ) -> Dict[str, int]:
+        rk = str(repo_key or "").strip()
+        tk = str(task_key or "").strip()
+        suff = [str(x or "") for x in suffixes if str(x or "") != ""]
+        if not rk or not tk or not suff:
+            return {suffix: 0 for suffix in suff}
+        out = {suffix: 0 for suffix in suff}
+        with self._lock, self._conn() as conn:
+            suffix_placeholders = ",".join("?" for _ in suff)
+            rows = conn.execute(
+                f"""
+                SELECT suggestion_suffix, SUM(accept_count) AS total
+                FROM repo_feedback_context
+                WHERE repo_key = ?
+                  AND task_key = ?
+                  AND suggestion_suffix IN ({suffix_placeholders})
+                GROUP BY suggestion_suffix
+                """,
+                tuple([rk, tk] + suff),
+            ).fetchall()
+            for row in rows:
+                suffix = str(row["suggestion_suffix"] or "")
+                if suffix:
+                    out[suffix] = int(row["total"] or 0)
+        return out
+
+    def get_repo_execute_feedback_counts(
+        self,
+        repo_key: str,
+        task_key: str,
+        commands: List[str],
+    ) -> Dict[str, int]:
+        rk = str(repo_key or "").strip()
+        tk = str(task_key or "").strip()
+        cmds = [str(x or "") for x in commands if str(x or "") != ""]
+        if not rk or not tk or not cmds:
+            return {command: 0 for command in cmds}
+        out = {command: 0 for command in cmds}
+        with self._lock, self._conn() as conn:
+            command_placeholders = ",".join("?" for _ in cmds)
+            rows = conn.execute(
+                f"""
+                SELECT suggestion_suffix, SUM(execute_count) AS total
+                FROM repo_feedback_execute_context
+                WHERE repo_key = ?
+                  AND task_key = ?
+                  AND suggestion_suffix IN ({command_placeholders})
+                GROUP BY suggestion_suffix
+                """,
+                tuple([rk, tk] + cmds),
+            ).fetchall()
+            for row in rows:
+                command = str(row["suggestion_suffix"] or "")
+                if command:
+                    out[command] = int(row["total"] or 0)
+        return out
+
     def list_all_commands(self, include_removed: bool = False) -> List[str]:
         with self._lock, self._conn() as conn:
             if include_removed:
@@ -500,6 +657,10 @@ class SQLiteStateStore:
         with self._lock, self._conn() as conn:
             commands = [dict(row) for row in conn.execute("SELECT * FROM commands").fetchall()]
             feedback = [dict(row) for row in conn.execute("SELECT * FROM feedback_context").fetchall()]
+            repo_feedback = [dict(row) for row in conn.execute("SELECT * FROM repo_feedback_context").fetchall()]
+            repo_execute_feedback = [
+                dict(row) for row in conn.execute("SELECT * FROM repo_feedback_execute_context").fetchall()
+            ]
             removed = [dict(row) for row in conn.execute("SELECT * FROM removed_commands").fetchall()]
             history = [dict(row) for row in conn.execute("SELECT * FROM history_index_state").fetchall()]
             meta = [dict(row) for row in conn.execute("SELECT * FROM meta").fetchall()]
@@ -509,6 +670,8 @@ class SQLiteStateStore:
             "exported_at": int(time.time()),
             "commands": commands,
             "feedback_context": feedback,
+            "repo_feedback_context": repo_feedback,
+            "repo_feedback_execute_context": repo_execute_feedback,
             "removed_commands": removed,
             "history_index_state": history,
             "meta": meta,
@@ -521,6 +684,8 @@ class SQLiteStateStore:
 
         commands = payload.get("commands", [])
         feedback = payload.get("feedback_context", [])
+        repo_feedback = payload.get("repo_feedback_context", [])
+        repo_execute_feedback = payload.get("repo_feedback_execute_context", [])
         removed = payload.get("removed_commands", [])
         history = payload.get("history_index_state", [])
         meta = payload.get("meta", [])
@@ -583,6 +748,60 @@ class SQLiteStateStore:
                             suffix,
                             int(row.get("accept_count", 0) or 0),
                             int(row.get("last_accepted_at", 0) or 0),
+                        ),
+                    )
+                    feedback_imported += 1
+
+                for row in repo_feedback if isinstance(repo_feedback, list) else []:
+                    if not isinstance(row, dict):
+                        continue
+                    repo_key = str(row.get("repo_key", "") or "").strip()
+                    task_key = str(row.get("task_key", "") or "").strip()
+                    suffix = str(row.get("suggestion_suffix", "") or "").strip()
+                    if not repo_key or not task_key or not suffix:
+                        continue
+                    conn.execute(
+                        """
+                        INSERT INTO repo_feedback_context(repo_key, task_key, suggestion_suffix, accept_count, last_accepted_at)
+                        VALUES(?, ?, ?, ?, ?)
+                        ON CONFLICT(repo_key, task_key, suggestion_suffix)
+                        DO UPDATE SET
+                            accept_count = MAX(repo_feedback_context.accept_count, excluded.accept_count),
+                            last_accepted_at = MAX(repo_feedback_context.last_accepted_at, excluded.last_accepted_at)
+                        """,
+                        (
+                            repo_key,
+                            task_key,
+                            suffix,
+                            int(row.get("accept_count", 0) or 0),
+                            int(row.get("last_accepted_at", 0) or 0),
+                        ),
+                    )
+                    feedback_imported += 1
+
+                for row in repo_execute_feedback if isinstance(repo_execute_feedback, list) else []:
+                    if not isinstance(row, dict):
+                        continue
+                    repo_key = str(row.get("repo_key", "") or "").strip()
+                    task_key = str(row.get("task_key", "") or "").strip()
+                    suffix = str(row.get("suggestion_suffix", "") or "").strip()
+                    if not repo_key or not task_key or not suffix:
+                        continue
+                    conn.execute(
+                        """
+                        INSERT INTO repo_feedback_execute_context(repo_key, task_key, suggestion_suffix, execute_count, last_executed_at)
+                        VALUES(?, ?, ?, ?, ?)
+                        ON CONFLICT(repo_key, task_key, suggestion_suffix)
+                        DO UPDATE SET
+                            execute_count = MAX(repo_feedback_execute_context.execute_count, excluded.execute_count),
+                            last_executed_at = MAX(repo_feedback_execute_context.last_executed_at, excluded.last_executed_at)
+                        """,
+                        (
+                            repo_key,
+                            task_key,
+                            suffix,
+                            int(row.get("execute_count", 0) or 0),
+                            int(row.get("last_executed_at", 0) or 0),
                         ),
                     )
                     feedback_imported += 1

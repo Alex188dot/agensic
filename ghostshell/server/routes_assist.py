@@ -46,6 +46,7 @@ def log_feedback(fb: Feedback, background_tasks: BackgroundTasks) -> GenericStat
             fb.command_buffer,
             fb.accepted_suggestion,
             fb.accept_mode,
+            fb.working_directory,
         )
         return {"status": "ok"}
     finally:

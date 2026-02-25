@@ -32,6 +32,7 @@ class Feedback(BaseModel):
     command_buffer: str
     accepted_suggestion: str
     accept_mode: str = "suffix_append"
+    working_directory: str | None = Field(default=None, max_length=2048)
 
 
 class CommandStorePayload(BaseModel):
