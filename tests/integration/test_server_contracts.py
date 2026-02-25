@@ -91,6 +91,44 @@ class ServerContractTests(unittest.TestCase):
             self.assertIn("pool_meta", body)
             self.assertIn("bootstrap", body)
 
+    def test_predict_history_only_forces_no_ai(self):
+        observed_allow_ai: list[bool] = []
+
+        async def _fake_get_suggestions(config, req_context, allow_ai=True):
+            observed_allow_ai.append(bool(allow_ai))
+            return (
+                [" status", "", ""],
+                [" status"] + [""] * 19,
+                [{"display_text": " status", "accept_text": " status", "accept_mode": "suffix_append", "kind": "normal"}],
+                False,
+            )
+
+        with patch.object(deps, "load_config", return_value={"provider": "history_only"}), patch.object(
+            deps,
+            "check_and_track_llm_rate_limit",
+        ) as rate_limit, patch.object(
+            deps.engine,
+            "get_suggestions",
+            side_effect=_fake_get_suggestions,
+        ), patch.object(
+            deps.engine,
+            "get_bootstrap_status",
+            return_value={"ready": True, "phase": "ready"},
+        ):
+            response = self.client.post(
+                "/predict",
+                json={
+                    "command_buffer": "git",
+                    "cursor_position": 3,
+                    "working_directory": "/tmp",
+                    "shell": "zsh",
+                    "allow_ai": True,
+                },
+            )
+            self.assertEqual(response.status_code, 200)
+            self.assertEqual(observed_allow_ai, [False])
+            self.assertFalse(rate_limit.called)
+
     def test_intent_and_assist_contracts(self):
         async def _fake_intent(config, req_context, text):
             return {
@@ -130,6 +168,51 @@ class ServerContractTests(unittest.TestCase):
             )
             self.assertEqual(assist_response.status_code, 200)
             self.assertIn("answer", assist_response.json())
+
+    def test_intent_history_only_returns_refusal_without_llm(self):
+        with patch.object(deps, "load_config", return_value={"provider": "history_only"}), patch.object(
+            deps,
+            "check_and_track_llm_rate_limit",
+        ) as rate_limit, patch.object(
+            deps.engine,
+            "get_intent_command",
+        ) as intent_llm:
+            response = self.client.post(
+                "/intent",
+                json={
+                    "intent_text": "list files",
+                    "working_directory": "/tmp",
+                    "shell": "zsh",
+                },
+            )
+            self.assertEqual(response.status_code, 200)
+            body = response.json()
+            self.assertEqual(body.get("status"), "refusal")
+            self.assertIn("AI is disabled", body.get("explanation", ""))
+            self.assertFalse(rate_limit.called)
+            self.assertFalse(intent_llm.called)
+
+    def test_assist_history_only_returns_message_without_llm(self):
+        with patch.object(deps, "load_config", return_value={"provider": "history_only"}), patch.object(
+            deps,
+            "check_and_track_llm_rate_limit",
+        ) as rate_limit, patch.object(
+            deps.engine,
+            "get_general_assistant_reply",
+        ) as assist_llm:
+            response = self.client.post(
+                "/assist",
+                json={
+                    "prompt_text": "hi",
+                    "working_directory": "/tmp",
+                    "shell": "zsh",
+                },
+            )
+            self.assertEqual(response.status_code, 200)
+            body = response.json()
+            self.assertIn("AI is disabled", body.get("answer", ""))
+            self.assertFalse(rate_limit.called)
+            self.assertFalse(assist_llm.called)
 
     def test_assist_rate_limit_response(self):
         with patch.object(deps, "check_and_track_llm_rate_limit", return_value=(False, 120, 120)):

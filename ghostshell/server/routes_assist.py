@@ -11,6 +11,11 @@ async def resolve_assist(ctx: AssistContext, request: Request) -> AssistResponse
     deps.enter_request_or_503()
     try:
         config = deps.load_config()
+        provider = str(config.get("provider", "openai") or "openai").strip().lower()
+        if provider == "history_only":
+            return {
+                "answer": "AI is disabled in current provider mode. Switch provider to use '##' assistant mode."
+            }
         client_id = deps.get_client_id(request)
         allowed, used, limit = deps.check_and_track_llm_rate_limit(config, client_id)
         if not allowed:

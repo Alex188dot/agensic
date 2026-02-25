@@ -22,6 +22,45 @@ from .context import RequestContext, Settings, SystemInventory
 
 logger = logging.getLogger("ghostshell.engine")
 
+_PROVIDER_PREFIXES: dict[str, str] = {
+    "ollama": "ollama/",
+    "lm_studio": "lm_studio/",
+    "gemini": "gemini/",
+    "dashscope": "dashscope/",
+    "minimax": "minimax/",
+    "deepseek": "deepseek/",
+    "moonshot": "moonshot/",
+    "mistral": "mistral/",
+    "openrouter": "openrouter/",
+    "xiaomi_mimo": "xiaomi_mimo/",
+    "zai": "zai/",
+    "sagemaker": "sagemaker/",
+}
+
+_PROVIDER_DEFAULT_BASE_URLS: dict[str, str] = {
+    "ollama": "http://localhost:11434",
+    "lm_studio": "http://localhost:1234/v1",
+    "dashscope": "https://dashscope-intl.aliyuncs.com/compatible-mode/v1",
+    "minimax": "https://api.minimax.io/anthropic/v1/messages",
+    "moonshot": "https://api.moonshot.ai/v1",
+    "openrouter": "https://openrouter.ai/api/v1",
+}
+
+_PROVIDER_ENV_API_KEYS: dict[str, str] = {
+    "groq": "GROQ_API_KEY",
+    "openai": "OPENAI_API_KEY",
+    "anthropic": "ANTHROPIC_API_KEY",
+    "gemini": "GEMINI_API_KEY",
+    "dashscope": "DASHSCOPE_API_KEY",
+    "minimax": "MINIMAX_API_KEY",
+    "deepseek": "DEEPSEEK_API_KEY",
+    "moonshot": "MOONSHOT_API_KEY",
+    "mistral": "MISTRAL_API_KEY",
+    "openrouter": "OPENROUTER_API_KEY",
+    "xiaomi_mimo": "XIAOMI_MIMO_API_KEY",
+    "zai": "ZAI_API_KEY",
+}
+
 class SuggestionEngine:
     def __init__(self):
         self.inventory = self._get_simple_inventory()
@@ -811,26 +850,20 @@ class SuggestionEngine:
         if provider == "groq":
             if not model.startswith("groq/") and not model.startswith("groq/openai/"):
                 model = f"groq/{model}"
-        elif provider == "ollama":
-            if not model.startswith("ollama/"):
-                model = f"ollama/{model}"
-            if not base_url:
-                base_url = "http://localhost:11434"
-        elif provider == "lm_studio":
-            if not model.startswith("lm_studio/"):
-                model = f"lm_studio/{model}"
-            if not base_url:
-                base_url = "http://localhost:1234/v1"
         elif provider == "anthropic":
             if not model.startswith("claude"):
                 model = "claude-3-5-sonnet-20241022"
-        elif provider == "gemini":
-            if not model.startswith("gemini/"):
-                model = f"gemini/{model}"
         elif provider == "custom":
             # OpenAI-compatible custom endpoints typically use openai/<model>.
             if "/" not in model:
                 model = f"openai/{model}"
+        else:
+            prefix = _PROVIDER_PREFIXES.get(provider)
+            if prefix and not model.startswith(prefix):
+                model = f"{prefix}{model}"
+
+        if not base_url:
+            base_url = _PROVIDER_DEFAULT_BASE_URLS.get(provider, base_url)
 
         kwargs = {
             "model": model,
@@ -841,15 +874,10 @@ class SuggestionEngine:
             kwargs["response_format"] = {"type": "json_object"}
 
         if api_key:
-            if provider == "groq":
-                os.environ["GROQ_API_KEY"] = str(api_key)
-            elif provider == "openai":
-                os.environ["OPENAI_API_KEY"] = str(api_key)
-            elif provider == "anthropic":
-                os.environ["ANTHROPIC_API_KEY"] = str(api_key)
-            elif provider == "gemini":
-                os.environ["GEMINI_API_KEY"] = str(api_key)
-            else:
+            env_key = _PROVIDER_ENV_API_KEYS.get(provider)
+            if env_key:
+                os.environ[env_key] = str(api_key)
+            if provider not in {"openai", "groq", "anthropic", "gemini"}:
                 kwargs["api_key"] = api_key
 
         if base_url:
@@ -1078,6 +1106,10 @@ class SuggestionEngine:
             while len(pool) < size:
                 pool.append("")
             return pool
+
+        provider = str(config.get("provider", "openai") or "openai").strip().lower()
+        if provider == "history_only":
+            allow_ai = False
 
         # Get vector-based candidates (up to 20)
         vector_candidates = self._get_vector_candidates(ctx)

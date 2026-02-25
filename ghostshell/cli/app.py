@@ -427,22 +427,72 @@ def _enable_pattern_in_config(config: dict, raw_pattern: str) -> tuple[dict, boo
     changed = len(filtered) != len(patterns)
     return (_with_disabled_patterns(config, filtered), changed)
 
+_PROVIDER_SETUP_CHOICES: list[tuple[str, str]] = [
+    ("anthropic", "Anthropic"),
+    ("sagemaker", "AWS Sagemaker"),
+    ("azure", "Azure"),
+    ("custom", "Custom model"),
+    ("dashscope", "DashScope (Qwen)"),
+    ("deepseek", "DeepSeek"),
+    ("gemini", "Gemini"),
+    ("groq", "Groq"),
+    ("lm_studio", "LM Studio"),
+    ("minimax", "MiniMax"),
+    ("mistral", "Mistral"),
+    ("moonshot", "Moonshot"),
+    ("openai", "OpenAI"),
+    ("openrouter", "OpenRouter"),
+    ("ollama", "Ollama"),
+    ("xiaomi_mimo", "Xiaomi MiMo"),
+    ("zai", "Z.AI (Zhipu AI)"),
+    ("history_only", "use without AI (will just use your history)"),
+]
+
+_PROVIDER_DEFAULT_MODELS: dict[str, str] = {
+    "openai": "gpt-5-mini",
+    "groq": "openai/gpt-oss-20b",
+    "ollama": "sam860/LFM2:1.2b",
+    "lm_studio": "qwen/qwen3-4b",
+    "custom": "your-custom-model-name",
+    "gemini": "gemini-3-flash-preview",
+    "anthropic": "claude-3-7-sonnet-20250219",
+    "azure": "gpt-5-mini",
+    "dashscope": "dashscope/qwen-turbo",
+    "minimax": "minimax/MiniMax-M2.1",
+    "deepseek": "deepseek/deepseek-chat",
+    "moonshot": "moonshot/moonshot-v1-8k",
+    "mistral": "mistral/mistral-small-latest",
+    "openrouter": "openrouter/openai/gpt-4o-mini",
+    "xiaomi_mimo": "xiaomi_mimo/mimo-v2-flash",
+    "zai": "zai/glm-4.7",
+    "sagemaker": "sagemaker/<your-endpoint-name>",
+    "history_only": "history-only",
+}
+
+_PROVIDER_DEFAULT_BASE_URLS: dict[str, str] = {
+    "ollama": "http://localhost:11434",
+    "lm_studio": "http://localhost:1234/v1",
+    "custom": "https://api.openai.com/v1",
+    "dashscope": "https://dashscope-intl.aliyuncs.com/compatible-mode/v1",
+    "minimax": "https://api.minimax.io/anthropic/v1/messages",
+    "moonshot": "https://api.moonshot.ai/v1",
+    "openrouter": "https://openrouter.ai/api/v1",
+}
+
+_PROVIDER_OPTIONAL_API_KEY_PROMPT: set[str] = {"ollama", "lm_studio", "sagemaker"}
+
+
+def _provider_labels_to_id() -> dict[str, str]:
+    return {label: provider_id for provider_id, label in _PROVIDER_SETUP_CHOICES}
+
+
+def _provider_id_to_label() -> dict[str, str]:
+    return {provider_id: label for provider_id, label in _PROVIDER_SETUP_CHOICES}
+
+
 def _default_model_for_provider(provider: str) -> str:
-    if provider == "groq":
-        return "openai/gpt-oss-20b"
-    if provider == "ollama":
-        return "sam860/LFM2:1.2b"
-    if provider == "lm_studio":
-        return "qwen/qwen3-4b"
-    if provider == "custom":
-        return "your-custom-model-name"
-    if provider == "gemini":
-        return "gemini-3-flash-preview"
-    if provider == "anthropic":
-        return "claude-3-7-sonnet-20250219"
-    if provider == "azure":
-        return "gpt-5-mini"
-    return "gpt-5-mini"
+    normalized = str(provider or "").strip().lower()
+    return _PROVIDER_DEFAULT_MODELS.get(normalized, "gpt-5-mini")
 
 def _manage_pattern_controls(existing_config: dict):
     _print_screen_heading("Manage GhostShell command patterns")
@@ -508,17 +558,32 @@ def _configure_provider(existing_config: dict) -> bool:
 
     while True:
         if step == 0:
-            provider = _setup_select(
+            selected_provider = _setup_select(
                 "Select Provider:",
-                choices=["openai", "groq", "ollama", "lm_studio", "custom", "gemini", "anthropic", "azure"],
+                choices=[label for _, label in _PROVIDER_SETUP_CHOICES],
             )
-            if _is_back(provider) or not provider:
+            if _is_back(selected_provider) or not selected_provider:
                 return False
+            provider = _provider_labels_to_id().get(str(selected_provider), str(selected_provider))
+            if provider == "history_only":
+                model = _default_model_for_provider(provider)
+                api_key = ""
+                base_url = ""
+                headers_raw = ""
+                timeout_raw = ""
+                api_version = ""
+                extra_body_raw = ""
+                step = 5
+                continue
             step = 1
             continue
 
         if step == 1:
-            default_model = str(config.get("model") or _default_model_for_provider(provider))
+            current_provider = str(config.get("provider", "") or "").strip().lower()
+            if current_provider == provider and str(config.get("model", "") or "").strip():
+                default_model = str(config.get("model"))
+            else:
+                default_model = _default_model_for_provider(provider)
             model_value = _setup_text(
                 "Enter Model Name:",
                 default=default_model,
@@ -533,21 +598,9 @@ def _configure_provider(existing_config: dict) -> bool:
             continue
 
         if step == 2:
-            if provider == "lm_studio":
-                wants_api_key = _setup_confirm("Set an API key for LM Studio?", default=False)
-                if _is_back(wants_api_key):
-                    step = 1
-                    continue
-                if wants_api_key:
-                    value = _setup_password("Enter API Key:")
-                    if _is_back(value):
-                        step = 1
-                        continue
-                    api_key = value or ""
-                else:
-                    api_key = ""
-            elif provider == "ollama":
-                wants_api_key = _setup_confirm("Set an API key for Ollama?", default=False)
+            if provider in _PROVIDER_OPTIONAL_API_KEY_PROMPT:
+                provider_label = _provider_id_to_label().get(provider, provider)
+                wants_api_key = _setup_confirm(f"Set an API key for {provider_label}?", default=False)
                 if _is_back(wants_api_key):
                     step = 1
                     continue
@@ -560,7 +613,7 @@ def _configure_provider(existing_config: dict) -> bool:
                 else:
                     api_key = ""
             else:
-                value = _setup_password("Enter API Key (leave blank if not required):")
+                value = _setup_password("Enter API Key:")
                 if _is_back(value):
                     step = 1
                     continue
@@ -569,13 +622,8 @@ def _configure_provider(existing_config: dict) -> bool:
             continue
 
         if step == 3:
-            if provider in ["ollama", "lm_studio", "custom"]:
-                if provider == "ollama":
-                    default_url = "http://localhost:11434"
-                elif provider == "lm_studio":
-                    default_url = "http://localhost:1234/v1"
-                else:
-                    default_url = "https://api.openai.com/v1"
+            default_url = _PROVIDER_DEFAULT_BASE_URLS.get(provider, "")
+            if default_url:
                 value = _setup_text("Enter Base URL:", default=default_url)
                 if _is_back(value):
                     step = 2
@@ -664,9 +712,16 @@ def _configure_provider(existing_config: dict) -> bool:
                 config.pop("api_version", None)
                 config.pop("extra_body", None)
 
+            if provider == "history_only":
+                config["api_key"] = ""
+                config["base_url"] = ""
+                config["model"] = "history-only"
+                config["llm_calls_per_line"] = 0
+                config["llm_budget_unlimited"] = False
+
             _save_config(config)
             console.print("[green]✓ Configuration saved![/green]")
-            console.print(f"[dim]Provider: {provider}, Model: {model}[/dim]")
+            console.print(f"Provider: {provider}, Model: {model}", style="dim", highlight=False)
             step = 6
             continue
 

@@ -220,6 +220,25 @@ Custom OpenAI-compatible endpoint example:
 - **LM Studio**
 - **Custom (OpenAI-compatible endpoint)**
 - **Gemini**
+- **DashScope (Qwen)**: use `model=dashscope/<model>`
+- **MiniMax**: use `model=minimax/<model>`
+- **DeepSeek**: use `model=deepseek/<model>`
+- **Moonshot AI**: use `model=moonshot/<model>`
+- **Mistral**: use `model=mistral/<model>`
+- **OpenRouter**: use `model=openrouter/<model>`
+- **Xiaomi MiMo**: use `model=xiaomi_mimo/<model>`
+- **Z.AI (Zhipu AI)**: use `model=zai/<model>`
+- **AWS SageMaker**: use `model=sagemaker/<endpoint-or-model>`
+- **Use without AI (history only)**: setup option `use without AI (will just use your history)`
+
+Provider notes:
+- For DashScope, MiniMax, Moonshot, and OpenRouter, setup pre-fills a default base URL (editable).
+- AWS SageMaker uses AWS credentials from env:
+  - `AWS_ACCESS_KEY_ID`
+  - `AWS_SECRET_ACCESS_KEY`
+  - `AWS_REGION_NAME`
+- Qwen on Alibaba Cloud is supported through DashScope with `dashscope/` model prefix.
+- All providers above are prefix-based: any provider model is accepted if it uses the correct prefix.
 
 ### Reasoning Controls
 
@@ -257,6 +276,10 @@ GhostShell supports two explicit NL modes:
   - Use this for any general question, not just terminal topics.
   - On `Enter`: GhostShell prints the assistant text reply and does **not** execute any command.
   - `Tab` keeps default terminal completion behavior.
+
+When provider is set to `use without AI (will just use your history)`:
+- LLM fallback is disabled for autocomplete.
+- `#` and `##` modes are disabled and return an AI-disabled message.
 
 Examples:
 

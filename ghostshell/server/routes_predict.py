@@ -19,7 +19,9 @@ async def predict_completion(ctx: Context, request: Request) -> PredictResponse:
             }
 
         config = deps.load_config()
-        if ctx.allow_ai:
+        provider = str(config.get("provider", "openai") or "openai").strip().lower()
+        effective_allow_ai = bool(ctx.allow_ai and provider != "history_only")
+        if effective_allow_ai:
             client_id = deps.get_client_id(request)
             allowed, used, limit = deps.check_and_track_llm_rate_limit(config, client_id)
             if not allowed:
@@ -37,7 +39,7 @@ async def predict_completion(ctx: Context, request: Request) -> PredictResponse:
         suggestions, pool, pool_meta, used_ai = await deps.engine.get_suggestions(
             config,
             req_context,
-            allow_ai=ctx.allow_ai,
+            allow_ai=effective_allow_ai,
         )
         bootstrap = deps.engine.get_bootstrap_status()
 
@@ -59,7 +61,7 @@ async def predict_completion(ctx: Context, request: Request) -> PredictResponse:
         deps.logger.debug(
             "Req[%s] allow_ai=%s used_ai=%s suggestions=%s buffer='%s' redactions=%d",
             source,
-            ctx.allow_ai,
+            effective_allow_ai,
             used_ai,
             display_pool_count,
             deps.privacy_guard.sanitize_for_log(sanitized_buffer.text),

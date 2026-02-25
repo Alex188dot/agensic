@@ -11,6 +11,15 @@ async def resolve_intent(ctx: IntentContext, request: Request) -> IntentResponse
     deps.enter_request_or_503()
     try:
         config = deps.load_config()
+        provider = str(config.get("provider", "openai") or "openai").strip().lower()
+        if provider == "history_only":
+            return {
+                "status": "refusal",
+                "primary_command": "",
+                "explanation": "AI is disabled in current provider mode. Switch provider to use '#' intent mode.",
+                "alternatives": [],
+                "copy_block": "",
+            }
         client_id = deps.get_client_id(request)
         allowed, used, limit = deps.check_and_track_llm_rate_limit(config, client_id)
         if not allowed:
