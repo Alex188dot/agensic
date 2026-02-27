@@ -1,5 +1,4 @@
 from fastapi import APIRouter, HTTPException
-
 from ghostshell.server import deps
 from ghostshell.server.schemas import (
     GenericStatusResponse,

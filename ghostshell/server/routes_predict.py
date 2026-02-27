@@ -1,5 +1,4 @@
 from fastapi import APIRouter, HTTPException, Request
-
 from ghostshell.server import deps
 from ghostshell.server.schemas import Context, PredictResponse
 

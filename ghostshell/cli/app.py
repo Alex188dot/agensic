@@ -27,7 +27,6 @@ from questionary.styles import merge_styles_default
 from questionary import utils
 from ghostshell.version import __version__
 from ghostshell.config.loader import (
-    DEFAULT_LLM_CALLS_PER_LINE,
     MAX_LLM_CALLS_PER_LINE,
     load_config_file,
     normalize_config_payload,

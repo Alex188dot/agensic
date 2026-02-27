@@ -1,7 +1,5 @@
 import os
-
 from fastapi import APIRouter, BackgroundTasks
-
 from ghostshell.server import deps
 from ghostshell.server.schemas import (
     CommandStoreAddResponse,

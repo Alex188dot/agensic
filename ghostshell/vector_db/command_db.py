@@ -12,7 +12,6 @@ import time
 from collections import defaultdict
 from pathlib import Path
 from typing import Dict, List, Optional, Tuple
-
 import transformers
 import zvec
 from rapidfuzz import fuzz

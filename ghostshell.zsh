@@ -1117,16 +1117,16 @@ _ghostshell_has_visible_suggestion() {
 }
 
 # ======================================================
-# 2. PAUSE DETECTION (0.2s timer)
+# 2. PAUSE DETECTION (0.15s timer)
 # ======================================================
 
 _ghostshell_start_timer() {
     # Kill existing timer if any
     _ghostshell_stop_timer
     
-    # Start a background timer that triggers after 0.2s
+    # Start a background timer that triggers after 0.15s
     (
-        sleep 0.2
+        sleep 0.15
         # Signal the main shell to fetch suggestions
         kill -USR1 $$ 2>/dev/null
     ) &!
@@ -1141,7 +1141,7 @@ _ghostshell_stop_timer() {
 }
 
 _ghostshell_on_timer_trigger() {
-    # This is called when the 0.2s timer expires
+    # This is called when the 0.15s timer expires
     GHOSTSHELL_TIMER_PID=""
 
     if _ghostshell_buffer_has_hash; then

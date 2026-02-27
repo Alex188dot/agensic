@@ -6,7 +6,6 @@ import time
 import uuid
 from contextlib import contextmanager
 from typing import Dict, Iterable, List, Optional, Tuple
-
 from .journal import EventJournal
 from .snapshot import SnapshotManager
 
