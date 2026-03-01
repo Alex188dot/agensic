@@ -3,6 +3,7 @@ import hmac
 import json
 import os
 import secrets
+import socket
 import stat
 import subprocess
 import time
@@ -153,6 +154,36 @@ def sign_proof_payload(
     secret = ensure_provenance_secret()
     message = _proof_message(label, agent, model, trace, timestamp)
     return hmac.new(secret, message.encode("utf-8"), hashlib.sha256).hexdigest()
+
+
+def build_local_proof_metadata() -> dict[str, str]:
+    secret: bytes | None = None
+    key_fingerprint = ""
+    host_fingerprint = ""
+
+    try:
+        secret = ensure_provenance_secret()
+    except Exception:
+        secret = None
+
+    if secret:
+        key_fingerprint = hashlib.sha256(secret).hexdigest()[:16]
+
+    host = ""
+    try:
+        host = socket.gethostname()
+    except Exception:
+        host = _normalize(os.environ.get("HOSTNAME"))
+
+    if host:
+        material = (secret + b"\n" + host.encode("utf-8")) if secret else host.encode("utf-8")
+        host_fingerprint = hashlib.sha256(material).hexdigest()[:16]
+
+    return {
+        "proof_signer_scope": "local-hmac",
+        "proof_key_fingerprint": key_fingerprint,
+        "proof_host_fingerprint": host_fingerprint,
+    }
 
 
 def get_agent_registry(force_reload: bool = False) -> AgentRegistry:
@@ -329,6 +360,9 @@ def classify_command_run(command: str, payload: dict[str, Any]) -> dict[str, Any
     proof_trace = _normalize(data.get("proof_trace"))
     proof_timestamp = _safe_int(data.get("proof_timestamp"))
     proof_signature = _normalize(data.get("proof_signature"))
+    proof_signer_scope = _normalize_lower(data.get("proof_signer_scope"))
+    proof_key_fingerprint = _normalize_lower(data.get("proof_key_fingerprint"))
+    proof_host_fingerprint = _normalize_lower(data.get("proof_host_fingerprint"))
 
     proof_valid, proof_reason = verify_signed_proof(
         proof_label,
@@ -338,6 +372,7 @@ def classify_command_run(command: str, payload: dict[str, Any]) -> dict[str, Any
         proof_timestamp,
         proof_signature,
     )
+    proof_signature_present = bool(proof_signature)
     evidence.append(proof_reason)
 
     shell_pid = _safe_int(data.get("shell_pid"))
@@ -356,6 +391,22 @@ def classify_command_run(command: str, payload: dict[str, Any]) -> dict[str, Any
         label = "AI_EXECUTED"
         confidence = _BASE_LABEL_CONFIDENCE["AI_EXECUTED"]
         evidence.append("proof_enforced_strict")
+        if proof_signer_scope:
+            evidence.append(f"proof_signer_scope={proof_signer_scope}")
+        if proof_key_fingerprint:
+            evidence.append(f"proof_key_fingerprint={proof_key_fingerprint}")
+        if proof_host_fingerprint:
+            evidence.append(f"proof_host_fingerprint={proof_host_fingerprint}")
+    elif proof_signature_present:
+        label = "AI_EXECUTED"
+        confidence = 0.97
+        evidence.append("proof_signature_present_override")
+        if proof_signer_scope:
+            evidence.append(f"proof_signer_scope={proof_signer_scope}")
+        if proof_key_fingerprint:
+            evidence.append(f"proof_key_fingerprint={proof_key_fingerprint}")
+        if proof_host_fingerprint:
+            evidence.append(f"proof_host_fingerprint={proof_host_fingerprint}")
     elif last_action in _HUMAN_ACTIONS:
         label = "HUMAN_TYPED"
         confidence = _BASE_LABEL_CONFIDENCE["HUMAN_TYPED"]
@@ -380,12 +431,12 @@ def classify_command_run(command: str, payload: dict[str, Any]) -> dict[str, Any
     agent_source = ""
     registry_status = ""
 
-    if proof_valid:
+    if proof_valid or proof_signature_present:
         agent = proof_agent
         provider = ai_provider
         raw_model = proof_model or provenance_model_raw or ai_model
         evidence_tier = "proof"
-        agent_source = "proof"
+        agent_source = "proof" if proof_valid else "proof_signature"
         if proof_trace:
             evidence.append(f"proof_trace={proof_trace}")
     elif accept_origin == "ai" and not manual_after_accept:
@@ -403,7 +454,7 @@ def classify_command_run(command: str, payload: dict[str, Any]) -> dict[str, Any
         agent_source = agent_source or "provider_model_infer"
     if not normalized_model:
         normalized_model = str(inferred_from_payload.get("model_normalized", "") or "")
-    if not registry_status and not proof_valid:
+    if not registry_status and not (proof_valid or proof_signature_present):
         registry_status = str(inferred_from_payload.get("registry_status", "") or "")
 
     if not agent and provenance_agent_hint:
@@ -426,7 +477,7 @@ def classify_command_run(command: str, payload: dict[str, Any]) -> dict[str, Any
             raw_model = _normalize(lineage_match.get("model_raw"))
         if not normalized_model:
             normalized_model = _normalize_lower(lineage_match.get("model_normalized"))
-        if not registry_status and not proof_valid:
+        if not registry_status and not (proof_valid or proof_signature_present):
             registry_status = _normalize_lower(lineage_match.get("registry_status"))
         if not evidence_tier:
             evidence_tier = _normalize_lower(lineage_match.get("evidence_tier"))
@@ -446,7 +497,7 @@ def classify_command_run(command: str, payload: dict[str, Any]) -> dict[str, Any
         normalized_model = registry.normalize_model(agent, raw_model, provider)
 
     agent_meta = registry.get_agent(agent) if agent else None
-    if proof_valid:
+    if proof_valid or proof_signature_present:
         if agent and agent_meta is None:
             registry_status = "unmapped_signed"
             evidence.append("proof_agent_unmapped=true")
@@ -486,6 +537,9 @@ def classify_command_run(command: str, payload: dict[str, Any]) -> dict[str, Any
         "model_fingerprint": fingerprint,
         "proof_valid": bool(proof_valid),
         "proof_reason": proof_reason,
+        "proof_signer_scope": proof_signer_scope,
+        "proof_key_fingerprint": proof_key_fingerprint,
+        "proof_host_fingerprint": proof_host_fingerprint,
         "evidence_tier": evidence_tier,
         "agent_source": agent_source,
         "registry_version": registry_version,

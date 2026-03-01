@@ -34,7 +34,7 @@ from ghostshell.config.loader import (
     normalize_config_payload,
     save_config_file,
 )
-from ghostshell.engine.provenance import sign_proof_payload
+from ghostshell.engine.provenance import build_local_proof_metadata, sign_proof_payload
 
 app = typer.Typer(add_completion=False)
 provenance_registry_app = typer.Typer(add_completion=False, help="Manage provenance agent registry")
@@ -60,6 +60,8 @@ LAST_INDEXED_PATH = os.path.join(CONFIG_DIR, "last_indexed_line")
 STATE_SQLITE_PATH = os.path.join(CONFIG_DIR, "state.sqlite")
 EVENTS_DIR = os.path.join(CONFIG_DIR, "events")
 SNAPSHOTS_DIR = os.path.join(CONFIG_DIR, "snapshots")
+DEFAULT_SIGNING_AGENT = "unknown"
+DEFAULT_SIGNING_MODEL = "unknown-model"
 
 class _BackSignal:
     pass
@@ -1802,23 +1804,39 @@ def _shell_export_line(name: str, value: str) -> str:
     return f"export {name}={shlex.quote(str(value or ''))}"
 
 
+def _normalize_signing_identity(agent: str, model: str) -> tuple[str, str, bool]:
+    clean_agent = str(agent or "").strip().lower()
+    clean_model = str(model or "").strip()
+    defaulted = False
+    if not clean_agent:
+        clean_agent = DEFAULT_SIGNING_AGENT
+        defaulted = True
+    if not clean_model:
+        clean_model = DEFAULT_SIGNING_MODEL
+        defaulted = True
+    return clean_agent, clean_model, defaulted
+
+
+def _warn_defaulted_identity(context: str, defaulted: bool) -> None:
+    if not defaulted:
+        return
+    console.print(
+        f"[yellow]Warning:[/yellow] {context} missing identity; "
+        f"defaulting to agent={DEFAULT_SIGNING_AGENT} model={DEFAULT_SIGNING_MODEL}"
+    )
+
+
 @ai_session_app.command("start")
 def ai_session_start(
-    agent: str = typer.Option(..., "--agent", help="Agent identifier"),
-    model: str = typer.Option(..., "--model", help="Raw model identifier"),
+    agent: str = typer.Option("", "--agent", help="Agent identifier (defaults to unknown)"),
+    model: str = typer.Option("", "--model", help="Raw model identifier (defaults to unknown-model)"),
     agent_name: str = typer.Option("", "--agent-name", help="Optional user-facing agent name"),
     ttl_minutes: int = typer.Option(120, "--ttl-minutes", min=1, max=1440, help="Session expiration in minutes"),
 ):
     """Emit shell exports to start AI session signing."""
-    clean_agent = str(agent or "").strip().lower()
-    clean_model = str(model or "").strip()
+    clean_agent, clean_model, defaulted = _normalize_signing_identity(agent, model)
+    _warn_defaulted_identity("ai-session start", defaulted)
     clean_agent_name = str(agent_name or "").strip()
-    if not clean_agent:
-        console.print("[red]--agent is required[/red]")
-        raise typer.Exit(code=2)
-    if not clean_model:
-        console.print("[red]--model is required[/red]")
-        raise typer.Exit(code=2)
 
     now_ts = int(time.time())
     expires_ts = now_ts + int(ttl_minutes) * 60
@@ -1831,6 +1849,8 @@ def ai_session_start(
         _shell_export_line("GHOSTSHELL_AI_SESSION_ID", session_id),
         _shell_export_line("GHOSTSHELL_AI_SESSION_STARTED_TS", str(now_ts)),
         _shell_export_line("GHOSTSHELL_AI_SESSION_EXPIRES_TS", str(expires_ts)),
+        _shell_export_line("GHOSTSHELL_AI_SESSION_COUNTER", "0"),
+        _shell_export_line("GHOSTSHELL_AI_SESSION_TIMER_PID", ""),
     ]
     console.print("\n".join(lines), highlight=False)
 
@@ -1846,6 +1866,8 @@ def ai_session_stop():
         "GHOSTSHELL_AI_SESSION_ID",
         "GHOSTSHELL_AI_SESSION_STARTED_TS",
         "GHOSTSHELL_AI_SESSION_EXPIRES_TS",
+        "GHOSTSHELL_AI_SESSION_COUNTER",
+        "GHOSTSHELL_AI_SESSION_TIMER_PID",
     ]
     lines = [f"unset {name}" for name in names]
     console.print("\n".join(lines), highlight=False)
@@ -1878,8 +1900,8 @@ def ai_session_status():
 @app.command("ai-exec", context_settings={"allow_extra_args": True, "ignore_unknown_options": True})
 def ai_exec(
     ctx: typer.Context,
-    agent: str = typer.Option(..., "--agent", help="Agent identifier, for example codex"),
-    model: str = typer.Option(..., "--model", help="Raw model identifier, for example gpt-5.3"),
+    agent: str = typer.Option("", "--agent", help="Agent identifier, for example codex"),
+    model: str = typer.Option("", "--model", help="Raw model identifier, for example gpt-5.3"),
     agent_name: str = typer.Option("", "--agent-name", help="Optional user-facing agent name"),
     trace: str = typer.Option("", "--trace", help="Optional trace id"),
     source: str = typer.Option("unknown", "--source", help="Log source (runtime/history/unknown)"),
@@ -1896,15 +1918,18 @@ def ai_exec(
     if clean_source not in {"runtime", "history", "unknown"}:
         clean_source = "unknown"
 
+    clean_agent, clean_model, defaulted = _normalize_signing_identity(agent, model)
+    _warn_defaulted_identity("ai-exec", defaulted)
     trace_id = str(trace or "").strip() or uuid.uuid4().hex[:12]
     ts = int(time.time())
     signature = sign_proof_payload(
         "AI_EXECUTED",
-        str(agent or "").strip(),
-        str(model or "").strip(),
+        clean_agent,
+        clean_model,
         trace_id,
         ts,
     )
+    proof_metadata = build_local_proof_metadata()
 
     command_text = shlex.join(args)
     try:
@@ -1927,19 +1952,22 @@ def ai_exec(
         "provenance_accept_mode": "replace_full",
         "provenance_suggestion_kind": "agent_wrapper",
         "provenance_manual_edit_after_accept": False,
-        "provenance_ai_agent": str(agent or "").strip(),
+        "provenance_ai_agent": clean_agent,
         "provenance_ai_provider": "",
-        "provenance_ai_model": str(model or "").strip(),
+        "provenance_ai_model": clean_model,
         "provenance_agent_name": str(agent_name or "").strip(),
-        "provenance_agent_hint": str(agent or "").strip(),
-        "provenance_model_raw": str(model or "").strip(),
+        "provenance_agent_hint": clean_agent,
+        "provenance_model_raw": clean_model,
         "provenance_wrapper_id": f"aiterminal_ai_exec:{trace_id}",
         "proof_label": "AI_EXECUTED",
-        "proof_agent": str(agent or "").strip(),
-        "proof_model": str(model or "").strip(),
+        "proof_agent": clean_agent,
+        "proof_model": clean_model,
         "proof_trace": trace_id,
         "proof_timestamp": ts,
         "proof_signature": signature,
+        "proof_signer_scope": str(proof_metadata.get("proof_signer_scope", "") or ""),
+        "proof_key_fingerprint": str(proof_metadata.get("proof_key_fingerprint", "") or ""),
+        "proof_host_fingerprint": str(proof_metadata.get("proof_host_fingerprint", "") or ""),
     }
 
     try:

@@ -156,6 +156,9 @@ class LogCommandPayload(BaseModel):
     proof_trace: str | None = None
     proof_timestamp: int | None = None
     proof_signature: str | None = None
+    proof_signer_scope: str | None = None
+    proof_key_fingerprint: str | None = None
+    proof_host_fingerprint: str | None = None
 
 
 class CommandStoreEntry(BaseModel):

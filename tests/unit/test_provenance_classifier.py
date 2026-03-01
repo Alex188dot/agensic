@@ -15,6 +15,9 @@ class ProvenanceClassifierTests(unittest.TestCase):
             "proof_trace": "abc",
             "proof_timestamp": 1700000000,
             "proof_signature": "sig",
+            "proof_signer_scope": "local-hmac",
+            "proof_key_fingerprint": "abc123abc123abc1",
+            "proof_host_fingerprint": "def456def456def4",
         }
         with patch(
             "ghostshell.engine.provenance.verify_signed_proof",
@@ -30,6 +33,9 @@ class ProvenanceClassifierTests(unittest.TestCase):
         self.assertEqual(out["model_fingerprint"], "codex_gpt-5-codex")
         self.assertEqual(out["registry_status"], "verified")
         self.assertEqual(out["agent_name"], "Planner A")
+        self.assertIn("proof_signer_scope=local-hmac", out["evidence"])
+        self.assertIn("proof_key_fingerprint=abc123abc123abc1", out["evidence"])
+        self.assertIn("proof_host_fingerprint=def456def456def4", out["evidence"])
 
     def test_human_last_action_wins(self):
         payload = {
@@ -43,6 +49,31 @@ class ProvenanceClassifierTests(unittest.TestCase):
         ):
             out = classify_command_run("git status", payload)
         self.assertEqual(out["label"], "HUMAN_TYPED")
+
+    def test_proof_signature_present_overrides_human_typed(self):
+        payload = {
+            "provenance_last_action": "human_typed",
+            "proof_label": "AI_EXECUTED",
+            "proof_agent": "codex",
+            "proof_model": "gpt-5.3",
+            "proof_trace": "session:abc:1:123",
+            "proof_timestamp": 1,
+            "proof_signature": "present-but-invalid",
+        }
+        with patch(
+            "ghostshell.engine.provenance.verify_signed_proof",
+            return_value=(False, "proof_signature_invalid"),
+        ), patch(
+            "ghostshell.engine.provenance.inspect_process_lineage",
+            return_value={"lineage": [], "hints": []},
+        ):
+            out = classify_command_run("echo hi", payload)
+        self.assertEqual(out["label"], "AI_EXECUTED")
+        self.assertFalse(out["proof_valid"])
+        self.assertEqual(out["evidence_tier"], "proof")
+        self.assertEqual(out["agent"], "codex")
+        self.assertEqual(out["model"], "gpt-5.3")
+        self.assertIn("proof_signature_present_override", out["evidence"])
 
     def test_ai_suggested_human_ran(self):
         payload = {

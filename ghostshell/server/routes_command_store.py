@@ -60,6 +60,9 @@ def log_command(data: LogCommandPayload, background_tasks: BackgroundTasks) -> L
             "proof_trace": data.proof_trace,
             "proof_timestamp": data.proof_timestamp,
             "proof_signature": data.proof_signature,
+            "proof_signer_scope": data.proof_signer_scope,
+            "proof_key_fingerprint": data.proof_key_fingerprint,
+            "proof_host_fingerprint": data.proof_host_fingerprint,
         }
 
         background_tasks.add_task(

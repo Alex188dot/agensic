@@ -46,9 +46,13 @@ class FeedbackSchemaTests(unittest.TestCase):
             proof_trace="trace-1",
             proof_timestamp=1700000000,
             proof_signature="abc",
+            proof_signer_scope="local-hmac",
+            proof_key_fingerprint="deadbeefdeadbeef",
+            proof_host_fingerprint="0011223344556677",
         )
         self.assertEqual(payload.command, "git status")
         self.assertEqual(payload.provenance_ai_agent, "codex")
+        self.assertEqual(payload.proof_signer_scope, "local-hmac")
 
 
 if __name__ == "__main__":

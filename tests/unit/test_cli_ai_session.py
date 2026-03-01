@@ -35,6 +35,21 @@ class CliAiSessionTests(unittest.TestCase):
         self.assertIn("export GHOSTSHELL_AI_SESSION_ID=", result.stdout)
         self.assertIn("export GHOSTSHELL_AI_SESSION_STARTED_TS=", result.stdout)
         self.assertIn("export GHOSTSHELL_AI_SESSION_EXPIRES_TS=", result.stdout)
+        self.assertIn("export GHOSTSHELL_AI_SESSION_COUNTER=0", result.stdout)
+        self.assertIn("export GHOSTSHELL_AI_SESSION_TIMER_PID=''", result.stdout)
+
+    def test_ai_session_start_defaults_identity_when_missing(self):
+        result = self.runner.invoke(
+            app,
+            [
+                "ai-session",
+                "start",
+            ],
+        )
+        self.assertEqual(result.exit_code, 0)
+        self.assertIn("Warning: ai-session start missing identity", result.stdout)
+        self.assertIn("export GHOSTSHELL_AI_SESSION_AGENT=unknown", result.stdout)
+        self.assertIn("export GHOSTSHELL_AI_SESSION_MODEL=unknown-model", result.stdout)
 
     def test_ai_session_stop_emits_unsets(self):
         result = self.runner.invoke(app, ["ai-session", "stop"])
@@ -46,6 +61,8 @@ class CliAiSessionTests(unittest.TestCase):
         self.assertIn("unset GHOSTSHELL_AI_SESSION_ID", result.stdout)
         self.assertIn("unset GHOSTSHELL_AI_SESSION_STARTED_TS", result.stdout)
         self.assertIn("unset GHOSTSHELL_AI_SESSION_EXPIRES_TS", result.stdout)
+        self.assertIn("unset GHOSTSHELL_AI_SESSION_COUNTER", result.stdout)
+        self.assertIn("unset GHOSTSHELL_AI_SESSION_TIMER_PID", result.stdout)
 
     def test_ai_session_status_inactive(self):
         with patch.dict(os.environ, {}, clear=True):

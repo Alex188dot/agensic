@@ -118,6 +118,25 @@ Then reload:
 source ~/.zshrc
 ```
 
+### Signed Execution Sessions
+
+For deterministic `AI_EXECUTED` provenance in active shells, prefer the native session helpers:
+
+```bash
+ghostshell_session_start --agent codex --model gpt-5.3 --agent-name "Planner A" --ttl-minutes 120
+# run commands
+ghostshell_session_status
+ghostshell_session_stop
+```
+
+One-off signed execution stays on `ai-exec`:
+
+```bash
+aiterminal ai-exec --agent codex --model gpt-5.3 -- echo ok
+```
+
+If agent/model are omitted, GhostShell defaults to `agent=unknown` and `model=unknown-model` and prints a warning.
+
 ### 4. First Run Initialization
 
 The first time you use GhostShell, it will:

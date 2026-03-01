@@ -62,12 +62,20 @@ typeset -g GHOSTSHELL_PENDING_PROOF_MODEL=""
 typeset -g GHOSTSHELL_PENDING_PROOF_TRACE=""
 typeset -g GHOSTSHELL_PENDING_PROOF_TIMESTAMP=0
 typeset -g GHOSTSHELL_PENDING_PROOF_SIGNATURE=""
+typeset -g GHOSTSHELL_PENDING_PROOF_SIGNER_SCOPE=""
+typeset -g GHOSTSHELL_PENDING_PROOF_KEY_FINGERPRINT=""
+typeset -g GHOSTSHELL_PENDING_PROOF_HOST_FINGERPRINT=""
 typeset -g GHOSTSHELL_NEXT_PROOF_LABEL=""
 typeset -g GHOSTSHELL_NEXT_PROOF_AGENT=""
 typeset -g GHOSTSHELL_NEXT_PROOF_MODEL=""
 typeset -g GHOSTSHELL_NEXT_PROOF_TRACE=""
 typeset -g GHOSTSHELL_NEXT_PROOF_TIMESTAMP=0
 typeset -g GHOSTSHELL_NEXT_PROOF_SIGNATURE=""
+typeset -g GHOSTSHELL_NEXT_PROOF_SIGNER_SCOPE=""
+typeset -g GHOSTSHELL_NEXT_PROOF_KEY_FINGERPRINT=""
+typeset -g GHOSTSHELL_NEXT_PROOF_HOST_FINGERPRINT=""
+typeset -g GHOSTSHELL_AI_SESSION_COUNTER=0
+typeset -g GHOSTSHELL_AI_SESSION_TIMER_PID=""
 typeset -g GHOSTSHELL_HOOKS_REGISTERED=0
 typeset -gA GHOSTSHELL_NATIVE_ESC_WIDGET
 GHOSTSHELL_NATIVE_ESC_WIDGET=()
@@ -1017,6 +1025,9 @@ _ghostshell_clear_pending_execution() {
     GHOSTSHELL_PENDING_PROOF_TRACE=""
     GHOSTSHELL_PENDING_PROOF_TIMESTAMP=0
     GHOSTSHELL_PENDING_PROOF_SIGNATURE=""
+    GHOSTSHELL_PENDING_PROOF_SIGNER_SCOPE=""
+    GHOSTSHELL_PENDING_PROOF_KEY_FINGERPRINT=""
+    GHOSTSHELL_PENDING_PROOF_HOST_FINGERPRINT=""
 }
 
 _ghostshell_mark_manual_line_edit() {
@@ -1063,6 +1074,9 @@ _ghostshell_snapshot_pending_execution() {
     GHOSTSHELL_PENDING_PROOF_TRACE="$GHOSTSHELL_NEXT_PROOF_TRACE"
     GHOSTSHELL_PENDING_PROOF_TIMESTAMP="$GHOSTSHELL_NEXT_PROOF_TIMESTAMP"
     GHOSTSHELL_PENDING_PROOF_SIGNATURE="$GHOSTSHELL_NEXT_PROOF_SIGNATURE"
+    GHOSTSHELL_PENDING_PROOF_SIGNER_SCOPE="$GHOSTSHELL_NEXT_PROOF_SIGNER_SCOPE"
+    GHOSTSHELL_PENDING_PROOF_KEY_FINGERPRINT="$GHOSTSHELL_NEXT_PROOF_KEY_FINGERPRINT"
+    GHOSTSHELL_PENDING_PROOF_HOST_FINGERPRINT="$GHOSTSHELL_NEXT_PROOF_HOST_FINGERPRINT"
     if [[ -n "$GHOSTSHELL_PENDING_PROOF_TRACE" ]]; then
         GHOSTSHELL_PENDING_WRAPPER_ID="proof:${GHOSTSHELL_PENDING_PROOF_TRACE}"
     fi
@@ -1072,9 +1086,13 @@ _ghostshell_snapshot_pending_execution() {
     GHOSTSHELL_NEXT_PROOF_TRACE=""
     GHOSTSHELL_NEXT_PROOF_TIMESTAMP=0
     GHOSTSHELL_NEXT_PROOF_SIGNATURE=""
+    GHOSTSHELL_NEXT_PROOF_SIGNER_SCOPE=""
+    GHOSTSHELL_NEXT_PROOF_KEY_FINGERPRINT=""
+    GHOSTSHELL_NEXT_PROOF_HOST_FINGERPRINT=""
 }
 
 _ghostshell_clear_ai_session_env() {
+    _ghostshell_stop_ai_session_timer
     unset GHOSTSHELL_AI_SESSION_ACTIVE
     unset GHOSTSHELL_AI_SESSION_AGENT
     unset GHOSTSHELL_AI_SESSION_MODEL
@@ -1082,9 +1100,225 @@ _ghostshell_clear_ai_session_env() {
     unset GHOSTSHELL_AI_SESSION_ID
     unset GHOSTSHELL_AI_SESSION_STARTED_TS
     unset GHOSTSHELL_AI_SESSION_EXPIRES_TS
+    unset GHOSTSHELL_AI_SESSION_COUNTER
+    unset GHOSTSHELL_AI_SESSION_TIMER_PID
+}
+
+_ghostshell_pid_is_alive() {
+    local pid="$1"
+    if [[ -z "$pid" || "$pid" != <-> ]]; then
+        return 1
+    fi
+    kill -0 "$pid" 2>/dev/null
+}
+
+_ghostshell_stop_ai_session_timer() {
+    if _ghostshell_pid_is_alive "${GHOSTSHELL_AI_SESSION_TIMER_PID:-}"; then
+        kill "${GHOSTSHELL_AI_SESSION_TIMER_PID}" 2>/dev/null
+    fi
+    GHOSTSHELL_AI_SESSION_TIMER_PID=""
+}
+
+_ghostshell_now_ts() {
+    local now_ts
+    now_ts="$(date +%s 2>/dev/null)"
+    if [[ -z "$now_ts" ]]; then
+        now_ts="0"
+    fi
+    print -r -- "$now_ts"
+}
+
+_ghostshell_now_time_component() {
+    local component
+    component="$(
+        python3 - <<'PY' 2>/dev/null
+import time
+
+print(int(time.time_ns()))
+PY
+    )"
+    if [[ -n "$component" && "$component" == <-> ]]; then
+        print -r -- "$component"
+        return
+    fi
+    _ghostshell_now_ts
+}
+
+_ghostshell_ai_session_is_expired() {
+    if [[ "${GHOSTSHELL_AI_SESSION_ACTIVE:-0}" != "1" ]]; then
+        return 1
+    fi
+    local expires_ts="${GHOSTSHELL_AI_SESSION_EXPIRES_TS:-0}"
+    if [[ -z "$expires_ts" || "$expires_ts" == "0" ]]; then
+        return 1
+    fi
+    local now_ts
+    now_ts="$(_ghostshell_now_ts)"
+    if [[ "$expires_ts" == <-> && "$now_ts" == <-> && "$now_ts" -ge "$expires_ts" ]]; then
+        return 0
+    fi
+    return 1
+}
+
+_ghostshell_schedule_ai_session_expiry_timer() {
+    setopt localoptions nobgnice
+    _ghostshell_stop_ai_session_timer
+    if [[ "${GHOSTSHELL_AI_SESSION_ACTIVE:-0}" != "1" ]]; then
+        return
+    fi
+    local expires_ts="${GHOSTSHELL_AI_SESSION_EXPIRES_TS:-0}"
+    if [[ -z "$expires_ts" || "$expires_ts" == "0" || "$expires_ts" != <-> ]]; then
+        return
+    fi
+    local now_ts wait_seconds
+    now_ts="$(_ghostshell_now_ts)"
+    if [[ "$now_ts" != <-> ]]; then
+        return
+    fi
+    wait_seconds=$(( expires_ts - now_ts ))
+    if (( wait_seconds <= 0 )); then
+        kill -USR2 $$ 2>/dev/null
+        return
+    fi
+    (
+        sleep "$wait_seconds"
+        kill -USR2 $$ 2>/dev/null
+    ) &!
+    GHOSTSHELL_AI_SESSION_TIMER_PID="$!"
+}
+
+_ghostshell_enforce_ai_session_expiry() {
+    if _ghostshell_ai_session_is_expired; then
+        _ghostshell_clear_ai_session_env
+        return 0
+    fi
+    return 1
+}
+
+_ghostshell_ensure_ai_session_timer() {
+    if [[ "${GHOSTSHELL_AI_SESSION_ACTIVE:-0}" != "1" ]]; then
+        _ghostshell_stop_ai_session_timer
+        return
+    fi
+    if _ghostshell_enforce_ai_session_expiry; then
+        return
+    fi
+    if ! _ghostshell_pid_is_alive "${GHOSTSHELL_AI_SESSION_TIMER_PID:-}"; then
+        _ghostshell_schedule_ai_session_expiry_timer
+    fi
+}
+
+ghostshell_session_start() {
+    local agent=""
+    local model=""
+    local agent_name=""
+    local ttl_minutes="120"
+    local defaulted_identity=0
+
+    while (( $# > 0 )); do
+        case "$1" in
+            --agent)
+                shift
+                agent="${1:-}"
+                ;;
+            --model)
+                shift
+                model="${1:-}"
+                ;;
+            --agent-name)
+                shift
+                agent_name="${1:-}"
+                ;;
+            --ttl-minutes)
+                shift
+                ttl_minutes="${1:-}"
+                ;;
+            -h|--help)
+                print -r -- "usage: ghostshell_session_start [--agent <agent>] [--model <model>] [--agent-name <name>] [--ttl-minutes <1-1440>]"
+                return 0
+                ;;
+            *)
+                print -r -- "ghostshell_session_start: unknown option: $1" >&2
+                return 2
+                ;;
+        esac
+        shift || true
+    done
+
+    if [[ -z "$agent" ]]; then
+        agent="unknown"
+        defaulted_identity=1
+    fi
+    if [[ -z "$model" ]]; then
+        model="unknown-model"
+        defaulted_identity=1
+    fi
+    agent="${(L)agent}"
+
+    if [[ "$ttl_minutes" != <-> || "$ttl_minutes" -lt 1 || "$ttl_minutes" -gt 1440 ]]; then
+        print -r -- "ghostshell_session_start: --ttl-minutes must be an integer between 1 and 1440" >&2
+        return 2
+    fi
+
+    if (( defaulted_identity == 1 )); then
+        print -r -- "Warning: session identity missing; defaulting to agent=unknown model=unknown-model" >&2
+    fi
+
+    local now_ts expires_ts session_id
+    now_ts="$(_ghostshell_now_ts)"
+    expires_ts=$(( now_ts + ttl_minutes * 60 ))
+    session_id="$(python3 - <<'PY' 2>/dev/null
+import uuid
+
+print(uuid.uuid4().hex[:16])
+PY
+)"
+    if [[ -z "$session_id" ]]; then
+        session_id="$now_ts"
+    fi
+
+    export GHOSTSHELL_AI_SESSION_ACTIVE="1"
+    export GHOSTSHELL_AI_SESSION_AGENT="$agent"
+    export GHOSTSHELL_AI_SESSION_MODEL="$model"
+    export GHOSTSHELL_AI_SESSION_AGENT_NAME="$agent_name"
+    export GHOSTSHELL_AI_SESSION_ID="$session_id"
+    export GHOSTSHELL_AI_SESSION_STARTED_TS="$now_ts"
+    export GHOSTSHELL_AI_SESSION_EXPIRES_TS="$expires_ts"
+    export GHOSTSHELL_AI_SESSION_COUNTER="0"
+    GHOSTSHELL_AI_SESSION_TIMER_PID=""
+    _ghostshell_schedule_ai_session_expiry_timer
+}
+
+ghostshell_session_stop() {
+    _ghostshell_clear_ai_session_env
+}
+
+ghostshell_session_status() {
+    if [[ "${GHOSTSHELL_AI_SESSION_ACTIVE:-0}" != "1" ]]; then
+        print -r -- "inactive"
+        return 0
+    fi
+
+    local now_ts expires_ts remaining state
+    now_ts="$(_ghostshell_now_ts)"
+    expires_ts="${GHOSTSHELL_AI_SESSION_EXPIRES_TS:-0}"
+    if [[ "$expires_ts" == <-> && "$expires_ts" -gt 0 ]]; then
+        remaining=$(( expires_ts - now_ts ))
+        if (( remaining <= 0 )); then
+            state="expired"
+            remaining=0
+        else
+            state="active"
+        fi
+    else
+        state="active"
+        remaining=0
+    fi
+    print -r -- "${state} agent=${GHOSTSHELL_AI_SESSION_AGENT:-} model=${GHOSTSHELL_AI_SESSION_MODEL:-} agent_name=${GHOSTSHELL_AI_SESSION_AGENT_NAME:-'-'} session_id=${GHOSTSHELL_AI_SESSION_ID:-'-'} remaining_seconds=${remaining}"
 }
 
 _ghostshell_session_sign_if_active() {
+    _ghostshell_ensure_ai_session_timer
     if [[ "${GHOSTSHELL_AI_SESSION_ACTIVE:-0}" != "1" ]]; then
         return
     fi
@@ -1093,11 +1327,8 @@ _ghostshell_session_sign_if_active() {
     local session_id="${GHOSTSHELL_AI_SESSION_ID:-}"
     local expires_ts="${GHOSTSHELL_AI_SESSION_EXPIRES_TS:-0}"
     local now_ts
-    now_ts="$(date +%s 2>/dev/null)"
-    if [[ -z "$now_ts" ]]; then
-        now_ts="0"
-    fi
-    if [[ -n "$expires_ts" && "$expires_ts" != "0" && "$now_ts" -gt "$expires_ts" ]]; then
+    now_ts="$(_ghostshell_now_ts)"
+    if [[ -n "$expires_ts" && "$expires_ts" != "0" && "$now_ts" -ge "$expires_ts" ]]; then
         _ghostshell_clear_ai_session_env
         return
     fi
@@ -1111,9 +1342,15 @@ _ghostshell_session_sign_if_active() {
         session_id="$now_ts"
         GHOSTSHELL_AI_SESSION_ID="$session_id"
     fi
-    local trace="session:${session_id}:${now_ts}"
-    local signature
-    signature="$(
+    if [[ "${GHOSTSHELL_AI_SESSION_COUNTER:-0}" != <-> ]]; then
+        GHOSTSHELL_AI_SESSION_COUNTER=0
+    fi
+    GHOSTSHELL_AI_SESSION_COUNTER=$(( GHOSTSHELL_AI_SESSION_COUNTER + 1 ))
+    local time_component
+    time_component="$(_ghostshell_now_time_component)"
+    local trace="session:${session_id}:${GHOSTSHELL_AI_SESSION_COUNTER}:${time_component}"
+    local proof_blob signature key_fingerprint host_fingerprint
+    proof_blob="$(
         GHOSTSHELL_PROOF_LABEL="AI_EXECUTED" \
         GHOSTSHELL_PROOF_AGENT="$session_agent" \
         GHOSTSHELL_PROOF_MODEL="$session_model" \
@@ -1141,9 +1378,21 @@ else:
     secret_path.chmod(0o600)
 secret = secret_path.read_bytes()
 msg = "\n".join([label, agent, model, trace, str(ts)])
-print(hmac.new(secret, msg.encode("utf-8"), hashlib.sha256).hexdigest())
+signature = hmac.new(secret, msg.encode("utf-8"), hashlib.sha256).hexdigest()
+key_fingerprint = hashlib.sha256(secret).hexdigest()[:16]
+host = os.uname().nodename if hasattr(os, "uname") else os.environ.get("HOSTNAME", "")
+host_material = secret + b"\n" + str(host).encode("utf-8")
+host_fingerprint = hashlib.sha256(host_material).hexdigest()[:16]
+print(signature)
+print(key_fingerprint)
+print(host_fingerprint)
 PY
     )"
+    local -a proof_parts
+    proof_parts=("${(@f)proof_blob}")
+    signature="${proof_parts[1]:-}"
+    key_fingerprint="${proof_parts[2]:-}"
+    host_fingerprint="${proof_parts[3]:-}"
     if [[ -z "$signature" ]]; then
         return
     fi
@@ -1153,6 +1402,9 @@ PY
     GHOSTSHELL_NEXT_PROOF_TRACE="$trace"
     GHOSTSHELL_NEXT_PROOF_TIMESTAMP="$now_ts"
     GHOSTSHELL_NEXT_PROOF_SIGNATURE="$signature"
+    GHOSTSHELL_NEXT_PROOF_SIGNER_SCOPE="local-hmac"
+    GHOSTSHELL_NEXT_PROOF_KEY_FINGERPRINT="$key_fingerprint"
+    GHOSTSHELL_NEXT_PROOF_HOST_FINGERPRINT="$host_fingerprint"
     GHOSTSHELL_PENDING_WRAPPER_ID="ai_session:${session_id}"
     GHOSTSHELL_PENDING_AGENT_NAME="${GHOSTSHELL_AI_SESSION_AGENT_NAME:-}"
 }
@@ -1173,8 +1425,8 @@ ghostshell_mark_ai_executed() {
     if [[ -z "$stamp" ]]; then
         stamp="0"
     fi
-    local signature
-    signature="$(
+    local proof_blob signature key_fingerprint host_fingerprint
+    proof_blob="$(
         GHOSTSHELL_PROOF_LABEL="AI_EXECUTED" \
         GHOSTSHELL_PROOF_AGENT="$agent" \
         GHOSTSHELL_PROOF_MODEL="$model" \
@@ -1202,9 +1454,21 @@ else:
     secret_path.chmod(0o600)
 secret = secret_path.read_bytes()
 msg = "\n".join([label, agent, model, trace, str(ts)])
-print(hmac.new(secret, msg.encode("utf-8"), hashlib.sha256).hexdigest())
+signature = hmac.new(secret, msg.encode("utf-8"), hashlib.sha256).hexdigest()
+key_fingerprint = hashlib.sha256(secret).hexdigest()[:16]
+host = os.uname().nodename if hasattr(os, "uname") else os.environ.get("HOSTNAME", "")
+host_material = secret + b"\n" + str(host).encode("utf-8")
+host_fingerprint = hashlib.sha256(host_material).hexdigest()[:16]
+print(signature)
+print(key_fingerprint)
+print(host_fingerprint)
 PY
     )"
+    local -a proof_parts
+    proof_parts=("${(@f)proof_blob}")
+    signature="${proof_parts[1]:-}"
+    key_fingerprint="${proof_parts[2]:-}"
+    host_fingerprint="${proof_parts[3]:-}"
     if [[ -z "$signature" ]]; then
         print -r -- "Could not create AI execution proof."
         return 1
@@ -1215,6 +1479,9 @@ PY
     GHOSTSHELL_NEXT_PROOF_TRACE="$trace"
     GHOSTSHELL_NEXT_PROOF_TIMESTAMP="$stamp"
     GHOSTSHELL_NEXT_PROOF_SIGNATURE="$signature"
+    GHOSTSHELL_NEXT_PROOF_SIGNER_SCOPE="local-hmac"
+    GHOSTSHELL_NEXT_PROOF_KEY_FINGERPRINT="$key_fingerprint"
+    GHOSTSHELL_NEXT_PROOF_HOST_FINGERPRINT="$host_fingerprint"
     print -r -- "AI execution proof armed for next command (${agent}/${model})."
     return 0
 }
@@ -1242,34 +1509,59 @@ _ghostshell_log_command() {
     local command="$1"
     local exit_code="$2"
     local source="${3:-runtime}"
-    # Log executed command to vector DB
-    (
-        local json_data
-        json_data="$(
-            GHOSTSHELL_LOG_COMMAND="$command" \
-            GHOSTSHELL_LOG_EXIT="$exit_code" \
-            GHOSTSHELL_LOG_SOURCE="$source" \
-            GHOSTSHELL_LOG_CWD="$PWD" \
-            GHOSTSHELL_LOG_SHELL_PID="$$" \
-            GHOSTSHELL_LOG_LAST_ACTION="$GHOSTSHELL_PENDING_LAST_ACTION" \
-            GHOSTSHELL_LOG_ACCEPT_ORIGIN="$GHOSTSHELL_PENDING_ACCEPTED_ORIGIN" \
-            GHOSTSHELL_LOG_ACCEPT_MODE="$GHOSTSHELL_PENDING_ACCEPTED_MODE" \
-            GHOSTSHELL_LOG_SUGGESTION_KIND="$GHOSTSHELL_PENDING_ACCEPTED_KIND" \
-            GHOSTSHELL_LOG_MANUAL_AFTER_ACCEPT="$GHOSTSHELL_PENDING_MANUAL_EDIT_AFTER_ACCEPT" \
-            GHOSTSHELL_LOG_AI_AGENT="$GHOSTSHELL_PENDING_AI_AGENT" \
-            GHOSTSHELL_LOG_AI_PROVIDER="$GHOSTSHELL_PENDING_AI_PROVIDER" \
-            GHOSTSHELL_LOG_AI_MODEL="$GHOSTSHELL_PENDING_AI_MODEL" \
-            GHOSTSHELL_LOG_AGENT_NAME="$GHOSTSHELL_PENDING_AGENT_NAME" \
-            GHOSTSHELL_LOG_AGENT_HINT="$GHOSTSHELL_PENDING_AGENT_HINT" \
-            GHOSTSHELL_LOG_MODEL_RAW="$GHOSTSHELL_PENDING_MODEL_RAW" \
-            GHOSTSHELL_LOG_WRAPPER_ID="$GHOSTSHELL_PENDING_WRAPPER_ID" \
-            GHOSTSHELL_LOG_PROOF_LABEL="$GHOSTSHELL_PENDING_PROOF_LABEL" \
-            GHOSTSHELL_LOG_PROOF_AGENT="$GHOSTSHELL_PENDING_PROOF_AGENT" \
-            GHOSTSHELL_LOG_PROOF_MODEL="$GHOSTSHELL_PENDING_PROOF_MODEL" \
-            GHOSTSHELL_LOG_PROOF_TRACE="$GHOSTSHELL_PENDING_PROOF_TRACE" \
-            GHOSTSHELL_LOG_PROOF_TIMESTAMP="$GHOSTSHELL_PENDING_PROOF_TIMESTAMP" \
-            GHOSTSHELL_LOG_PROOF_SIGNATURE="$GHOSTSHELL_PENDING_PROOF_SIGNATURE" \
-            python3 - <<'PY' 2>/dev/null
+    local log_cwd="$PWD"
+    local log_shell_pid="$$"
+    local log_last_action="$GHOSTSHELL_PENDING_LAST_ACTION"
+    local log_accept_origin="$GHOSTSHELL_PENDING_ACCEPTED_ORIGIN"
+    local log_accept_mode="$GHOSTSHELL_PENDING_ACCEPTED_MODE"
+    local log_suggestion_kind="$GHOSTSHELL_PENDING_ACCEPTED_KIND"
+    local log_manual_after_accept="$GHOSTSHELL_PENDING_MANUAL_EDIT_AFTER_ACCEPT"
+    local log_ai_agent="$GHOSTSHELL_PENDING_AI_AGENT"
+    local log_ai_provider="$GHOSTSHELL_PENDING_AI_PROVIDER"
+    local log_ai_model="$GHOSTSHELL_PENDING_AI_MODEL"
+    local log_agent_name="$GHOSTSHELL_PENDING_AGENT_NAME"
+    local log_agent_hint="$GHOSTSHELL_PENDING_AGENT_HINT"
+    local log_model_raw="$GHOSTSHELL_PENDING_MODEL_RAW"
+    local log_wrapper_id="$GHOSTSHELL_PENDING_WRAPPER_ID"
+    local log_proof_label="$GHOSTSHELL_PENDING_PROOF_LABEL"
+    local log_proof_agent="$GHOSTSHELL_PENDING_PROOF_AGENT"
+    local log_proof_model="$GHOSTSHELL_PENDING_PROOF_MODEL"
+    local log_proof_trace="$GHOSTSHELL_PENDING_PROOF_TRACE"
+    local log_proof_timestamp="$GHOSTSHELL_PENDING_PROOF_TIMESTAMP"
+    local log_proof_signature="$GHOSTSHELL_PENDING_PROOF_SIGNATURE"
+    local log_proof_signer_scope="$GHOSTSHELL_PENDING_PROOF_SIGNER_SCOPE"
+    local log_proof_key_fingerprint="$GHOSTSHELL_PENDING_PROOF_KEY_FINGERPRINT"
+    local log_proof_host_fingerprint="$GHOSTSHELL_PENDING_PROOF_HOST_FINGERPRINT"
+
+    local json_data
+    json_data="$(
+        GHOSTSHELL_LOG_COMMAND="$command" \
+        GHOSTSHELL_LOG_EXIT="$exit_code" \
+        GHOSTSHELL_LOG_SOURCE="$source" \
+        GHOSTSHELL_LOG_CWD="$log_cwd" \
+        GHOSTSHELL_LOG_SHELL_PID="$log_shell_pid" \
+        GHOSTSHELL_LOG_LAST_ACTION="$log_last_action" \
+        GHOSTSHELL_LOG_ACCEPT_ORIGIN="$log_accept_origin" \
+        GHOSTSHELL_LOG_ACCEPT_MODE="$log_accept_mode" \
+        GHOSTSHELL_LOG_SUGGESTION_KIND="$log_suggestion_kind" \
+        GHOSTSHELL_LOG_MANUAL_AFTER_ACCEPT="$log_manual_after_accept" \
+        GHOSTSHELL_LOG_AI_AGENT="$log_ai_agent" \
+        GHOSTSHELL_LOG_AI_PROVIDER="$log_ai_provider" \
+        GHOSTSHELL_LOG_AI_MODEL="$log_ai_model" \
+        GHOSTSHELL_LOG_AGENT_NAME="$log_agent_name" \
+        GHOSTSHELL_LOG_AGENT_HINT="$log_agent_hint" \
+        GHOSTSHELL_LOG_MODEL_RAW="$log_model_raw" \
+        GHOSTSHELL_LOG_WRAPPER_ID="$log_wrapper_id" \
+        GHOSTSHELL_LOG_PROOF_LABEL="$log_proof_label" \
+        GHOSTSHELL_LOG_PROOF_AGENT="$log_proof_agent" \
+        GHOSTSHELL_LOG_PROOF_MODEL="$log_proof_model" \
+        GHOSTSHELL_LOG_PROOF_TRACE="$log_proof_trace" \
+        GHOSTSHELL_LOG_PROOF_TIMESTAMP="$log_proof_timestamp" \
+        GHOSTSHELL_LOG_PROOF_SIGNATURE="$log_proof_signature" \
+        GHOSTSHELL_LOG_PROOF_SIGNER_SCOPE="$log_proof_signer_scope" \
+        GHOSTSHELL_LOG_PROOF_KEY_FINGERPRINT="$log_proof_key_fingerprint" \
+        GHOSTSHELL_LOG_PROOF_HOST_FINGERPRINT="$log_proof_host_fingerprint" \
+        python3 - <<'PY' 2>/dev/null
 import json
 import os
 
@@ -1309,10 +1601,17 @@ payload = {
     "proof_trace": str(os.environ.get("GHOSTSHELL_LOG_PROOF_TRACE", "") or ""),
     "proof_timestamp": as_int(os.environ.get("GHOSTSHELL_LOG_PROOF_TIMESTAMP", None), None),
     "proof_signature": str(os.environ.get("GHOSTSHELL_LOG_PROOF_SIGNATURE", "") or ""),
+    "proof_signer_scope": str(os.environ.get("GHOSTSHELL_LOG_PROOF_SIGNER_SCOPE", "") or ""),
+    "proof_key_fingerprint": str(os.environ.get("GHOSTSHELL_LOG_PROOF_KEY_FINGERPRINT", "") or ""),
+    "proof_host_fingerprint": str(os.environ.get("GHOSTSHELL_LOG_PROOF_HOST_FINGERPRINT", "") or ""),
 }
 print(json.dumps(payload, separators=(",", ":")))
 PY
-        )"
+    )"
+    if [[ -z "$json_data" ]]; then
+        return
+    fi
+    (
         curl -s -X POST "http://127.0.0.1:22000/log_command" \
              -H "Content-Type: application/json" \
              -d "$json_data" > /dev/null 2>&1
@@ -1331,9 +1630,7 @@ _ghostshell_is_blocked_runtime_command() {
 
 _ghostshell_preexec_hook() {
     _ghostshell_session_sign_if_active
-    if [[ -z "$GHOSTSHELL_PENDING_LAST_ACTION" && -z "$GHOSTSHELL_PENDING_ACCEPTED_ORIGIN" ]]; then
-        _ghostshell_snapshot_pending_execution
-    fi
+    _ghostshell_snapshot_pending_execution
     GHOSTSHELL_LAST_EXECUTED_CMD="$1"
 }
 
@@ -1341,6 +1638,7 @@ _ghostshell_precmd_hook() {
     local exit_code="$?"
     local cmd="$GHOSTSHELL_LAST_EXECUTED_CMD"
     GHOSTSHELL_LAST_EXECUTED_CMD=""
+    _ghostshell_ensure_ai_session_timer
     _ghostshell_reload_disabled_patterns_if_needed
 
     if [[ -z "$cmd" ]]; then
@@ -1570,6 +1868,11 @@ TRAPUSR1() {
         # Invoke the update logic AS A WIDGET
         zle _ghostshell_on_timer_trigger
     fi
+}
+
+TRAPUSR2() {
+    GHOSTSHELL_AI_SESSION_TIMER_PID=""
+    _ghostshell_enforce_ai_session_expiry
 }
 
 # ======================================================
@@ -1961,6 +2264,7 @@ _ghostshell_capture_native_escape_binding emacs
 _ghostshell_capture_native_escape_binding viins
 _ghostshell_capture_native_escape_binding vicmd
 _ghostshell_reload_disabled_patterns_if_needed
+_ghostshell_ensure_ai_session_timer
 
 # --- Core Controls ---
 _ghostshell_bind_widget '^@' _ghostshell_manual_trigger    # Ctrl+Space (manual trigger)
