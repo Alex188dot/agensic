@@ -90,6 +90,9 @@ class ServerContractTests(unittest.TestCase):
             self.assertIn("pool", body)
             self.assertIn("pool_meta", body)
             self.assertIn("bootstrap", body)
+            self.assertIn("ai_agent", body)
+            self.assertIn("ai_provider", body)
+            self.assertIn("ai_model", body)
 
     def test_predict_history_only_forces_no_ai(self):
         observed_allow_ai: list[bool] = []
@@ -265,6 +268,7 @@ class ServerContractTests(unittest.TestCase):
                     "source": "runtime",
                     "exit_code": 0,
                     "working_directory": "/tmp/repo-x",
+                    "provenance_agent_name": "Planner A",
                 },
             )
             self.assertEqual(response.status_code, 200)
@@ -275,6 +279,93 @@ class ServerContractTests(unittest.TestCase):
             self.assertEqual(args[1], 0)
             self.assertEqual(args[2], "runtime")
             self.assertEqual(args[3], "/tmp/repo-x")
+            self.assertIsInstance(args[4], dict)
+            self.assertIn("provenance_last_action", args[4])
+            self.assertEqual(args[4].get("provenance_agent_name"), "Planner A")
+
+    def test_provenance_runs_contract(self):
+        sample = [
+            {
+                "run_id": "run-1",
+                "ts": 1700000000,
+                "command": "git status",
+                "label": "HUMAN_TYPED",
+                "confidence": 0.9,
+                "agent": "codex",
+                "agent_name": "PlannerA",
+                "provider": "openai",
+                "model": "gpt-5.3",
+                "raw_model": "gpt-5.3",
+                "normalized_model": "gpt-5-codex",
+                "model_fingerprint": "codex_gpt-5-codex",
+                "evidence_tier": "integrated",
+                "agent_source": "payload_ai",
+                "registry_version": "builtin-2026-02-28",
+                "registry_status": "verified",
+                "source": "runtime",
+                "working_directory": "/tmp",
+                "exit_code": 0,
+                "shell_pid": 123,
+                "evidence": ["last_action=human_typed"],
+                "payload": {"provenance_last_action": "human_typed"},
+            }
+        ]
+        with patch.object(deps.engine, "list_command_runs", return_value=sample) as mocked:
+            response = self.client.get(
+                "/provenance/runs?limit=20&label=HUMAN_TYPED&tier=integrated&agent=codex&agent_name=PlannerA&provider=openai"
+            )
+            self.assertEqual(response.status_code, 200)
+            body = response.json()
+            self.assertEqual(body.get("status"), "ok")
+            self.assertEqual(body.get("total"), 1)
+            self.assertIsInstance(body.get("runs"), list)
+            kwargs = mocked.call_args.kwargs
+            self.assertEqual(kwargs.get("tier"), "integrated")
+            self.assertEqual(kwargs.get("agent"), "codex")
+            self.assertEqual(kwargs.get("agent_name"), "PlannerA")
+            self.assertEqual(kwargs.get("provider"), "openai")
+
+    def test_provenance_registry_contracts(self):
+        with patch.object(
+            deps.engine,
+            "get_provenance_registry_summary",
+            return_value={"version": "builtin-2026-02-28", "source": "builtin", "agent_count": 9},
+        ), patch.object(
+            deps.engine,
+            "list_provenance_registry_agents",
+            return_value=[{"agent_id": "codex", "status": "verified", "executables": ["codex"], "aliases": ["codex"]}],
+        ), patch.object(
+            deps.engine,
+            "get_provenance_registry_agent",
+            return_value={"agent_id": "codex", "status": "verified"},
+        ), patch.object(
+            deps.engine,
+            "refresh_provenance_registry",
+            return_value={"ok": True, "reason": "updated", "updated": True, "version": "v1"},
+        ), patch.object(
+            deps.engine,
+            "verify_provenance_registry_cache",
+            return_value={"ok": True, "reason": "signature_valid", "version": "v1", "verified_at": 1700000000, "url": "https://example.test"},
+        ):
+            summary = self.client.get("/provenance/registry")
+            self.assertEqual(summary.status_code, 200)
+            self.assertEqual(summary.json().get("status"), "ok")
+
+            agents = self.client.get("/provenance/registry/agents?status=verified")
+            self.assertEqual(agents.status_code, 200)
+            self.assertEqual(agents.json().get("total"), 1)
+
+            show_agent = self.client.get("/provenance/registry/agents/codex")
+            self.assertEqual(show_agent.status_code, 200)
+            self.assertEqual(show_agent.json().get("summary", {}).get("agent_id"), "codex")
+
+            refresh = self.client.post("/provenance/registry/refresh?force=true")
+            self.assertEqual(refresh.status_code, 200)
+            self.assertTrue(bool(refresh.json().get("ok")))
+
+            verify = self.client.get("/provenance/registry/verify")
+            self.assertEqual(verify.status_code, 200)
+            self.assertTrue(bool(verify.json().get("ok")))
 
     def test_shutdown_gating_routes(self):
         deps.begin_shutdown("test")

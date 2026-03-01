@@ -10,10 +10,12 @@ import questionary
 import socket
 import signal
 import shlex
+import uuid
 from typing import Any
 from pathlib import Path
 from rich.console import Console
 from rich.panel import Panel
+from rich.table import Table
 from prompt_toolkit.application import Application
 from prompt_toolkit.key_binding import KeyBindings
 from prompt_toolkit.key_binding.key_bindings import merge_key_bindings
@@ -32,8 +34,13 @@ from ghostshell.config.loader import (
     normalize_config_payload,
     save_config_file,
 )
+from ghostshell.engine.provenance import sign_proof_payload
 
 app = typer.Typer(add_completion=False)
+provenance_registry_app = typer.Typer(add_completion=False, help="Manage provenance agent registry")
+ai_session_app = typer.Typer(add_completion=False, help="Manage AI session signing context")
+app.add_typer(provenance_registry_app, name="provenance-registry")
+app.add_typer(ai_session_app, name="ai-session")
 console = Console()
 
 CONFIG_DIR = os.path.expanduser("~/.ghostshell")
@@ -1699,6 +1706,416 @@ def doctor():
         return
 
     console.print("[green]Doctor result:[/green] OK")
+
+
+@app.command()
+def provenance(
+    limit: int = typer.Option(50, "--limit", min=1, max=500, help="Max rows to return"),
+    label: str = typer.Option("", "--label", help="Filter by attribution label"),
+    contains: str = typer.Option("", "--contains", help="Filter commands by substring"),
+    since_ts: int = typer.Option(0, "--since-ts", help="Only rows with ts >= value"),
+    tier: str = typer.Option("", "--tier", help="Filter by evidence tier"),
+    agent: str = typer.Option("", "--agent", help="Filter by inferred agent"),
+    agent_name: str = typer.Option("", "--agent-name", help="Filter by optional agent display name"),
+    provider: str = typer.Option("", "--provider", help="Filter by provider"),
+    as_json: bool = typer.Option(False, "--json", help="Print raw JSON payload"),
+):
+    """Show command provenance attribution history."""
+    params = {
+        "limit": int(limit),
+        "label": str(label or "").strip(),
+        "command_contains": str(contains or "").strip(),
+        "since_ts": int(since_ts or 0),
+        "tier": str(tier or "").strip(),
+        "agent": str(agent or "").strip(),
+        "agent_name": str(agent_name or "").strip(),
+        "provider": str(provider or "").strip(),
+    }
+    try:
+        response = requests.get(
+            "http://127.0.0.1:22000/provenance/runs",
+            params=params,
+            timeout=8,
+        )
+    except Exception as exc:
+        console.print(f"[red]Failed to reach daemon:[/red] {exc}")
+        raise typer.Exit(code=1)
+
+    if response.status_code != 200:
+        body = response.text.strip()
+        if body:
+            console.print(f"[red]Provenance request failed ({response.status_code}):[/red] {body}")
+        else:
+            console.print(f"[red]Provenance request failed ({response.status_code}).[/red]")
+        raise typer.Exit(code=1)
+
+    try:
+        payload = response.json()
+    except ValueError:
+        console.print("[red]Invalid JSON response from provenance endpoint.[/red]")
+        raise typer.Exit(code=1)
+
+    if as_json:
+        console.print_json(data=payload)
+        return
+
+    runs = payload.get("runs", []) if isinstance(payload, dict) else []
+    if not isinstance(runs, list) or not runs:
+        console.print("[yellow]No provenance rows found.[/yellow]")
+        return
+
+    table = Table(title="GhostShell Command Provenance")
+    table.add_column("TS", style="dim")
+    table.add_column("Label")
+    table.add_column("Confidence", justify="right")
+    table.add_column("Tier")
+    table.add_column("Agent")
+    table.add_column("Agent Name")
+    table.add_column("Provider")
+    table.add_column("Model")
+    table.add_column("Command", overflow="fold")
+
+    for row in runs:
+        if not isinstance(row, dict):
+            continue
+        ts_value = int(row.get("ts", 0) or 0)
+        ts_display = (
+            time.strftime("%Y-%m-%d %H:%M:%S", time.localtime(ts_value))
+            if ts_value > 0
+            else "-"
+        )
+        table.add_row(
+            ts_display,
+            str(row.get("label", "") or ""),
+            f"{float(row.get('confidence', 0.0) or 0.0):.2f}",
+            str(row.get("evidence_tier", "") or ""),
+            str(row.get("agent", "") or ""),
+            str(row.get("agent_name", "") or ""),
+            str(row.get("provider", "") or ""),
+            str(row.get("model", "") or ""),
+            str(row.get("command", "") or ""),
+        )
+    console.print(table)
+
+
+def _shell_export_line(name: str, value: str) -> str:
+    return f"export {name}={shlex.quote(str(value or ''))}"
+
+
+@ai_session_app.command("start")
+def ai_session_start(
+    agent: str = typer.Option(..., "--agent", help="Agent identifier"),
+    model: str = typer.Option(..., "--model", help="Raw model identifier"),
+    agent_name: str = typer.Option("", "--agent-name", help="Optional user-facing agent name"),
+    ttl_minutes: int = typer.Option(120, "--ttl-minutes", min=1, max=1440, help="Session expiration in minutes"),
+):
+    """Emit shell exports to start AI session signing."""
+    clean_agent = str(agent or "").strip().lower()
+    clean_model = str(model or "").strip()
+    clean_agent_name = str(agent_name or "").strip()
+    if not clean_agent:
+        console.print("[red]--agent is required[/red]")
+        raise typer.Exit(code=2)
+    if not clean_model:
+        console.print("[red]--model is required[/red]")
+        raise typer.Exit(code=2)
+
+    now_ts = int(time.time())
+    expires_ts = now_ts + int(ttl_minutes) * 60
+    session_id = uuid.uuid4().hex[:16]
+    lines = [
+        _shell_export_line("GHOSTSHELL_AI_SESSION_ACTIVE", "1"),
+        _shell_export_line("GHOSTSHELL_AI_SESSION_AGENT", clean_agent),
+        _shell_export_line("GHOSTSHELL_AI_SESSION_MODEL", clean_model),
+        _shell_export_line("GHOSTSHELL_AI_SESSION_AGENT_NAME", clean_agent_name),
+        _shell_export_line("GHOSTSHELL_AI_SESSION_ID", session_id),
+        _shell_export_line("GHOSTSHELL_AI_SESSION_STARTED_TS", str(now_ts)),
+        _shell_export_line("GHOSTSHELL_AI_SESSION_EXPIRES_TS", str(expires_ts)),
+    ]
+    console.print("\n".join(lines), highlight=False)
+
+
+@ai_session_app.command("stop")
+def ai_session_stop():
+    """Emit shell unsets to stop AI session signing."""
+    names = [
+        "GHOSTSHELL_AI_SESSION_ACTIVE",
+        "GHOSTSHELL_AI_SESSION_AGENT",
+        "GHOSTSHELL_AI_SESSION_MODEL",
+        "GHOSTSHELL_AI_SESSION_AGENT_NAME",
+        "GHOSTSHELL_AI_SESSION_ID",
+        "GHOSTSHELL_AI_SESSION_STARTED_TS",
+        "GHOSTSHELL_AI_SESSION_EXPIRES_TS",
+    ]
+    lines = [f"unset {name}" for name in names]
+    console.print("\n".join(lines), highlight=False)
+
+
+@ai_session_app.command("status")
+def ai_session_status():
+    """Show AI session signing status from current shell environment."""
+    active = str(os.environ.get("GHOSTSHELL_AI_SESSION_ACTIVE", "") or "").strip() == "1"
+    if not active:
+        console.print("inactive")
+        raise typer.Exit(code=0)
+
+    now_ts = int(time.time())
+    try:
+        expires_ts = int(str(os.environ.get("GHOSTSHELL_AI_SESSION_EXPIRES_TS", "0") or "0"))
+    except Exception:
+        expires_ts = 0
+    remaining = max(0, expires_ts - now_ts) if expires_ts > 0 else 0
+    agent = str(os.environ.get("GHOSTSHELL_AI_SESSION_AGENT", "") or "").strip()
+    model = str(os.environ.get("GHOSTSHELL_AI_SESSION_MODEL", "") or "").strip()
+    session_id = str(os.environ.get("GHOSTSHELL_AI_SESSION_ID", "") or "").strip()
+    name = str(os.environ.get("GHOSTSHELL_AI_SESSION_AGENT_NAME", "") or "").strip()
+    state = "active" if remaining > 0 or expires_ts == 0 else "expired"
+    console.print(
+        f"{state} agent={agent} model={model} agent_name={name or '-'} session_id={session_id or '-'} remaining_seconds={remaining}"
+    )
+
+
+@app.command("ai-exec", context_settings={"allow_extra_args": True, "ignore_unknown_options": True})
+def ai_exec(
+    ctx: typer.Context,
+    agent: str = typer.Option(..., "--agent", help="Agent identifier, for example codex"),
+    model: str = typer.Option(..., "--model", help="Raw model identifier, for example gpt-5.3"),
+    agent_name: str = typer.Option("", "--agent-name", help="Optional user-facing agent name"),
+    trace: str = typer.Option("", "--trace", help="Optional trace id"),
+    source: str = typer.Option("unknown", "--source", help="Log source (runtime/history/unknown)"),
+):
+    """Run a command with deterministic AI_EXECUTED proof metadata."""
+    args = list(ctx.args or [])
+    if args and args[0] == "--":
+        args = args[1:]
+    if not args:
+        console.print("[red]No command provided.[/red]")
+        raise typer.Exit(code=2)
+
+    clean_source = str(source or "unknown").strip().lower()
+    if clean_source not in {"runtime", "history", "unknown"}:
+        clean_source = "unknown"
+
+    trace_id = str(trace or "").strip() or uuid.uuid4().hex[:12]
+    ts = int(time.time())
+    signature = sign_proof_payload(
+        "AI_EXECUTED",
+        str(agent or "").strip(),
+        str(model or "").strip(),
+        trace_id,
+        ts,
+    )
+
+    command_text = shlex.join(args)
+    try:
+        result = subprocess.run(args, check=False)
+        exit_code = int(result.returncode or 0)
+    except KeyboardInterrupt:
+        exit_code = 130
+    except Exception as exc:
+        console.print(f"[red]Command execution failed:[/red] {exc}")
+        raise typer.Exit(code=1)
+
+    payload = {
+        "command": command_text,
+        "exit_code": exit_code,
+        "source": clean_source,
+        "working_directory": os.getcwd(),
+        "shell_pid": os.getppid(),
+        "provenance_last_action": "suggestion_accept",
+        "provenance_accept_origin": "ai",
+        "provenance_accept_mode": "replace_full",
+        "provenance_suggestion_kind": "agent_wrapper",
+        "provenance_manual_edit_after_accept": False,
+        "provenance_ai_agent": str(agent or "").strip(),
+        "provenance_ai_provider": "",
+        "provenance_ai_model": str(model or "").strip(),
+        "provenance_agent_name": str(agent_name or "").strip(),
+        "provenance_agent_hint": str(agent or "").strip(),
+        "provenance_model_raw": str(model or "").strip(),
+        "provenance_wrapper_id": f"aiterminal_ai_exec:{trace_id}",
+        "proof_label": "AI_EXECUTED",
+        "proof_agent": str(agent or "").strip(),
+        "proof_model": str(model or "").strip(),
+        "proof_trace": trace_id,
+        "proof_timestamp": ts,
+        "proof_signature": signature,
+    }
+
+    try:
+        response = requests.post(
+            "http://127.0.0.1:22000/log_command",
+            json=payload,
+            timeout=8,
+        )
+        if response.status_code != 200:
+            body = response.text.strip()
+            if body:
+                console.print(f"[yellow]Warning: log_command failed ({response.status_code}):[/yellow] {body}")
+            else:
+                console.print(f"[yellow]Warning: log_command failed ({response.status_code}).[/yellow]")
+    except Exception as exc:
+        console.print(f"[yellow]Warning: could not log provenance:[/yellow] {exc}")
+
+    raise typer.Exit(code=exit_code)
+
+
+@app.command()
+def wrap(
+    agent: str = typer.Argument(..., help="Agent identifier"),
+    model: str = typer.Option("gpt-5.3", "--model", help="Default model for the wrapper"),
+    function_name: str = typer.Option("", "--name", help="Wrapper function name"),
+):
+    """Print a shell wrapper that routes executions through aiterminal ai-exec."""
+    clean_agent = str(agent or "").strip()
+    if not clean_agent:
+        console.print("[red]Agent is required.[/red]")
+        raise typer.Exit(code=2)
+    wrapper_name = str(function_name or "").strip() or f"{clean_agent.replace('-', '_')}_run"
+    snippet = (
+        f"{wrapper_name}() {{\n"
+        f"  aiterminal ai-exec --agent {shlex.quote(clean_agent)} --model {shlex.quote(str(model or '').strip())} -- \"$@\"\n"
+        "}"
+    )
+    console.print(snippet)
+
+
+@provenance_registry_app.command("list")
+def provenance_registry_list(
+    status: str = typer.Option("", "--status", help="Optional status filter: verified/community"),
+    as_json: bool = typer.Option(False, "--json", help="Print raw JSON payload"),
+):
+    params = {"status": str(status or "").strip()}
+    try:
+        response = requests.get(
+            "http://127.0.0.1:22000/provenance/registry/agents",
+            params=params,
+            timeout=8,
+        )
+    except Exception as exc:
+        console.print(f"[red]Failed to reach daemon:[/red] {exc}")
+        raise typer.Exit(code=1)
+
+    if response.status_code != 200:
+        console.print(f"[red]Registry list failed ({response.status_code}).[/red]")
+        raise typer.Exit(code=1)
+
+    payload = response.json()
+    if as_json:
+        console.print_json(data=payload)
+        return
+
+    agents = payload.get("agents", []) if isinstance(payload, dict) else []
+    if not isinstance(agents, list) or not agents:
+        console.print("[yellow]No registry agents found.[/yellow]")
+        return
+
+    table = Table(title="GhostShell Provenance Registry")
+    table.add_column("Agent")
+    table.add_column("Status")
+    table.add_column("Executables")
+    table.add_column("Aliases", overflow="fold")
+    for row in agents:
+        if not isinstance(row, dict):
+            continue
+        table.add_row(
+            str(row.get("agent_id", "") or ""),
+            str(row.get("status", "") or ""),
+            ", ".join([str(x) for x in row.get("executables", []) if str(x)]),
+            ", ".join([str(x) for x in row.get("aliases", []) if str(x)]),
+        )
+    console.print(table)
+
+
+@provenance_registry_app.command("show-agent")
+def provenance_registry_show_agent(
+    agent_id: str = typer.Argument(..., help="Agent id"),
+    as_json: bool = typer.Option(False, "--json", help="Print raw JSON payload"),
+):
+    try:
+        response = requests.get(
+            f"http://127.0.0.1:22000/provenance/registry/agents/{agent_id}",
+            timeout=8,
+        )
+    except Exception as exc:
+        console.print(f"[red]Failed to reach daemon:[/red] {exc}")
+        raise typer.Exit(code=1)
+
+    if response.status_code == 404:
+        console.print(f"[yellow]Agent not found: {agent_id}[/yellow]")
+        raise typer.Exit(code=1)
+    if response.status_code != 200:
+        console.print(f"[red]Show-agent failed ({response.status_code}).[/red]")
+        raise typer.Exit(code=1)
+
+    payload = response.json()
+    if as_json:
+        console.print_json(data=payload)
+        return
+    summary = payload.get("summary", {}) if isinstance(payload, dict) else {}
+    console.print_json(data=summary if isinstance(summary, dict) else {})
+
+
+@provenance_registry_app.command("refresh")
+def provenance_registry_refresh(
+    force: bool = typer.Option(False, "--force", help="Bypass refresh interval guard"),
+    as_json: bool = typer.Option(False, "--json", help="Print raw JSON payload"),
+):
+    try:
+        response = requests.post(
+            "http://127.0.0.1:22000/provenance/registry/refresh",
+            params={"force": "true" if force else "false"},
+            timeout=10,
+        )
+    except Exception as exc:
+        console.print(f"[red]Failed to reach daemon:[/red] {exc}")
+        raise typer.Exit(code=1)
+
+    if response.status_code != 200:
+        console.print(f"[red]Registry refresh failed ({response.status_code}).[/red]")
+        raise typer.Exit(code=1)
+
+    payload = response.json()
+    if as_json:
+        console.print_json(data=payload)
+        return
+
+    ok = bool(payload.get("ok", False)) if isinstance(payload, dict) else False
+    reason = str(payload.get("reason", "") or "") if isinstance(payload, dict) else ""
+    version = str(payload.get("version", "") or "") if isinstance(payload, dict) else ""
+    style = "green" if ok else "yellow"
+    console.print(f"[{style}]refresh ok={ok} reason={reason} version={version}[/{style}]")
+
+
+@provenance_registry_app.command("verify")
+def provenance_registry_verify(
+    as_json: bool = typer.Option(False, "--json", help="Print raw JSON payload"),
+):
+    try:
+        response = requests.get(
+            "http://127.0.0.1:22000/provenance/registry/verify",
+            timeout=8,
+        )
+    except Exception as exc:
+        console.print(f"[red]Failed to reach daemon:[/red] {exc}")
+        raise typer.Exit(code=1)
+
+    if response.status_code != 200:
+        console.print(f"[red]Registry verify failed ({response.status_code}).[/red]")
+        raise typer.Exit(code=1)
+
+    payload = response.json()
+    if as_json:
+        console.print_json(data=payload)
+        return
+
+    ok = bool(payload.get("ok", False)) if isinstance(payload, dict) else False
+    reason = str(payload.get("reason", "") or "") if isinstance(payload, dict) else ""
+    version = str(payload.get("version", "") or "") if isinstance(payload, dict) else ""
+    verified_at = int(payload.get("verified_at", 0) or 0) if isinstance(payload, dict) else 0
+    ts_display = time.strftime("%Y-%m-%d %H:%M:%S", time.localtime(verified_at)) if verified_at > 0 else "-"
+    style = "green" if ok else "yellow"
+    console.print(f"[{style}]verify ok={ok} reason={reason} version={version} verified_at={ts_display}[/{style}]")
 
 
 def _run_fix_safe() -> int:

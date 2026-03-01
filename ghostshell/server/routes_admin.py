@@ -58,6 +58,7 @@ def repair_import(payload: RepairImportPayload) -> RepairImportResponse:
         "commands_imported": int(result.get("commands_imported", 0) or 0),
         "feedback_imported": int(result.get("feedback_imported", 0) or 0),
         "removed_imported": int(result.get("removed_imported", 0) or 0),
+        "provenance_imported": int(result.get("provenance_imported", 0) or 0),
     }
 
 

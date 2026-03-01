@@ -17,6 +17,15 @@ from ghostshell.config.loader import (
     MAX_TIMEOUT_SECONDS,
     MIN_TIMEOUT_SECONDS,
 )
+from .provenance import (
+    classify_command_run,
+    get_agent_registry,
+    get_registry_agent,
+    get_registry_summary,
+    list_registry_agents,
+    refresh_agent_registry,
+    verify_cached_agent_registry,
+)
 from ghostshell.privacy.guard import PrivacyGuard, PrivacyGuardError
 from .context import RequestContext, Settings, SystemInventory
 
@@ -86,6 +95,7 @@ class SuggestionEngine:
         self.snapshot_state = "missing"
         self.auto_recover_attempted = False
         self.auto_recover_result = "skipped"
+        self._last_command_runs_prune_ts = 0
         self.state_store = None
         self.event_journal = None
         self.snapshot_manager = None
@@ -910,6 +920,35 @@ class SuggestionEngine:
     def _is_provider(config: dict, provider_name: str) -> bool:
         return str(config.get("provider", "openai") or "openai").strip().lower() == provider_name
 
+    @staticmethod
+    def _derive_ai_agent(provider: str, model: str) -> str:
+        registry = get_agent_registry(force_reload=False)
+        inferred = registry.infer_agent_from_provider_model(provider=provider, model=model)
+        agent = str(inferred.get("agent_id", "") or "").strip().lower()
+        if agent:
+            return agent
+        provider_l = str(provider or "").strip().lower()
+        return provider_l or "unknown"
+
+    def get_ai_identity(self, config: dict) -> dict[str, str]:
+        provider = str(config.get("provider", "openai") or "openai").strip().lower()
+        if provider == "history_only":
+            return {"ai_agent": "", "ai_provider": "", "ai_model": ""}
+        kwargs = self._build_llm_kwargs(
+            config,
+            [{"role": "user", "content": "identity"}],
+            temperature=0.0,
+        )
+        model = str(kwargs.get("model", "") or "").strip()
+        registry = get_agent_registry(force_reload=False)
+        inferred = registry.infer_agent_from_provider_model(provider=provider, model=model)
+        agent = str(inferred.get("agent_id", "") or "").strip().lower() or self._derive_ai_agent(provider, model)
+        return {
+            "ai_agent": agent,
+            "ai_provider": provider,
+            "ai_model": model,
+        }
+
     def _build_lm_studio_rest_endpoint(self, config: dict) -> str:
         base_url = str(config.get("base_url", "") or "").strip()
         if not base_url:
@@ -1333,9 +1372,13 @@ class SuggestionEngine:
             "explanation": "I can only help with terminal commands in '#' mode. Use '##' for general questions.",
             "alternatives": [],
             "copy_block": "",
+            "ai_agent": "",
+            "ai_provider": "",
+            "ai_model": "",
         }
 
         try:
+            ai_identity = self.get_ai_identity(config)
             request_messages = [
                 {"role": "system", "content": system_prompt},
                 {"role": "user", "content": user_prompt},
@@ -1368,6 +1411,7 @@ class SuggestionEngine:
             )
             parsed = self._parse_json_payload(raw)
             if not parsed:
+                result.update(ai_identity)
                 return result
 
             status = str(parsed.get("status", "refusal")).strip().lower()
@@ -1402,6 +1446,7 @@ class SuggestionEngine:
                     "explanation": explanation or "I can only help with terminal commands in '#' mode. Use '##' for general questions.",
                     "alternatives": [],
                     "copy_block": "",
+                    **ai_identity,
                 }
 
             return {
@@ -1410,6 +1455,7 @@ class SuggestionEngine:
                 "explanation": explanation or "Here is a command you can run.",
                 "alternatives": safe_alternatives,
                 "copy_block": primary,
+                **ai_identity,
             }
         except PrivacyGuardError as e:
             logger.warning(
@@ -1422,6 +1468,9 @@ class SuggestionEngine:
                 "explanation": "Request blocked by privacy guard. Try a less sensitive prompt.",
                 "alternatives": [],
                 "copy_block": "",
+                "ai_agent": "",
+                "ai_provider": "",
+                "ai_model": "",
             }
         except Exception as e:
             logger.error(
@@ -1434,6 +1483,9 @@ class SuggestionEngine:
                 "explanation": "I couldn't generate a command right now. Try again.",
                 "alternatives": [],
                 "copy_block": "",
+                "ai_agent": "",
+                "ai_provider": "",
+                "ai_model": "",
             }
 
     async def get_general_assistant_reply(self, config: dict, ctx: RequestContext, prompt_text: str) -> str:
@@ -1539,6 +1591,7 @@ class SuggestionEngine:
         exit_code: int | None = None,
         source: str = "unknown",
         working_directory: str | None = None,
+        provenance_payload: dict | None = None,
     ):
         """
         Log a command that was executed by the user.
@@ -1567,6 +1620,109 @@ class SuggestionEngine:
                 "Failed to log command to vector DB: %s",
                 self.privacy_guard.sanitize_for_log(str(e)),
             )
+            return
+
+        if self.state_store is None:
+            return
+
+        payload = dict(provenance_payload or {})
+        try:
+            classification = classify_command_run(normalized_command, payload)
+            self.state_store.record_command_provenance(
+                command=normalized_command,
+                label=str(classification.get("label", "UNKNOWN") or "UNKNOWN"),
+                confidence=float(classification.get("confidence", 0.0) or 0.0),
+                agent=str(classification.get("agent", "") or ""),
+                agent_name=str(classification.get("agent_name", "") or ""),
+                provider=str(classification.get("provider", "") or ""),
+                model=str(classification.get("model", "") or ""),
+                raw_model=str(classification.get("raw_model", "") or ""),
+                normalized_model=str(classification.get("normalized_model", "") or ""),
+                model_fingerprint=str(classification.get("model_fingerprint", "") or ""),
+                evidence_tier=str(classification.get("evidence_tier", "") or ""),
+                agent_source=str(classification.get("agent_source", "") or ""),
+                registry_version=str(classification.get("registry_version", "") or ""),
+                registry_status=str(classification.get("registry_status", "") or ""),
+                source=normalized_source,
+                working_directory=str(working_directory or ""),
+                exit_code=exit_code,
+                shell_pid=(
+                    int(payload.get("shell_pid"))
+                    if payload.get("shell_pid", None) is not None
+                    else None
+                ),
+                evidence=[str(item) for item in classification.get("evidence", []) if str(item)],
+                payload=payload,
+            )
+            self._maybe_prune_command_runs()
+        except Exception as e:
+            logger.error(
+                "Failed to persist command provenance: %s",
+                self.privacy_guard.sanitize_for_log(str(e)),
+            )
+
+    def _maybe_prune_command_runs(self) -> None:
+        if self.state_store is None:
+            return
+        now_ts = int(time.time())
+        # Bound prune cost to at most once per hour.
+        if now_ts - int(self._last_command_runs_prune_ts or 0) < 3600:
+            return
+        cutoff = now_ts - (30 * 24 * 3600)
+        try:
+            self.state_store.prune_command_runs(cutoff)
+            self._last_command_runs_prune_ts = now_ts
+        except Exception as exc:
+            logger.warning(
+                "Failed to prune command provenance rows: %s",
+                self.privacy_guard.sanitize_for_log(str(exc)),
+            )
+
+    def list_command_runs(
+        self,
+        limit: int = 50,
+        label: str = "",
+        command_contains: str = "",
+        since_ts: int = 0,
+        tier: str = "",
+        agent: str = "",
+        agent_name: str = "",
+        provider: str = "",
+    ) -> list[dict]:
+        if self.state_store is None:
+            return []
+        try:
+            return self.state_store.list_command_runs(
+                limit=limit,
+                label=label,
+                command_contains=command_contains,
+                since_ts=since_ts,
+                tier=tier,
+                agent=agent,
+                agent_name=agent_name,
+                provider=provider,
+            )
+        except Exception as exc:
+            logger.error(
+                "Failed to list command provenance rows: %s",
+                self.privacy_guard.sanitize_for_log(str(exc)),
+            )
+            return []
+
+    def get_provenance_registry_summary(self) -> dict:
+        return get_registry_summary(force_reload=False)
+
+    def list_provenance_registry_agents(self, status_filter: str = "") -> list[dict]:
+        return list_registry_agents(status_filter=status_filter, force_reload=False)
+
+    def get_provenance_registry_agent(self, agent_id: str) -> dict | None:
+        return get_registry_agent(agent_id, force_reload=False)
+
+    def refresh_provenance_registry(self, config: dict | None = None, force: bool = False) -> dict:
+        return refresh_agent_registry(config=config or {}, force=force)
+
+    def verify_provenance_registry_cache(self, config: dict | None = None) -> dict:
+        return verify_cached_agent_registry(config=config or {})
     
     def close(self, join_timeout_seconds: float = 20.0, shutdown_reason: str = ""):
         """Clean up resources."""

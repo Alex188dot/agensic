@@ -40,6 +40,41 @@ class StateBackendTests(unittest.TestCase):
             )
             self.assertEqual(repo_execute_counts["git status"], 1)
 
+            recorded = store.record_command_provenance(
+                command="git status",
+                label="HUMAN_TYPED",
+                confidence=0.9,
+                agent="codex",
+                agent_name="Planner A",
+                provider="openai",
+                model="gpt-5.3",
+                raw_model="gpt-5.3",
+                normalized_model="gpt-5-codex",
+                model_fingerprint="codex_gpt-5-codex",
+                evidence_tier="integrated",
+                agent_source="payload_ai",
+                registry_version="builtin-2026-02-28",
+                registry_status="verified",
+                source="runtime",
+                shell_pid=123,
+                evidence=["last_action=human_typed"],
+                payload={"provenance_last_action": "human_typed"},
+                ts=1700000000,
+                run_id="run-1",
+            )
+            self.assertTrue(recorded)
+            runs = store.list_command_runs(limit=10)
+            self.assertEqual(len(runs), 1)
+            self.assertEqual(runs[0]["run_id"], "run-1")
+            self.assertEqual(runs[0]["label"], "HUMAN_TYPED")
+            self.assertEqual(runs[0]["agent_name"], "Planner A")
+            self.assertEqual(runs[0]["raw_model"], "gpt-5.3")
+            self.assertEqual(runs[0]["normalized_model"], "gpt-5-codex")
+            self.assertEqual(runs[0]["evidence_tier"], "integrated")
+            self.assertEqual(runs[0]["registry_status"], "verified")
+            filtered = store.list_command_runs(limit=10, tier="integrated", agent="codex", agent_name="Planner A", provider="openai")
+            self.assertEqual(len(filtered), 1)
+
     def test_snapshot_restore_and_journal_replay(self):
         with tempfile.TemporaryDirectory() as tmp:
             db_path = os.path.join(tmp, "state.sqlite")
@@ -68,6 +103,31 @@ class StateBackendTests(unittest.TestCase):
 
             stats = restored_store.get_command_stats(["python app.py"])
             self.assertEqual(stats["python app.py"]["execute_count"], 2)
+
+    def test_command_runs_export_import_and_prune(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            db_path = os.path.join(tmp, "state.sqlite")
+            store = SQLiteStateStore(db_path, journal=None)
+            store.record_command_provenance(
+                command="echo hello",
+                label="UNKNOWN",
+                confidence=0.3,
+                ts=1700000000,
+                run_id="run-a",
+            )
+            payload = store.export_payload()
+
+            second_path = os.path.join(tmp, "state-2.sqlite")
+            restored = SQLiteStateStore(second_path, journal=None)
+            result = restored.import_payload(payload)
+            self.assertGreaterEqual(int(result.get("provenance_imported", 0) or 0), 1)
+            runs = restored.list_command_runs(limit=5)
+            self.assertEqual(len(runs), 1)
+            self.assertEqual(runs[0]["run_id"], "run-a")
+
+            removed = restored.prune_command_runs(older_than_ts=1700000001)
+            self.assertEqual(removed, 1)
+            self.assertEqual(restored.list_command_runs(limit=5), [])
 
     def test_event_idempotency_with_applied_events(self):
         with tempfile.TemporaryDirectory() as tmp:

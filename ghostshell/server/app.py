@@ -11,6 +11,7 @@ from ghostshell.server.routes_assist import router as assist_router
 from ghostshell.server.routes_command_store import router as command_store_router
 from ghostshell.server.routes_intent import router as intent_router
 from ghostshell.server.routes_predict import router as predict_router
+from ghostshell.server.routes_provenance import router as provenance_router
 
 
 @asynccontextmanager
@@ -21,6 +22,16 @@ async def lifespan(app: FastAPI):
     startup_history = deps.get_history_file(os.environ.get("SHELL", "zsh"))
     if startup_history:
         deps.engine.bootstrap_async(startup_history)
+    try:
+        summary = deps.engine.get_provenance_registry_summary()
+        deps.logger.info(
+            "Provenance registry loaded version=%s source=%s agents=%s",
+            str(summary.get("version", "") or ""),
+            str(summary.get("source", "") or ""),
+            int(summary.get("agent_count", 0) or 0),
+        )
+    except Exception as exc:
+        deps.logger.warning("Failed to load provenance registry summary: %s", str(exc))
     yield
     deps.begin_shutdown("lifespan")
     drained = deps.wait_for_active_jobs_to_drain(timeout_seconds=5.0, poll_interval_seconds=0.05)
@@ -42,6 +53,7 @@ app.include_router(predict_router)
 app.include_router(intent_router)
 app.include_router(assist_router)
 app.include_router(command_store_router)
+app.include_router(provenance_router)
 app.include_router(admin_router)
 
 

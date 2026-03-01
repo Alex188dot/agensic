@@ -1,0 +1,150 @@
+{
+  "version": "builtin-2026-02-28",
+  "agents": [
+    {
+      "agent_id": "cursor",
+      "display_name": "Cursor",
+      "aliases": ["cursor-ai", "cursor_agent"],
+      "executables": ["cursor-agent", "cursor"],
+      "process_tokens": ["cursor", "cursor-agent"],
+      "window_tokens": ["cursor"],
+      "model_patterns": [
+        {"pattern": "(?:^|/)(gpt-[\\w.-]*codex[\\w.-]*)$", "normalized": "gpt-codex"},
+        {"pattern": "(?:^|/)(claude[\\w.-]*)$", "normalized": "claude"}
+      ],
+      "provider_hints": ["cursor"],
+      "status": "verified"
+    },
+    {
+      "agent_id": "codex",
+      "display_name": "OpenAI Codex",
+      "aliases": ["openai-codex", "codex-cli"],
+      "executables": ["codex"],
+      "process_tokens": ["codex", "openai codex"],
+      "window_tokens": ["codex"],
+      "model_patterns": [
+        {"pattern": "(?:^|/)(gpt-5(?:\\.[0-9]+)?(?:-codex)?|codex[\\w.-]*)$", "normalized": "gpt-5-codex"},
+        {"pattern": "(?:^|/)(o[0-9][\\w.-]*)$", "normalized": "openai-reasoning"}
+      ],
+      "provider_hints": ["openai"],
+      "status": "verified"
+    },
+    {
+      "agent_id": "claude_code",
+      "display_name": "Claude Code",
+      "aliases": ["claude", "claude-code", "codeclaude"],
+      "executables": ["claude"],
+      "process_tokens": ["claude code", "anthropic", "claude"],
+      "window_tokens": ["claude"],
+      "model_patterns": [
+        {"pattern": "(?:^|/)(claude[\\w.-]*)$", "normalized": "claude"}
+      ],
+      "provider_hints": ["anthropic"],
+      "status": "verified"
+    },
+    {
+      "agent_id": "opencode",
+      "display_name": "OpenCode",
+      "aliases": ["open-code"],
+      "executables": ["opencode"],
+      "process_tokens": ["opencode", "open code"],
+      "window_tokens": ["opencode"],
+      "model_patterns": [
+        {"pattern": "(?:^|/)(gpt-[\\w.-]+|claude[\\w.-]+|gemini[\\w.-]+)$", "normalized": "llm-generic"}
+      ],
+      "provider_hints": ["opencode"],
+      "status": "verified"
+    },
+    {
+      "agent_id": "openclaw",
+      "display_name": "OpenClaw",
+      "aliases": ["open-claw"],
+      "executables": ["openclaw"],
+      "process_tokens": ["openclaw", "open claw"],
+      "window_tokens": ["openclaw"],
+      "model_patterns": [
+        {"pattern": "(?:^|/)(gpt-[\\w.-]+|claude[\\w.-]+)$", "normalized": "llm-generic"}
+      ],
+      "provider_hints": ["openclaw"],
+      "status": "verified"
+    },
+    {
+      "agent_id": "windsurf",
+      "display_name": "Windsurf",
+      "aliases": ["codeium-windsurf", "windsurf-ai"],
+      "executables": ["windsurf"],
+      "process_tokens": ["windsurf", "codeium"],
+      "window_tokens": ["windsurf"],
+      "model_patterns": [
+        {"pattern": "(?:^|/)(claude[\\w.-]+|gpt-[\\w.-]+)$", "normalized": "llm-generic"}
+      ],
+      "provider_hints": ["windsurf"],
+      "status": "verified"
+    },
+    {
+      "agent_id": "kiro",
+      "display_name": "Kiro",
+      "aliases": ["kiro", "kiro-ai"],
+      "executables": ["kiro-cli", "kiro"],
+      "process_tokens": ["kiro"],
+      "window_tokens": ["kiro"],
+      "model_patterns": [
+        {"pattern": "(?:^|/)(claude[\\w.-]+|gpt-[\\w.-]+)$", "normalized": "llm-generic"}
+      ],
+      "provider_hints": ["kiro"],
+      "status": "verified"
+    },
+    {
+      "agent_id": "gemini_cli",
+      "display_name": "Gemini CLI",
+      "aliases": ["gemini", "google-gemini-cli"],
+      "executables": ["gemini"],
+      "process_tokens": ["gemini", "google gemini"],
+      "window_tokens": ["gemini"],
+      "model_patterns": [
+        {"pattern": "(?:^|/)(gemini[\\w.-]*)$", "normalized": "gemini"}
+      ],
+      "provider_hints": ["gemini"],
+      "status": "verified"
+    },
+    {
+      "agent_id": "antigravity",
+      "display_name": "Antigravity",
+      "aliases": ["google-antigravity"],
+      "executables": ["antigravity"],
+      "process_tokens": ["antigravity"],
+      "window_tokens": ["antigravity"],
+      "model_patterns": [
+        {"pattern": "(?:^|/)(gemini[\\w.-]+)$", "normalized": "gemini"}
+      ],
+      "provider_hints": ["antigravity"],
+      "status": "community"
+    },
+    {
+      "agent_id": "aider",
+      "display_name": "Aider",
+      "aliases": ["aider-chat"],
+      "executables": ["aider"],
+      "process_tokens": ["aider"],
+      "window_tokens": ["aider"],
+      "model_patterns": [
+        {"pattern": "(?:^|/)(gpt-[\\w.-]+|claude[\\w.-]+|gemini[\\w.-]+)$", "normalized": "llm-generic"}
+      ],
+      "provider_hints": ["aider"],
+      "status": "verified"
+    },
+    {
+      "agent_id": "continue",
+      "display_name": "Continue",
+      "aliases": ["continue-dev"],
+      "executables": ["continue"],
+      "process_tokens": ["continue", "continuedev"],
+      "window_tokens": ["continue"],
+      "model_patterns": [
+        {"pattern": "(?:^|/)(gpt-[\\w.-]+|claude[\\w.-]+|gemini[\\w.-]+)$", "normalized": "llm-generic"}
+      ],
+      "provider_hints": ["continue"],
+      "status": "verified"
+    }
+  ]
+}

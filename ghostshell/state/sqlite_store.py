@@ -76,6 +76,36 @@ class SQLiteStateStore:
                     removed_at INTEGER NOT NULL
                 );
 
+                CREATE TABLE IF NOT EXISTS command_runs (
+                    run_id TEXT PRIMARY KEY,
+                    ts INTEGER NOT NULL,
+                    command TEXT NOT NULL,
+                    label TEXT NOT NULL,
+                    confidence REAL NOT NULL DEFAULT 0,
+                    agent TEXT NOT NULL DEFAULT '',
+                    agent_name TEXT NOT NULL DEFAULT '',
+                    provider TEXT NOT NULL DEFAULT '',
+                    model TEXT NOT NULL DEFAULT '',
+                    raw_model TEXT NOT NULL DEFAULT '',
+                    normalized_model TEXT NOT NULL DEFAULT '',
+                    model_fingerprint TEXT NOT NULL DEFAULT '',
+                    evidence_tier TEXT NOT NULL DEFAULT '',
+                    agent_source TEXT NOT NULL DEFAULT '',
+                    registry_version TEXT NOT NULL DEFAULT '',
+                    registry_status TEXT NOT NULL DEFAULT '',
+                    source TEXT NOT NULL DEFAULT 'unknown',
+                    working_directory TEXT NOT NULL DEFAULT '',
+                    exit_code INTEGER,
+                    shell_pid INTEGER,
+                    evidence_json TEXT NOT NULL DEFAULT '[]',
+                    payload_json TEXT NOT NULL DEFAULT '{}',
+                    created_at INTEGER NOT NULL
+                );
+
+                CREATE INDEX IF NOT EXISTS idx_command_runs_ts ON command_runs(ts DESC);
+                CREATE INDEX IF NOT EXISTS idx_command_runs_label_ts ON command_runs(label, ts DESC);
+                CREATE INDEX IF NOT EXISTS idx_command_runs_command_ts ON command_runs(command, ts DESC);
+
                 CREATE TABLE IF NOT EXISTS history_index_state (
                     history_file TEXT PRIMARY KEY,
                     inode INTEGER NOT NULL,
@@ -95,7 +125,30 @@ class SQLiteStateStore:
                 );
                 """
             )
+            self._ensure_command_runs_columns(conn)
             conn.commit()
+
+    @staticmethod
+    def _table_columns(conn: sqlite3.Connection, table_name: str) -> set[str]:
+        rows = conn.execute(f"PRAGMA table_info({table_name})").fetchall()
+        return {str(row["name"] or "").strip() for row in rows if str(row["name"] or "").strip()}
+
+    def _ensure_command_runs_columns(self, conn: sqlite3.Connection) -> None:
+        existing = self._table_columns(conn, "command_runs")
+        required_columns = {
+            "agent_name": "TEXT NOT NULL DEFAULT ''",
+            "raw_model": "TEXT NOT NULL DEFAULT ''",
+            "normalized_model": "TEXT NOT NULL DEFAULT ''",
+            "evidence_tier": "TEXT NOT NULL DEFAULT ''",
+            "agent_source": "TEXT NOT NULL DEFAULT ''",
+            "registry_version": "TEXT NOT NULL DEFAULT ''",
+            "registry_status": "TEXT NOT NULL DEFAULT ''",
+        }
+        for name, ddl in required_columns.items():
+            if name in existing:
+                continue
+            conn.execute(f"ALTER TABLE command_runs ADD COLUMN {name} {ddl}")
+            existing.add(name)
 
     def integrity_check(self) -> Tuple[bool, str]:
         try:
@@ -130,6 +183,13 @@ class SQLiteStateStore:
     @staticmethod
     def _clean_command(value: str) -> str:
         return str(value or "").strip()
+
+    @staticmethod
+    def _json_dumps(value: object, fallback: str) -> str:
+        try:
+            return json.dumps(value, separators=(",", ":"))
+        except Exception:
+            return fallback
 
     def _build_event(self, event_type: str, payload: Dict[str, object]) -> Dict[str, object]:
         out = dict(payload or {})
@@ -282,6 +342,65 @@ class SQLiteStateStore:
         elif etype == "manual_add":
             if command:
                 self._ensure_command_row(conn, command, ts)
+        elif etype == "command_provenance":
+            run_id = str(event.get("run_id", "") or "").strip()
+            label = str(event.get("label", "") or "").strip()
+            if run_id and command and label:
+                confidence = float(event.get("confidence", 0.0) or 0.0)
+                agent = str(event.get("agent", "") or "").strip().lower()
+                agent_name = str(event.get("agent_name", "") or "").strip()
+                provider = str(event.get("provider", "") or "").strip().lower()
+                model = str(event.get("model", "") or "").strip()
+                raw_model = str(event.get("raw_model", "") or "").strip()
+                normalized_model = str(event.get("normalized_model", "") or "").strip().lower()
+                fingerprint = str(event.get("model_fingerprint", "") or "").strip()
+                evidence_tier = str(event.get("evidence_tier", "") or "").strip().lower()
+                agent_source = str(event.get("agent_source", "") or "").strip().lower()
+                registry_version = str(event.get("registry_version", "") or "").strip()
+                registry_status = str(event.get("registry_status", "") or "").strip().lower()
+                source = str(event.get("source", "unknown") or "unknown").strip().lower()
+                working_directory = str(event.get("working_directory", "") or "").strip()
+                exit_code = event.get("exit_code", None)
+                shell_pid = event.get("shell_pid", None)
+                evidence_json = self._json_dumps(event.get("evidence", []), "[]")
+                payload_json = self._json_dumps(event.get("payload", {}), "{}")
+                conn.execute(
+                    """
+                    INSERT INTO command_runs(
+                        run_id, ts, command, label, confidence, agent, agent_name, provider, model,
+                        raw_model, normalized_model, model_fingerprint, evidence_tier, agent_source,
+                        registry_version, registry_status, source, working_directory, exit_code,
+                        shell_pid, evidence_json, payload_json, created_at
+                    )
+                    VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    ON CONFLICT(run_id) DO NOTHING
+                    """,
+                    (
+                        run_id,
+                        ts,
+                        command,
+                        label,
+                        confidence,
+                        agent,
+                        agent_name,
+                        provider,
+                        model,
+                        raw_model,
+                        normalized_model,
+                        fingerprint,
+                        evidence_tier,
+                        agent_source,
+                        registry_version,
+                        registry_status,
+                        source,
+                        working_directory,
+                        (int(exit_code) if exit_code is not None else None),
+                        (int(shell_pid) if shell_pid is not None else None),
+                        evidence_json,
+                        payload_json,
+                        ts,
+                    ),
+                )
         else:
             return False
 
@@ -448,6 +567,63 @@ class SQLiteStateStore:
             )
         return self.apply_events(events, append_to_journal=True)
 
+    def record_command_provenance(
+        self,
+        command: str,
+        label: str,
+        confidence: float,
+        agent: str = "",
+        agent_name: str = "",
+        provider: str = "",
+        model: str = "",
+        raw_model: str = "",
+        normalized_model: str = "",
+        model_fingerprint: str = "",
+        evidence_tier: str = "",
+        agent_source: str = "",
+        registry_version: str = "",
+        registry_status: str = "",
+        source: str = "unknown",
+        working_directory: str = "",
+        exit_code: Optional[int] = None,
+        shell_pid: Optional[int] = None,
+        evidence: Optional[List[str]] = None,
+        payload: Optional[Dict[str, object]] = None,
+        ts: Optional[int] = None,
+        run_id: Optional[str] = None,
+    ) -> bool:
+        normalized = self._clean_command(command)
+        clean_label = str(label or "").strip()
+        if not normalized or not clean_label:
+            return False
+        now_ts = int(ts or time.time())
+        event = {
+            "type": "command_provenance",
+            "run_id": str(run_id or uuid.uuid4()),
+            "command": normalized,
+            "label": clean_label,
+            "confidence": float(confidence or 0.0),
+            "agent": str(agent or "").strip().lower(),
+            "agent_name": str(agent_name or "").strip(),
+            "provider": str(provider or "").strip().lower(),
+            "model": str(model or "").strip(),
+            "raw_model": str(raw_model or "").strip(),
+            "normalized_model": str(normalized_model or "").strip().lower(),
+            "model_fingerprint": str(model_fingerprint or "").strip(),
+            "evidence_tier": str(evidence_tier or "").strip().lower(),
+            "agent_source": str(agent_source or "").strip().lower(),
+            "registry_version": str(registry_version or "").strip(),
+            "registry_status": str(registry_status or "").strip().lower(),
+            "source": str(source or "unknown").strip().lower(),
+            "working_directory": str(working_directory or "").strip(),
+            "exit_code": (int(exit_code) if exit_code is not None else None),
+            "shell_pid": (int(shell_pid) if shell_pid is not None else None),
+            "evidence": list(evidence or []),
+            "payload": dict(payload or {}),
+            "ts": now_ts,
+        }
+        return self.apply_event(event, append_to_journal=True)
+
     def apply_history_counts(self, command_counts: Dict[str, int], ts: Optional[int] = None) -> int:
         now_ts = int(ts or time.time())
         events: List[Dict[str, object]] = []
@@ -602,6 +778,117 @@ class SQLiteStateStore:
                 ).fetchall()
         return [self._clean_command(str(row["command"] or "")) for row in rows if row["command"]]
 
+    def list_command_runs(
+        self,
+        limit: int = 50,
+        label: str = "",
+        command_contains: str = "",
+        since_ts: int = 0,
+        tier: str = "",
+        agent: str = "",
+        agent_name: str = "",
+        provider: str = "",
+    ) -> List[Dict[str, object]]:
+        row_limit = max(1, min(500, int(limit or 50)))
+        label_filter = str(label or "").strip()
+        command_filter = str(command_contains or "").strip()
+        since = int(since_ts or 0)
+        tier_filter = str(tier or "").strip().lower()
+        agent_filter = str(agent or "").strip().lower()
+        agent_name_filter = str(agent_name or "").strip()
+        provider_filter = str(provider or "").strip().lower()
+
+        query = [
+            """
+            SELECT run_id, ts, command, label, confidence, agent, agent_name, provider, model, raw_model, normalized_model,
+                   model_fingerprint, evidence_tier, agent_source, registry_version, registry_status,
+                   source, working_directory, exit_code, shell_pid, evidence_json, payload_json
+            FROM command_runs
+            WHERE ts >= ?
+            """
+        ]
+        params: List[object] = [since]
+        if label_filter:
+            query.append("AND label = ?")
+            params.append(label_filter)
+        if command_filter:
+            query.append("AND command LIKE ?")
+            params.append(f"%{command_filter}%")
+        if tier_filter:
+            query.append("AND evidence_tier = ?")
+            params.append(tier_filter)
+        if agent_filter:
+            query.append("AND agent = ?")
+            params.append(agent_filter)
+        if agent_name_filter:
+            query.append("AND agent_name = ?")
+            params.append(agent_name_filter)
+        if provider_filter:
+            query.append("AND provider = ?")
+            params.append(provider_filter)
+        query.append("ORDER BY ts DESC LIMIT ?")
+        params.append(row_limit)
+        sql = "\n".join(query)
+
+        out: List[Dict[str, object]] = []
+        with self._lock, self._conn() as conn:
+            rows = conn.execute(sql, tuple(params)).fetchall()
+        for row in rows:
+            evidence_raw = str(row["evidence_json"] or "[]")
+            payload_raw = str(row["payload_json"] or "{}")
+            try:
+                evidence = json.loads(evidence_raw)
+            except Exception:
+                evidence = []
+            if not isinstance(evidence, list):
+                evidence = []
+            try:
+                payload = json.loads(payload_raw)
+            except Exception:
+                payload = {}
+            if not isinstance(payload, dict):
+                payload = {}
+            out.append(
+                {
+                    "run_id": str(row["run_id"] or ""),
+                    "ts": int(row["ts"] or 0),
+                    "command": str(row["command"] or ""),
+                    "label": str(row["label"] or ""),
+                    "confidence": float(row["confidence"] or 0.0),
+                    "agent": str(row["agent"] or ""),
+                    "agent_name": str(row["agent_name"] or ""),
+                    "provider": str(row["provider"] or ""),
+                    "model": str(row["model"] or ""),
+                    "raw_model": str(row["raw_model"] or ""),
+                    "normalized_model": str(row["normalized_model"] or ""),
+                    "model_fingerprint": str(row["model_fingerprint"] or ""),
+                    "evidence_tier": str(row["evidence_tier"] or ""),
+                    "agent_source": str(row["agent_source"] or ""),
+                    "registry_version": str(row["registry_version"] or ""),
+                    "registry_status": str(row["registry_status"] or ""),
+                    "source": str(row["source"] or ""),
+                    "working_directory": str(row["working_directory"] or ""),
+                    "exit_code": (
+                        int(row["exit_code"]) if row["exit_code"] is not None else None
+                    ),
+                    "shell_pid": (
+                        int(row["shell_pid"]) if row["shell_pid"] is not None else None
+                    ),
+                    "evidence": evidence,
+                    "payload": payload,
+                }
+            )
+        return out
+
+    def prune_command_runs(self, older_than_ts: int) -> int:
+        cutoff = int(older_than_ts or 0)
+        if cutoff <= 0:
+            return 0
+        with self._lock, self._conn() as conn:
+            cur = conn.execute("DELETE FROM command_runs WHERE ts < ?", (cutoff,))
+            conn.commit()
+            return int(cur.rowcount or 0)
+
     def get_history_index_state(self, history_file: str) -> Optional[Dict[str, int | str]]:
         key = self._clean_command(history_file)
         if not key:
@@ -661,6 +948,7 @@ class SQLiteStateStore:
                 dict(row) for row in conn.execute("SELECT * FROM repo_feedback_execute_context").fetchall()
             ]
             removed = [dict(row) for row in conn.execute("SELECT * FROM removed_commands").fetchall()]
+            command_runs = [dict(row) for row in conn.execute("SELECT * FROM command_runs").fetchall()]
             history = [dict(row) for row in conn.execute("SELECT * FROM history_index_state").fetchall()]
             meta = [dict(row) for row in conn.execute("SELECT * FROM meta").fetchall()]
         return {
@@ -672,6 +960,7 @@ class SQLiteStateStore:
             "repo_feedback_context": repo_feedback,
             "repo_feedback_execute_context": repo_execute_feedback,
             "removed_commands": removed,
+            "command_runs": command_runs,
             "history_index_state": history,
             "meta": meta,
             "journal_latest_ts": self.journal.latest_event_ts() if self.journal else 0,
@@ -679,19 +968,26 @@ class SQLiteStateStore:
 
     def import_payload(self, payload: Dict[str, object]) -> Dict[str, int]:
         if not isinstance(payload, dict):
-            return {"commands_imported": 0, "feedback_imported": 0, "removed_imported": 0}
+            return {
+                "commands_imported": 0,
+                "feedback_imported": 0,
+                "removed_imported": 0,
+                "provenance_imported": 0,
+            }
 
         commands = payload.get("commands", [])
         feedback = payload.get("feedback_context", [])
         repo_feedback = payload.get("repo_feedback_context", [])
         repo_execute_feedback = payload.get("repo_feedback_execute_context", [])
         removed = payload.get("removed_commands", [])
+        command_runs = payload.get("command_runs", [])
         history = payload.get("history_index_state", [])
         meta = payload.get("meta", [])
 
         commands_imported = 0
         feedback_imported = 0
         removed_imported = 0
+        provenance_imported = 0
 
         with self._lock, self._conn() as conn:
             conn.execute("BEGIN")
@@ -824,6 +1120,95 @@ class SQLiteStateStore:
                     )
                     removed_imported += 1
 
+                for row in command_runs if isinstance(command_runs, list) else []:
+                    if not isinstance(row, dict):
+                        continue
+                    run_id = str(row.get("run_id", "") or "").strip()
+                    command = self._clean_command(str(row.get("command", "") or ""))
+                    label = str(row.get("label", "") or "").strip()
+                    if not run_id or not command or not label:
+                        continue
+                    ts = int(row.get("ts", int(time.time())) or int(time.time()))
+                    evidence_raw = row.get("evidence_json", row.get("evidence", []))
+                    payload_raw = row.get("payload_json", row.get("payload", {}))
+                    evidence_json = (
+                        evidence_raw
+                        if isinstance(evidence_raw, str)
+                        else self._json_dumps(evidence_raw, "[]")
+                    )
+                    payload_json = (
+                        payload_raw
+                        if isinstance(payload_raw, str)
+                        else self._json_dumps(payload_raw, "{}")
+                    )
+                    conn.execute(
+                        """
+                        INSERT INTO command_runs(
+                            run_id, ts, command, label, confidence, agent, agent_name, provider, model,
+                            raw_model, normalized_model, model_fingerprint, evidence_tier, agent_source,
+                            registry_version, registry_status, source, working_directory, exit_code,
+                            shell_pid, evidence_json, payload_json, created_at
+                        )
+                        VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                        ON CONFLICT(run_id) DO UPDATE SET
+                            ts = MAX(command_runs.ts, excluded.ts),
+                            command = excluded.command,
+                            label = excluded.label,
+                            confidence = excluded.confidence,
+                            agent = excluded.agent,
+                            agent_name = excluded.agent_name,
+                            provider = excluded.provider,
+                            model = excluded.model,
+                            raw_model = excluded.raw_model,
+                            normalized_model = excluded.normalized_model,
+                            model_fingerprint = excluded.model_fingerprint,
+                            evidence_tier = excluded.evidence_tier,
+                            agent_source = excluded.agent_source,
+                            registry_version = excluded.registry_version,
+                            registry_status = excluded.registry_status,
+                            source = excluded.source,
+                            working_directory = excluded.working_directory,
+                            exit_code = excluded.exit_code,
+                            shell_pid = excluded.shell_pid,
+                            evidence_json = excluded.evidence_json,
+                            payload_json = excluded.payload_json
+                        """,
+                        (
+                            run_id,
+                            ts,
+                            command,
+                            label,
+                            float(row.get("confidence", 0.0) or 0.0),
+                            str(row.get("agent", "") or "").strip().lower(),
+                            str(row.get("agent_name", "") or "").strip(),
+                            str(row.get("provider", "") or "").strip().lower(),
+                            str(row.get("model", "") or "").strip(),
+                            str(row.get("raw_model", "") or "").strip(),
+                            str(row.get("normalized_model", "") or "").strip().lower(),
+                            str(row.get("model_fingerprint", "") or "").strip(),
+                            str(row.get("evidence_tier", "") or "").strip().lower(),
+                            str(row.get("agent_source", "") or "").strip().lower(),
+                            str(row.get("registry_version", "") or "").strip(),
+                            str(row.get("registry_status", "") or "").strip().lower(),
+                            str(row.get("source", "unknown") or "unknown").strip().lower(),
+                            str(row.get("working_directory", "") or "").strip(),
+                            (
+                                int(row.get("exit_code"))
+                                if row.get("exit_code", None) is not None
+                                else None
+                            ),
+                            (
+                                int(row.get("shell_pid"))
+                                if row.get("shell_pid", None) is not None
+                                else None
+                            ),
+                            evidence_json,
+                            payload_json,
+                            int(row.get("created_at", ts) or ts),
+                        ),
+                    )
+                    provenance_imported += 1
+
                 for row in history if isinstance(history, list) else []:
                     if not isinstance(row, dict):
                         continue
@@ -873,6 +1258,7 @@ class SQLiteStateStore:
             "commands_imported": commands_imported,
             "feedback_imported": feedback_imported,
             "removed_imported": removed_imported,
+            "provenance_imported": provenance_imported,
         }
 
     def recover_from_latest_snapshot(

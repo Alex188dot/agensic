@@ -1,6 +1,6 @@
 import unittest
 
-from ghostshell.server.schemas import Feedback
+from ghostshell.server.schemas import Feedback, LogCommandPayload
 
 
 class FeedbackSchemaTests(unittest.TestCase):
@@ -20,6 +20,35 @@ class FeedbackSchemaTests(unittest.TestCase):
             working_directory="/tmp/repo",
         )
         self.assertEqual(payload.working_directory, "/tmp/repo")
+
+    def test_log_command_schema_accepts_provenance_payload(self):
+        payload = LogCommandPayload(
+            command="git status",
+            source="runtime",
+            exit_code=0,
+            working_directory="/tmp/repo",
+            shell_pid=123,
+            provenance_last_action="human_typed",
+            provenance_accept_origin="ai",
+            provenance_accept_mode="suffix_append",
+            provenance_suggestion_kind="normal",
+            provenance_manual_edit_after_accept=False,
+            provenance_ai_agent="codex",
+            provenance_ai_provider="openai",
+            provenance_ai_model="gpt-5.3",
+            provenance_agent_name="Planner A",
+            provenance_agent_hint="codex",
+            provenance_model_raw="gpt-5.3",
+            provenance_wrapper_id="aiterminal_ai_exec:trace-1",
+            proof_label="AI_EXECUTED",
+            proof_agent="codex",
+            proof_model="gpt-5.3",
+            proof_trace="trace-1",
+            proof_timestamp=1700000000,
+            proof_signature="abc",
+        )
+        self.assertEqual(payload.command, "git status")
+        self.assertEqual(payload.provenance_ai_agent, "codex")
 
 
 if __name__ == "__main__":

@@ -4,6 +4,7 @@ from ghostshell.server import deps
 from ghostshell.server.schemas import (
     CommandStoreAddResponse,
     CommandStoreListResponse,
+    LogCommandPayload,
     CommandStorePayload,
     CommandStoreRemovePayload,
     CommandStoreRemoveResponse,
@@ -14,14 +15,14 @@ router = APIRouter()
 
 
 @router.post("/log_command", response_model=LogCommandResponse, response_model_exclude_unset=True)
-def log_command(data: dict, background_tasks: BackgroundTasks) -> LogCommandResponse:
+def log_command(data: LogCommandPayload, background_tasks: BackgroundTasks) -> LogCommandResponse:
     deps.enter_request_or_503()
     try:
-        command = str(data.get("command", "") or "").strip()
+        command = str(data.command or "").strip()
         if not command:
             return {"status": "ignored", "reason": "empty_command"}
 
-        raw_exit_code = data.get("exit_code", None)
+        raw_exit_code = data.exit_code
         exit_code = None
         if raw_exit_code is not None:
             try:
@@ -29,15 +30,37 @@ def log_command(data: dict, background_tasks: BackgroundTasks) -> LogCommandResp
             except (TypeError, ValueError):
                 return {"status": "ignored", "reason": "invalid_exit_code"}
 
-        source = str(data.get("source", "unknown") or "unknown").strip().lower()
+        source = str(data.source or "unknown").strip().lower()
         if source not in {"runtime", "history", "unknown"}:
             return {"status": "ignored", "reason": "invalid_source"}
-        working_directory = str(data.get("working_directory", "") or "").strip() or None
+        working_directory = str(data.working_directory or "").strip() or None
 
         config = deps.load_config()
         patterns = deps.disabled_patterns_from_config(config)
         if deps.command_matches_disabled_pattern(command, patterns):
             return {"status": "ignored", "reason": "disabled_pattern"}
+
+        provenance_payload = {
+            "shell_pid": data.shell_pid,
+            "provenance_last_action": data.provenance_last_action,
+            "provenance_accept_origin": data.provenance_accept_origin,
+            "provenance_accept_mode": data.provenance_accept_mode,
+            "provenance_suggestion_kind": data.provenance_suggestion_kind,
+            "provenance_manual_edit_after_accept": data.provenance_manual_edit_after_accept,
+            "provenance_ai_agent": data.provenance_ai_agent,
+            "provenance_ai_provider": data.provenance_ai_provider,
+            "provenance_ai_model": data.provenance_ai_model,
+            "provenance_agent_name": data.provenance_agent_name,
+            "provenance_agent_hint": data.provenance_agent_hint,
+            "provenance_model_raw": data.provenance_model_raw,
+            "provenance_wrapper_id": data.provenance_wrapper_id,
+            "proof_label": data.proof_label,
+            "proof_agent": data.proof_agent,
+            "proof_model": data.proof_model,
+            "proof_trace": data.proof_trace,
+            "proof_timestamp": data.proof_timestamp,
+            "proof_signature": data.proof_signature,
+        }
 
         background_tasks.add_task(
             deps.run_background_task,
@@ -46,6 +69,7 @@ def log_command(data: dict, background_tasks: BackgroundTasks) -> LogCommandResp
             exit_code,
             source,
             working_directory,
+            provenance_payload,
         )
         return {"status": "ok"}
     finally:

@@ -20,6 +20,9 @@ def _error(code: str) -> None:
             "ok": False,
             "error_code": code,
             "used_ai": False,
+            "ai_agent": "",
+            "ai_provider": "",
+            "ai_model": "",
             "pool": [],
             "display": [],
             "modes": [],
@@ -68,6 +71,9 @@ def _normalize_predict_response(result: Any) -> dict[str, Any] | None:
         return None
 
     used_ai = bool(result.get("used_ai", False))
+    ai_agent = str(result.get("ai_agent", "") or "")
+    ai_provider = str(result.get("ai_provider", "") or "")
+    ai_model = str(result.get("ai_model", "") or "")
     pool = result.get("pool", result.get("suggestions", []))
     pool_meta = result.get("pool_meta", [])
 
@@ -117,6 +123,9 @@ def _normalize_predict_response(result: Any) -> dict[str, Any] | None:
         "ok": True,
         "error_code": "",
         "used_ai": used_ai,
+        "ai_agent": ai_agent,
+        "ai_provider": ai_provider,
+        "ai_model": ai_model,
         "pool": clean_pool,
         "display": clean_display,
         "modes": clean_modes,

@@ -77,6 +77,9 @@ class PredictResponse(BaseModel):
     pool_meta: list[dict[str, Any]]
     bootstrap: BootstrapStatus | None = None
     used_ai: bool
+    ai_agent: str | None = None
+    ai_provider: str | None = None
+    ai_model: str | None = None
 
 
 class IntentResponse(BaseModel):
@@ -85,6 +88,9 @@ class IntentResponse(BaseModel):
     explanation: str = ""
     alternatives: list[str] = Field(default_factory=list)
     copy_block: str = ""
+    ai_agent: str | None = None
+    ai_provider: str | None = None
+    ai_model: str | None = None
 
 
 class AssistResponse(BaseModel):
@@ -109,6 +115,7 @@ class RepairImportResponse(BaseModel):
     commands_imported: int = 0
     feedback_imported: int = 0
     removed_imported: int = 0
+    provenance_imported: int = 0
 
 
 class RepairRecoverResponse(BaseModel):
@@ -123,6 +130,32 @@ class RepairRecoverResponse(BaseModel):
 class LogCommandResponse(BaseModel):
     status: str
     reason: str | None = None
+
+
+class LogCommandPayload(BaseModel):
+    command: str
+    exit_code: int | None = None
+    source: str = "unknown"
+    working_directory: str | None = Field(default=None, max_length=2048)
+    shell_pid: int | None = None
+    provenance_last_action: str | None = None
+    provenance_accept_origin: str | None = None
+    provenance_accept_mode: str | None = None
+    provenance_suggestion_kind: str | None = None
+    provenance_manual_edit_after_accept: bool | None = None
+    provenance_ai_agent: str | None = None
+    provenance_ai_provider: str | None = None
+    provenance_ai_model: str | None = None
+    provenance_agent_name: str | None = None
+    provenance_agent_hint: str | None = None
+    provenance_model_raw: str | None = None
+    provenance_wrapper_id: str | None = None
+    proof_label: str | None = None
+    proof_agent: str | None = None
+    proof_model: str | None = None
+    proof_trace: str | None = None
+    proof_timestamp: int | None = None
+    proof_signature: str | None = None
 
 
 class CommandStoreEntry(BaseModel):
@@ -166,3 +199,62 @@ class StatusResponse(BaseModel):
     status: str
     bootstrap: BootstrapStatus
     shutdown: ShutdownStatus | None = None
+
+
+class ProvenanceRunEntry(BaseModel):
+    run_id: str
+    ts: int
+    command: str
+    label: str
+    confidence: float = 0.0
+    agent: str = ""
+    agent_name: str = ""
+    provider: str = ""
+    model: str = ""
+    raw_model: str = ""
+    normalized_model: str = ""
+    model_fingerprint: str = ""
+    evidence_tier: str = ""
+    agent_source: str = ""
+    registry_version: str = ""
+    registry_status: str = ""
+    source: str = ""
+    working_directory: str = ""
+    exit_code: int | None = None
+    shell_pid: int | None = None
+    evidence: list[str] = Field(default_factory=list)
+    payload: dict[str, Any] = Field(default_factory=dict)
+
+
+class ProvenanceRunsResponse(BaseModel):
+    status: str
+    runs: list[ProvenanceRunEntry] = Field(default_factory=list)
+    total: int = 0
+
+
+class ProvenanceRegistrySummaryResponse(BaseModel):
+    status: str = "ok"
+    summary: dict[str, Any] = Field(default_factory=dict)
+
+
+class ProvenanceRegistryAgentsResponse(BaseModel):
+    status: str = "ok"
+    agents: list[dict[str, Any]] = Field(default_factory=list)
+    total: int = 0
+
+
+class ProvenanceRegistryRefreshResponse(BaseModel):
+    status: str = "ok"
+    ok: bool = False
+    reason: str = ""
+    updated: bool = False
+    version: str = ""
+
+
+class ProvenanceRegistryVerifyResponse(BaseModel):
+    status: str = "ok"
+    ok: bool = False
+    reason: str = ""
+    version: str = ""
+    verified_at: int = 0
+    url: str = ""

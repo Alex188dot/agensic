@@ -15,6 +15,9 @@ async def predict_completion(ctx: Context, request: Request) -> PredictResponse:
                 "pool": [],
                 "pool_meta": [],
                 "used_ai": False,
+                "ai_agent": "",
+                "ai_provider": "",
+                "ai_model": "",
             }
 
         config = deps.load_config()
@@ -66,12 +69,18 @@ async def predict_completion(ctx: Context, request: Request) -> PredictResponse:
             deps.privacy_guard.sanitize_for_log(sanitized_buffer.text),
             sanitized_buffer.redaction_count,
         )
+        ai_identity = deps.engine.get_ai_identity(config) if used_ai else {
+            "ai_agent": "",
+            "ai_provider": "",
+            "ai_model": "",
+        }
         return {
             "suggestions": suggestions,
             "pool": pool,
             "pool_meta": pool_meta,
             "bootstrap": bootstrap,
             "used_ai": used_ai,
+            **ai_identity,
         }
     finally:
         deps.release_request_slot()

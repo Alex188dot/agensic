@@ -13,6 +13,10 @@ MAX_LLM_REQUESTS_PER_MINUTE = 240
 DEFAULT_TIMEOUT_SECONDS = 20.0
 MIN_TIMEOUT_SECONDS = 1.0
 MAX_TIMEOUT_SECONDS = 30.0
+DEFAULT_PROVENANCE_REGISTRY_URL = "https://registry.ghostshell.ai/v1/agents.json"
+DEFAULT_PROVENANCE_REGISTRY_REFRESH_HOURS = 24
+MIN_PROVENANCE_REGISTRY_REFRESH_HOURS = 1
+MAX_PROVENANCE_REGISTRY_REFRESH_HOURS = 168
 
 
 def _parse_int(value: object, default: int) -> int:
@@ -57,6 +61,19 @@ def normalize_config_payload(payload: dict | None) -> dict:
 
     timeout = _parse_float(config.get("timeout", DEFAULT_TIMEOUT_SECONDS), DEFAULT_TIMEOUT_SECONDS)
     config["timeout"] = max(MIN_TIMEOUT_SECONDS, min(MAX_TIMEOUT_SECONDS, timeout))
+
+    registry_url = str(config.get("provenance_registry_url", DEFAULT_PROVENANCE_REGISTRY_URL) or "").strip()
+    config["provenance_registry_url"] = registry_url or DEFAULT_PROVENANCE_REGISTRY_URL
+    config["provenance_registry_pubkey"] = str(config.get("provenance_registry_pubkey", "") or "").strip()
+    refresh_hours = _parse_int(
+        config.get("provenance_registry_refresh_hours", DEFAULT_PROVENANCE_REGISTRY_REFRESH_HOURS),
+        DEFAULT_PROVENANCE_REGISTRY_REFRESH_HOURS,
+    )
+    config["provenance_registry_refresh_hours"] = _clamp_int(
+        refresh_hours,
+        MIN_PROVENANCE_REGISTRY_REFRESH_HOURS,
+        MAX_PROVENANCE_REGISTRY_REFRESH_HOURS,
+    )
     return config
 
 

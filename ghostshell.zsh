@@ -24,6 +24,9 @@ typeset -g GHOSTSHELL_LAST_NL_EXPLANATION=""
 typeset -g GHOSTSHELL_LAST_NL_ALTERNATIVES=""
 typeset -g GHOSTSHELL_LAST_NL_ASSIST=""
 typeset -g GHOSTSHELL_LAST_NL_QUESTION=""
+typeset -g GHOSTSHELL_LAST_NL_AI_AGENT=""
+typeset -g GHOSTSHELL_LAST_NL_AI_PROVIDER=""
+typeset -g GHOSTSHELL_LAST_NL_AI_MODEL=""
 typeset -g -a GHOSTSHELL_INTENT_OPTIONS
 GHOSTSHELL_INTENT_OPTIONS=()
 typeset -g GHOSTSHELL_INTENT_OPTION_INDEX=1
@@ -33,6 +36,38 @@ typeset -g GHOSTSHELL_INTENT_ACTIVE=0
 typeset -g GHOSTSHELL_TIMER_PID=""
 typeset -g GHOSTSHELL_LAST_BUFFER=""
 typeset -g GHOSTSHELL_LAST_EXECUTED_CMD=""
+typeset -g GHOSTSHELL_LINE_LAST_ACTION=""
+typeset -g GHOSTSHELL_LINE_ACCEPTED_ORIGIN=""
+typeset -g GHOSTSHELL_LINE_ACCEPTED_MODE=""
+typeset -g GHOSTSHELL_LINE_ACCEPTED_KIND=""
+typeset -g GHOSTSHELL_LINE_MANUAL_EDIT_AFTER_ACCEPT=0
+typeset -g GHOSTSHELL_LINE_ACCEPTED_AI_AGENT=""
+typeset -g GHOSTSHELL_LINE_ACCEPTED_AI_PROVIDER=""
+typeset -g GHOSTSHELL_LINE_ACCEPTED_AI_MODEL=""
+typeset -g GHOSTSHELL_LAST_FETCH_AI_AGENT=""
+typeset -g GHOSTSHELL_LAST_FETCH_AI_PROVIDER=""
+typeset -g GHOSTSHELL_LAST_FETCH_AI_MODEL=""
+typeset -g GHOSTSHELL_PENDING_LAST_ACTION=""
+typeset -g GHOSTSHELL_PENDING_ACCEPTED_ORIGIN=""
+typeset -g GHOSTSHELL_PENDING_ACCEPTED_MODE=""
+typeset -g GHOSTSHELL_PENDING_ACCEPTED_KIND=""
+typeset -g GHOSTSHELL_PENDING_MANUAL_EDIT_AFTER_ACCEPT=0
+typeset -g GHOSTSHELL_PENDING_AI_AGENT=""
+typeset -g GHOSTSHELL_PENDING_AI_PROVIDER=""
+typeset -g GHOSTSHELL_PENDING_AI_MODEL=""
+typeset -g GHOSTSHELL_PENDING_AGENT_NAME=""
+typeset -g GHOSTSHELL_PENDING_PROOF_LABEL=""
+typeset -g GHOSTSHELL_PENDING_PROOF_AGENT=""
+typeset -g GHOSTSHELL_PENDING_PROOF_MODEL=""
+typeset -g GHOSTSHELL_PENDING_PROOF_TRACE=""
+typeset -g GHOSTSHELL_PENDING_PROOF_TIMESTAMP=0
+typeset -g GHOSTSHELL_PENDING_PROOF_SIGNATURE=""
+typeset -g GHOSTSHELL_NEXT_PROOF_LABEL=""
+typeset -g GHOSTSHELL_NEXT_PROOF_AGENT=""
+typeset -g GHOSTSHELL_NEXT_PROOF_MODEL=""
+typeset -g GHOSTSHELL_NEXT_PROOF_TRACE=""
+typeset -g GHOSTSHELL_NEXT_PROOF_TIMESTAMP=0
+typeset -g GHOSTSHELL_NEXT_PROOF_SIGNATURE=""
 typeset -g GHOSTSHELL_HOOKS_REGISTERED=0
 typeset -gA GHOSTSHELL_NATIVE_ESC_WIDGET
 GHOSTSHELL_NATIVE_ESC_WIDGET=()
@@ -360,6 +395,9 @@ _ghostshell_fetch_suggestions() {
     local buffer_content="$BUFFER"
     local sep=$'\x1f'
     GHOSTSHELL_LAST_FETCH_USED_AI=0
+    GHOSTSHELL_LAST_FETCH_AI_AGENT=""
+    GHOSTSHELL_LAST_FETCH_AI_PROVIDER=""
+    GHOSTSHELL_LAST_FETCH_AI_MODEL=""
     GHOSTSHELL_FETCH_ATTEMPT_COUNT=$((GHOSTSHELL_FETCH_ATTEMPT_COUNT + 1))
     
     # Don't fetch if buffer is too short
@@ -434,11 +472,17 @@ except Exception:
 ok = bool(data.get('ok', False))
 error_code = str(data.get('error_code', '') or '')
 used_ai = '1' if bool(data.get('used_ai', False)) else '0'
+ai_agent = str(data.get('ai_agent', '') or '')
+ai_provider = str(data.get('ai_provider', '') or '')
+ai_model = str(data.get('ai_model', '') or '')
 
 if not ok:
     print('ok=0')
     print('error_code=' + error_code)
     print('used_ai=' + used_ai)
+    print('ai_agent=' + ai_agent)
+    print('ai_provider=' + ai_provider)
+    print('ai_model=' + ai_model)
     raise SystemExit(0)
 
 def clean_list(value):
@@ -454,6 +498,9 @@ kinds = clean_list(data.get('kinds'))[:20]
 print('ok=1')
 print('error_code=')
 print('used_ai=' + used_ai)
+print('ai_agent=' + ai_agent)
+print('ai_provider=' + ai_provider)
+print('ai_model=' + ai_model)
 print('pool=' + sep.join(pool))
 print('display=' + sep.join(display))
 print('modes=' + sep.join(modes))
@@ -466,10 +513,13 @@ print('kinds=' + sep.join(kinds))
     local ok_value="${parsed_lines[1]#ok=}"
     local error_code="${parsed_lines[2]#error_code=}"
     local used_ai_line="${parsed_lines[3]#used_ai=}"
-    local pool_line="${parsed_lines[4]#pool=}"
-    local display_line="${parsed_lines[5]#display=}"
-    local mode_line="${parsed_lines[6]#modes=}"
-    local kind_line="${parsed_lines[7]#kinds=}"
+    local ai_agent_line="${parsed_lines[4]#ai_agent=}"
+    local ai_provider_line="${parsed_lines[5]#ai_provider=}"
+    local ai_model_line="${parsed_lines[6]#ai_model=}"
+    local pool_line="${parsed_lines[7]#pool=}"
+    local display_line="${parsed_lines[8]#display=}"
+    local mode_line="${parsed_lines[9]#modes=}"
+    local kind_line="${parsed_lines[10]#kinds=}"
 
     if [[ "$ok_value" != "1" ]]; then
         GHOSTSHELL_LAST_FETCH_ERROR_CODE="${error_code:-client_fetch_failed}"
@@ -484,6 +534,9 @@ print('kinds=' + sep.join(kinds))
 
     GHOSTSHELL_FETCH_SUCCESS_COUNT=$((GHOSTSHELL_FETCH_SUCCESS_COUNT + 1))
     GHOSTSHELL_LAST_FETCH_ERROR_CODE=""
+    GHOSTSHELL_LAST_FETCH_AI_AGENT="$ai_agent_line"
+    GHOSTSHELL_LAST_FETCH_AI_PROVIDER="$ai_provider_line"
+    GHOSTSHELL_LAST_FETCH_AI_MODEL="$ai_model_line"
 
     if [[ "$used_ai_line" == "1" ]]; then
         GHOSTSHELL_LAST_FETCH_USED_AI=1
@@ -674,6 +727,7 @@ _ghostshell_resolve_intent_command() {
     if [[ "$GHOSTSHELL_LAST_NL_KIND" == "intent" && "$GHOSTSHELL_LAST_NL_INPUT" == "$raw" && -n "$GHOSTSHELL_LAST_NL_COMMAND" ]]; then
         BUFFER="$GHOSTSHELL_LAST_NL_COMMAND"
         CURSOR=${#BUFFER}
+        _ghostshell_set_suggestion_accept_state "ai" "replace_full" "intent_command" "$GHOSTSHELL_LAST_NL_AI_AGENT" "$GHOSTSHELL_LAST_NL_AI_PROVIDER" "$GHOSTSHELL_LAST_NL_AI_MODEL"
         _ghostshell_activate_intent_options "$GHOSTSHELL_LAST_NL_COMMAND" "$GHOSTSHELL_LAST_NL_ALTERNATIVES"
         _ghostshell_print_intent_preview "$GHOSTSHELL_LAST_NL_QUESTION" "$GHOSTSHELL_LAST_NL_COMMAND" "$GHOSTSHELL_LAST_NL_EXPLANATION" "$GHOSTSHELL_LAST_NL_ALTERNATIVES" "$GHOSTSHELL_LAST_NL_COMMAND"
         _ghostshell_update_intent_hint
@@ -712,17 +766,26 @@ try:
     alternatives = [safe_line(item) for item in alternatives if safe_line(item)]
     alternatives_blob = '|||'.join(alternatives[:2])
     copy_block = safe_line(result.get('copy_block', primary))
+    ai_agent = safe_line(result.get('ai_agent', ''))
+    ai_provider = safe_line(result.get('ai_provider', ''))
+    ai_model = safe_line(result.get('ai_model', ''))
 except Exception:
     status = 'error'
     primary = ''
     explanation = 'Could not resolve command mode right now.'
     alternatives_blob = ''
     copy_block = ''
+    ai_agent = ''
+    ai_provider = ''
+    ai_model = ''
 print('status=' + shlex.quote(status))
 print('primary=' + shlex.quote(primary))
 print('explanation=' + shlex.quote(explanation))
 print('alternatives=' + shlex.quote(alternatives_blob))
 print('copy_block=' + shlex.quote(copy_block))
+print('ai_agent=' + shlex.quote(ai_agent))
+print('ai_provider=' + shlex.quote(ai_provider))
+print('ai_model=' + shlex.quote(ai_model))
 " 2>/dev/null)
 
     local nl_status=""
@@ -730,11 +793,17 @@ print('copy_block=' + shlex.quote(copy_block))
     local nl_explanation=""
     local nl_alternatives=""
     local nl_copy_block=""
+    local nl_ai_agent=""
+    local nl_ai_provider=""
+    local nl_ai_model=""
     response="${response//status=/nl_status=}"
     response="${response//primary=/nl_primary=}"
     response="${response//explanation=/nl_explanation=}"
     response="${response//alternatives=/nl_alternatives=}"
     response="${response//copy_block=/nl_copy_block=}"
+    response="${response//ai_agent=/nl_ai_agent=}"
+    response="${response//ai_provider=/nl_ai_provider=}"
+    response="${response//ai_model=/nl_ai_model=}"
     eval "$response"
 
     if [[ "$nl_status" != "ok" || -z "$nl_primary" ]]; then
@@ -746,12 +815,16 @@ print('copy_block=' + shlex.quote(copy_block))
 
     BUFFER="$nl_primary"
     CURSOR=${#BUFFER}
+    _ghostshell_set_suggestion_accept_state "ai" "replace_full" "intent_command" "$nl_ai_agent" "$nl_ai_provider" "$nl_ai_model"
     GHOSTSHELL_LAST_NL_INPUT="$raw"
     GHOSTSHELL_LAST_NL_KIND="intent"
     GHOSTSHELL_LAST_NL_QUESTION="$body"
     GHOSTSHELL_LAST_NL_COMMAND="$nl_primary"
     GHOSTSHELL_LAST_NL_EXPLANATION="$nl_explanation"
     GHOSTSHELL_LAST_NL_ALTERNATIVES="$nl_alternatives"
+    GHOSTSHELL_LAST_NL_AI_AGENT="$nl_ai_agent"
+    GHOSTSHELL_LAST_NL_AI_PROVIDER="$nl_ai_provider"
+    GHOSTSHELL_LAST_NL_AI_MODEL="$nl_ai_model"
     _ghostshell_activate_intent_options "$nl_primary" "$nl_alternatives"
     _ghostshell_print_intent_preview "$body" "$nl_primary" "$nl_explanation" "$nl_alternatives" "${nl_copy_block:-$nl_primary}"
     _ghostshell_update_intent_hint
@@ -914,6 +987,238 @@ _ghostshell_canonicalize_buffer_spacing() {
     print -r -- "$value"
 }
 
+_ghostshell_reset_provenance_line_state() {
+    GHOSTSHELL_LINE_LAST_ACTION=""
+    GHOSTSHELL_LINE_ACCEPTED_ORIGIN=""
+    GHOSTSHELL_LINE_ACCEPTED_MODE=""
+    GHOSTSHELL_LINE_ACCEPTED_KIND=""
+    GHOSTSHELL_LINE_MANUAL_EDIT_AFTER_ACCEPT=0
+    GHOSTSHELL_LINE_ACCEPTED_AI_AGENT=""
+    GHOSTSHELL_LINE_ACCEPTED_AI_PROVIDER=""
+    GHOSTSHELL_LINE_ACCEPTED_AI_MODEL=""
+}
+
+_ghostshell_clear_pending_execution() {
+    GHOSTSHELL_PENDING_LAST_ACTION=""
+    GHOSTSHELL_PENDING_ACCEPTED_ORIGIN=""
+    GHOSTSHELL_PENDING_ACCEPTED_MODE=""
+    GHOSTSHELL_PENDING_ACCEPTED_KIND=""
+    GHOSTSHELL_PENDING_MANUAL_EDIT_AFTER_ACCEPT=0
+    GHOSTSHELL_PENDING_AI_AGENT=""
+    GHOSTSHELL_PENDING_AI_PROVIDER=""
+    GHOSTSHELL_PENDING_AI_MODEL=""
+    GHOSTSHELL_PENDING_AGENT_NAME=""
+    GHOSTSHELL_PENDING_AGENT_HINT=""
+    GHOSTSHELL_PENDING_MODEL_RAW=""
+    GHOSTSHELL_PENDING_WRAPPER_ID=""
+    GHOSTSHELL_PENDING_PROOF_LABEL=""
+    GHOSTSHELL_PENDING_PROOF_AGENT=""
+    GHOSTSHELL_PENDING_PROOF_MODEL=""
+    GHOSTSHELL_PENDING_PROOF_TRACE=""
+    GHOSTSHELL_PENDING_PROOF_TIMESTAMP=0
+    GHOSTSHELL_PENDING_PROOF_SIGNATURE=""
+}
+
+_ghostshell_mark_manual_line_edit() {
+    local action="$1"
+    if [[ -n "$GHOSTSHELL_LINE_ACCEPTED_ORIGIN" ]]; then
+        GHOSTSHELL_LINE_MANUAL_EDIT_AFTER_ACCEPT=1
+    fi
+    GHOSTSHELL_LINE_LAST_ACTION="$action"
+}
+
+_ghostshell_set_suggestion_accept_state() {
+    local origin="$1"
+    local mode="$2"
+    local kind="$3"
+    local ai_agent="$4"
+    local ai_provider="$5"
+    local ai_model="$6"
+    GHOSTSHELL_LINE_ACCEPTED_ORIGIN="$origin"
+    GHOSTSHELL_LINE_ACCEPTED_MODE="$mode"
+    GHOSTSHELL_LINE_ACCEPTED_KIND="$kind"
+    GHOSTSHELL_LINE_ACCEPTED_AI_AGENT="$ai_agent"
+    GHOSTSHELL_LINE_ACCEPTED_AI_PROVIDER="$ai_provider"
+    GHOSTSHELL_LINE_ACCEPTED_AI_MODEL="$ai_model"
+    GHOSTSHELL_LINE_LAST_ACTION="suggestion_accept"
+    GHOSTSHELL_LINE_MANUAL_EDIT_AFTER_ACCEPT=0
+}
+
+_ghostshell_snapshot_pending_execution() {
+    GHOSTSHELL_PENDING_LAST_ACTION="$GHOSTSHELL_LINE_LAST_ACTION"
+    GHOSTSHELL_PENDING_ACCEPTED_ORIGIN="$GHOSTSHELL_LINE_ACCEPTED_ORIGIN"
+    GHOSTSHELL_PENDING_ACCEPTED_MODE="$GHOSTSHELL_LINE_ACCEPTED_MODE"
+    GHOSTSHELL_PENDING_ACCEPTED_KIND="$GHOSTSHELL_LINE_ACCEPTED_KIND"
+    GHOSTSHELL_PENDING_MANUAL_EDIT_AFTER_ACCEPT="$GHOSTSHELL_LINE_MANUAL_EDIT_AFTER_ACCEPT"
+    GHOSTSHELL_PENDING_AI_AGENT="$GHOSTSHELL_LINE_ACCEPTED_AI_AGENT"
+    GHOSTSHELL_PENDING_AI_PROVIDER="$GHOSTSHELL_LINE_ACCEPTED_AI_PROVIDER"
+    GHOSTSHELL_PENDING_AI_MODEL="$GHOSTSHELL_LINE_ACCEPTED_AI_MODEL"
+    GHOSTSHELL_PENDING_AGENT_NAME="${GHOSTSHELL_AI_SESSION_AGENT_NAME:-}"
+    GHOSTSHELL_PENDING_AGENT_HINT="$GHOSTSHELL_LINE_ACCEPTED_AI_AGENT"
+    GHOSTSHELL_PENDING_MODEL_RAW="$GHOSTSHELL_LINE_ACCEPTED_AI_MODEL"
+    GHOSTSHELL_PENDING_WRAPPER_ID=""
+    GHOSTSHELL_PENDING_PROOF_LABEL="$GHOSTSHELL_NEXT_PROOF_LABEL"
+    GHOSTSHELL_PENDING_PROOF_AGENT="$GHOSTSHELL_NEXT_PROOF_AGENT"
+    GHOSTSHELL_PENDING_PROOF_MODEL="$GHOSTSHELL_NEXT_PROOF_MODEL"
+    GHOSTSHELL_PENDING_PROOF_TRACE="$GHOSTSHELL_NEXT_PROOF_TRACE"
+    GHOSTSHELL_PENDING_PROOF_TIMESTAMP="$GHOSTSHELL_NEXT_PROOF_TIMESTAMP"
+    GHOSTSHELL_PENDING_PROOF_SIGNATURE="$GHOSTSHELL_NEXT_PROOF_SIGNATURE"
+    if [[ -n "$GHOSTSHELL_PENDING_PROOF_TRACE" ]]; then
+        GHOSTSHELL_PENDING_WRAPPER_ID="proof:${GHOSTSHELL_PENDING_PROOF_TRACE}"
+    fi
+    GHOSTSHELL_NEXT_PROOF_LABEL=""
+    GHOSTSHELL_NEXT_PROOF_AGENT=""
+    GHOSTSHELL_NEXT_PROOF_MODEL=""
+    GHOSTSHELL_NEXT_PROOF_TRACE=""
+    GHOSTSHELL_NEXT_PROOF_TIMESTAMP=0
+    GHOSTSHELL_NEXT_PROOF_SIGNATURE=""
+}
+
+_ghostshell_clear_ai_session_env() {
+    unset GHOSTSHELL_AI_SESSION_ACTIVE
+    unset GHOSTSHELL_AI_SESSION_AGENT
+    unset GHOSTSHELL_AI_SESSION_MODEL
+    unset GHOSTSHELL_AI_SESSION_AGENT_NAME
+    unset GHOSTSHELL_AI_SESSION_ID
+    unset GHOSTSHELL_AI_SESSION_STARTED_TS
+    unset GHOSTSHELL_AI_SESSION_EXPIRES_TS
+}
+
+_ghostshell_session_sign_if_active() {
+    if [[ "${GHOSTSHELL_AI_SESSION_ACTIVE:-0}" != "1" ]]; then
+        return
+    fi
+    local session_agent="${GHOSTSHELL_AI_SESSION_AGENT:-}"
+    local session_model="${GHOSTSHELL_AI_SESSION_MODEL:-}"
+    local session_id="${GHOSTSHELL_AI_SESSION_ID:-}"
+    local expires_ts="${GHOSTSHELL_AI_SESSION_EXPIRES_TS:-0}"
+    local now_ts
+    now_ts="$(date +%s 2>/dev/null)"
+    if [[ -z "$now_ts" ]]; then
+        now_ts="0"
+    fi
+    if [[ -n "$expires_ts" && "$expires_ts" != "0" && "$now_ts" -gt "$expires_ts" ]]; then
+        _ghostshell_clear_ai_session_env
+        return
+    fi
+    if [[ -n "$GHOSTSHELL_NEXT_PROOF_SIGNATURE" ]]; then
+        return
+    fi
+    if [[ -z "$session_agent" || -z "$session_model" ]]; then
+        return
+    fi
+    if [[ -z "$session_id" ]]; then
+        session_id="$now_ts"
+        GHOSTSHELL_AI_SESSION_ID="$session_id"
+    fi
+    local trace="session:${session_id}:${now_ts}"
+    local signature
+    signature="$(
+        GHOSTSHELL_PROOF_LABEL="AI_EXECUTED" \
+        GHOSTSHELL_PROOF_AGENT="$session_agent" \
+        GHOSTSHELL_PROOF_MODEL="$session_model" \
+        GHOSTSHELL_PROOF_TRACE="$trace" \
+        GHOSTSHELL_PROOF_TS="$now_ts" \
+        python3 - <<'PY' 2>/dev/null
+import hashlib
+import hmac
+import os
+import secrets
+from pathlib import Path
+
+label = str(os.environ.get("GHOSTSHELL_PROOF_LABEL", "AI_EXECUTED") or "").strip()
+agent = str(os.environ.get("GHOSTSHELL_PROOF_AGENT", "") or "").strip()
+model = str(os.environ.get("GHOSTSHELL_PROOF_MODEL", "") or "").strip()
+trace = str(os.environ.get("GHOSTSHELL_PROOF_TRACE", "") or "").strip()
+ts = int(os.environ.get("GHOSTSHELL_PROOF_TS", "0") or "0")
+
+secret_path = Path.home() / ".ghostshell" / "provenance_secret"
+secret_path.parent.mkdir(parents=True, exist_ok=True)
+if not secret_path.exists():
+    secret_path.write_bytes(secrets.token_bytes(32))
+    secret_path.chmod(0o600)
+else:
+    secret_path.chmod(0o600)
+secret = secret_path.read_bytes()
+msg = "\n".join([label, agent, model, trace, str(ts)])
+print(hmac.new(secret, msg.encode("utf-8"), hashlib.sha256).hexdigest())
+PY
+    )"
+    if [[ -z "$signature" ]]; then
+        return
+    fi
+    GHOSTSHELL_NEXT_PROOF_LABEL="AI_EXECUTED"
+    GHOSTSHELL_NEXT_PROOF_AGENT="$session_agent"
+    GHOSTSHELL_NEXT_PROOF_MODEL="$session_model"
+    GHOSTSHELL_NEXT_PROOF_TRACE="$trace"
+    GHOSTSHELL_NEXT_PROOF_TIMESTAMP="$now_ts"
+    GHOSTSHELL_NEXT_PROOF_SIGNATURE="$signature"
+    GHOSTSHELL_PENDING_WRAPPER_ID="ai_session:${session_id}"
+    GHOSTSHELL_PENDING_AGENT_NAME="${GHOSTSHELL_AI_SESSION_AGENT_NAME:-}"
+}
+
+ghostshell_mark_ai_executed() {
+    local agent="$1"
+    local model="$2"
+    local trace="$3"
+    if [[ -z "$agent" || -z "$model" ]]; then
+        print -r -- "usage: ghostshell_mark_ai_executed <agent> <model> [trace_id]"
+        return 1
+    fi
+    if [[ -z "$trace" ]]; then
+        trace="$(date +%s 2>/dev/null)"
+    fi
+    local stamp
+    stamp="$(date +%s 2>/dev/null)"
+    if [[ -z "$stamp" ]]; then
+        stamp="0"
+    fi
+    local signature
+    signature="$(
+        GHOSTSHELL_PROOF_LABEL="AI_EXECUTED" \
+        GHOSTSHELL_PROOF_AGENT="$agent" \
+        GHOSTSHELL_PROOF_MODEL="$model" \
+        GHOSTSHELL_PROOF_TRACE="$trace" \
+        GHOSTSHELL_PROOF_TS="$stamp" \
+        python3 - <<'PY' 2>/dev/null
+import hashlib
+import hmac
+import os
+import secrets
+from pathlib import Path
+
+label = str(os.environ.get("GHOSTSHELL_PROOF_LABEL", "AI_EXECUTED") or "").strip()
+agent = str(os.environ.get("GHOSTSHELL_PROOF_AGENT", "") or "").strip()
+model = str(os.environ.get("GHOSTSHELL_PROOF_MODEL", "") or "").strip()
+trace = str(os.environ.get("GHOSTSHELL_PROOF_TRACE", "") or "").strip()
+ts = int(os.environ.get("GHOSTSHELL_PROOF_TS", "0") or "0")
+
+secret_path = Path.home() / ".ghostshell" / "provenance_secret"
+secret_path.parent.mkdir(parents=True, exist_ok=True)
+if not secret_path.exists():
+    secret_path.write_bytes(secrets.token_bytes(32))
+    secret_path.chmod(0o600)
+else:
+    secret_path.chmod(0o600)
+secret = secret_path.read_bytes()
+msg = "\n".join([label, agent, model, trace, str(ts)])
+print(hmac.new(secret, msg.encode("utf-8"), hashlib.sha256).hexdigest())
+PY
+    )"
+    if [[ -z "$signature" ]]; then
+        print -r -- "Could not create AI execution proof."
+        return 1
+    fi
+    GHOSTSHELL_NEXT_PROOF_LABEL="AI_EXECUTED"
+    GHOSTSHELL_NEXT_PROOF_AGENT="$agent"
+    GHOSTSHELL_NEXT_PROOF_MODEL="$model"
+    GHOSTSHELL_NEXT_PROOF_TRACE="$trace"
+    GHOSTSHELL_NEXT_PROOF_TIMESTAMP="$stamp"
+    GHOSTSHELL_NEXT_PROOF_SIGNATURE="$signature"
+    print -r -- "AI execution proof armed for next command (${agent}/${model})."
+    return 0
+}
+
 _ghostshell_send_feedback() {
     local buffer="$1"
     local accepted="$2"
@@ -939,9 +1244,75 @@ _ghostshell_log_command() {
     local source="${3:-runtime}"
     # Log executed command to vector DB
     (
-        local escaped_cmd="${command//\'/\'\\\'\'}"
-        local escaped_pwd="${PWD//\'/\'\\\'\'}"
-        local json_data="{\"command\": \"$escaped_cmd\", \"exit_code\": ${exit_code}, \"source\": \"${source}\", \"working_directory\": \"$escaped_pwd\"}"
+        local json_data
+        json_data="$(
+            GHOSTSHELL_LOG_COMMAND="$command" \
+            GHOSTSHELL_LOG_EXIT="$exit_code" \
+            GHOSTSHELL_LOG_SOURCE="$source" \
+            GHOSTSHELL_LOG_CWD="$PWD" \
+            GHOSTSHELL_LOG_SHELL_PID="$$" \
+            GHOSTSHELL_LOG_LAST_ACTION="$GHOSTSHELL_PENDING_LAST_ACTION" \
+            GHOSTSHELL_LOG_ACCEPT_ORIGIN="$GHOSTSHELL_PENDING_ACCEPTED_ORIGIN" \
+            GHOSTSHELL_LOG_ACCEPT_MODE="$GHOSTSHELL_PENDING_ACCEPTED_MODE" \
+            GHOSTSHELL_LOG_SUGGESTION_KIND="$GHOSTSHELL_PENDING_ACCEPTED_KIND" \
+            GHOSTSHELL_LOG_MANUAL_AFTER_ACCEPT="$GHOSTSHELL_PENDING_MANUAL_EDIT_AFTER_ACCEPT" \
+            GHOSTSHELL_LOG_AI_AGENT="$GHOSTSHELL_PENDING_AI_AGENT" \
+            GHOSTSHELL_LOG_AI_PROVIDER="$GHOSTSHELL_PENDING_AI_PROVIDER" \
+            GHOSTSHELL_LOG_AI_MODEL="$GHOSTSHELL_PENDING_AI_MODEL" \
+            GHOSTSHELL_LOG_AGENT_NAME="$GHOSTSHELL_PENDING_AGENT_NAME" \
+            GHOSTSHELL_LOG_AGENT_HINT="$GHOSTSHELL_PENDING_AGENT_HINT" \
+            GHOSTSHELL_LOG_MODEL_RAW="$GHOSTSHELL_PENDING_MODEL_RAW" \
+            GHOSTSHELL_LOG_WRAPPER_ID="$GHOSTSHELL_PENDING_WRAPPER_ID" \
+            GHOSTSHELL_LOG_PROOF_LABEL="$GHOSTSHELL_PENDING_PROOF_LABEL" \
+            GHOSTSHELL_LOG_PROOF_AGENT="$GHOSTSHELL_PENDING_PROOF_AGENT" \
+            GHOSTSHELL_LOG_PROOF_MODEL="$GHOSTSHELL_PENDING_PROOF_MODEL" \
+            GHOSTSHELL_LOG_PROOF_TRACE="$GHOSTSHELL_PENDING_PROOF_TRACE" \
+            GHOSTSHELL_LOG_PROOF_TIMESTAMP="$GHOSTSHELL_PENDING_PROOF_TIMESTAMP" \
+            GHOSTSHELL_LOG_PROOF_SIGNATURE="$GHOSTSHELL_PENDING_PROOF_SIGNATURE" \
+            python3 - <<'PY' 2>/dev/null
+import json
+import os
+
+def as_int(value, default=None):
+    try:
+        return int(value)
+    except (TypeError, ValueError):
+        return default
+
+command = str(os.environ.get("GHOSTSHELL_LOG_COMMAND", "") or "")
+exit_code = as_int(os.environ.get("GHOSTSHELL_LOG_EXIT", None), None)
+manual_after_accept = str(
+    os.environ.get("GHOSTSHELL_LOG_MANUAL_AFTER_ACCEPT", "0") or "0"
+).strip() in {"1", "true", "True"}
+
+payload = {
+    "command": command,
+    "exit_code": exit_code,
+    "source": str(os.environ.get("GHOSTSHELL_LOG_SOURCE", "runtime") or "runtime"),
+    "working_directory": str(os.environ.get("GHOSTSHELL_LOG_CWD", "") or ""),
+    "shell_pid": as_int(os.environ.get("GHOSTSHELL_LOG_SHELL_PID", None), None),
+    "provenance_last_action": str(os.environ.get("GHOSTSHELL_LOG_LAST_ACTION", "") or ""),
+    "provenance_accept_origin": str(os.environ.get("GHOSTSHELL_LOG_ACCEPT_ORIGIN", "") or ""),
+    "provenance_accept_mode": str(os.environ.get("GHOSTSHELL_LOG_ACCEPT_MODE", "") or ""),
+    "provenance_suggestion_kind": str(os.environ.get("GHOSTSHELL_LOG_SUGGESTION_KIND", "") or ""),
+    "provenance_manual_edit_after_accept": manual_after_accept,
+    "provenance_ai_agent": str(os.environ.get("GHOSTSHELL_LOG_AI_AGENT", "") or ""),
+    "provenance_ai_provider": str(os.environ.get("GHOSTSHELL_LOG_AI_PROVIDER", "") or ""),
+    "provenance_ai_model": str(os.environ.get("GHOSTSHELL_LOG_AI_MODEL", "") or ""),
+    "provenance_agent_name": str(os.environ.get("GHOSTSHELL_LOG_AGENT_NAME", "") or ""),
+    "provenance_agent_hint": str(os.environ.get("GHOSTSHELL_LOG_AGENT_HINT", "") or ""),
+    "provenance_model_raw": str(os.environ.get("GHOSTSHELL_LOG_MODEL_RAW", "") or ""),
+    "provenance_wrapper_id": str(os.environ.get("GHOSTSHELL_LOG_WRAPPER_ID", "") or ""),
+    "proof_label": str(os.environ.get("GHOSTSHELL_LOG_PROOF_LABEL", "") or ""),
+    "proof_agent": str(os.environ.get("GHOSTSHELL_LOG_PROOF_AGENT", "") or ""),
+    "proof_model": str(os.environ.get("GHOSTSHELL_LOG_PROOF_MODEL", "") or ""),
+    "proof_trace": str(os.environ.get("GHOSTSHELL_LOG_PROOF_TRACE", "") or ""),
+    "proof_timestamp": as_int(os.environ.get("GHOSTSHELL_LOG_PROOF_TIMESTAMP", None), None),
+    "proof_signature": str(os.environ.get("GHOSTSHELL_LOG_PROOF_SIGNATURE", "") or ""),
+}
+print(json.dumps(payload, separators=(",", ":")))
+PY
+        )"
         curl -s -X POST "http://127.0.0.1:22000/log_command" \
              -H "Content-Type: application/json" \
              -d "$json_data" > /dev/null 2>&1
@@ -959,6 +1330,10 @@ _ghostshell_is_blocked_runtime_command() {
 }
 
 _ghostshell_preexec_hook() {
+    _ghostshell_session_sign_if_active
+    if [[ -z "$GHOSTSHELL_PENDING_LAST_ACTION" && -z "$GHOSTSHELL_PENDING_ACCEPTED_ORIGIN" ]]; then
+        _ghostshell_snapshot_pending_execution
+    fi
     GHOSTSHELL_LAST_EXECUTED_CMD="$1"
 }
 
@@ -973,17 +1348,25 @@ _ghostshell_precmd_hook() {
     fi
 
     if [[ "$exit_code" -ne 0 ]]; then
+        _ghostshell_clear_pending_execution
+        _ghostshell_reset_provenance_line_state
         return
     fi
 
     if _ghostshell_is_blocked_runtime_command "$cmd"; then
+        _ghostshell_clear_pending_execution
+        _ghostshell_reset_provenance_line_state
         return
     fi
     if _ghostshell_matches_disabled_pattern "$cmd"; then
+        _ghostshell_clear_pending_execution
+        _ghostshell_reset_provenance_line_state
         return
     fi
 
     _ghostshell_log_command "$cmd" "$exit_code" "runtime"
+    _ghostshell_clear_pending_execution
+    _ghostshell_reset_provenance_line_state
 }
 
 _ghostshell_reset_line_state() {
@@ -991,6 +1374,10 @@ _ghostshell_reset_line_state() {
     GHOSTSHELL_LINE_HAS_SPACE=0
     GHOSTSHELL_SHOW_CTRL_SPACE_HINT=0
     GHOSTSHELL_LAST_FETCH_USED_AI=0
+    GHOSTSHELL_LAST_FETCH_AI_AGENT=""
+    GHOSTSHELL_LAST_FETCH_AI_PROVIDER=""
+    GHOSTSHELL_LAST_FETCH_AI_MODEL=""
+    _ghostshell_reset_provenance_line_state
 }
 
 _ghostshell_maybe_reset_line_state_for_empty_buffer() {
@@ -1205,6 +1592,7 @@ _ghostshell_clear_suggestions() {
 _ghostshell_self_insert() {
     local inserted_key="$KEYS"
     zle .self-insert
+    _ghostshell_mark_manual_line_edit "human_typed"
 
     _ghostshell_maybe_reset_line_state_for_empty_buffer
     _ghostshell_reset_intent_state
@@ -1256,6 +1644,7 @@ _ghostshell_self_insert() {
 
 _ghostshell_backward_delete_char() {
     zle .backward-delete-char
+    _ghostshell_mark_manual_line_edit "human_edit"
 
     # Clear suggestions and pool on delete
     _ghostshell_reset_intent_state
@@ -1297,6 +1686,7 @@ _ghostshell_paste() {
     _ghostshell_reset_intent_state
     _ghostshell_clear_suggestions
     zle .bracketed-paste
+    _ghostshell_mark_manual_line_edit "human_paste"
     _ghostshell_maybe_reset_line_state_for_empty_buffer
 }
 
@@ -1321,14 +1711,26 @@ _ghostshell_accept_widget() {
 
     local current="${GHOSTSHELL_SUGGESTIONS[$GHOSTSHELL_SUGGESTION_INDEX]}"
     local mode="${GHOSTSHELL_ACCEPT_MODES[$GHOSTSHELL_SUGGESTION_INDEX]}"
+    local kind="${GHOSTSHELL_SUGGESTION_KINDS[$GHOSTSHELL_SUGGESTION_INDEX]}"
     if _ghostshell_is_status_suggestion "$current"; then
         zle expand-or-complete
     elif [[ -n "$current" ]]; then
+        local origin="gs"
+        local ai_agent=""
+        local ai_provider=""
+        local ai_model=""
+        if (( GHOSTSHELL_LAST_FETCH_USED_AI == 1 )); then
+            origin="ai"
+            ai_agent="$GHOSTSHELL_LAST_FETCH_AI_AGENT"
+            ai_provider="$GHOSTSHELL_LAST_FETCH_AI_PROVIDER"
+            ai_model="$GHOSTSHELL_LAST_FETCH_AI_MODEL"
+        fi
         if [[ "$mode" == "replace_full" ]]; then
             local normalized_buffer="$(_ghostshell_canonicalize_buffer_spacing "$BUFFER")"
             local replacement="$(_ghostshell_canonicalize_buffer_spacing "$current")"
             _ghostshell_send_feedback "$normalized_buffer" "$replacement" "replace_full"
             BUFFER="$replacement"
+            _ghostshell_set_suggestion_accept_state "$origin" "replace_full" "${kind:-normal}" "$ai_agent" "$ai_provider" "$ai_model"
         else
             local typed_since_fetch="${BUFFER#$GHOSTSHELL_LAST_BUFFER}"
             local to_add="${current#$typed_since_fetch}"
@@ -1342,6 +1744,7 @@ _ghostshell_accept_widget() {
             fi
             _ghostshell_send_feedback "$normalized_buffer" "$normalized_to_add" "suffix_append"
             BUFFER="$normalized_merged"
+            _ghostshell_set_suggestion_accept_state "$origin" "suffix_append" "${kind:-normal}" "$ai_agent" "$ai_provider" "$ai_model"
         fi
         CURSOR=${#BUFFER}
         _ghostshell_clear_suggestions
@@ -1355,11 +1758,23 @@ _ghostshell_accept_widget() {
 _ghostshell_partial_accept() {
     local current="${GHOSTSHELL_SUGGESTIONS[$GHOSTSHELL_SUGGESTION_INDEX]}"
     local mode="${GHOSTSHELL_ACCEPT_MODES[$GHOSTSHELL_SUGGESTION_INDEX]}"
+    local kind="${GHOSTSHELL_SUGGESTION_KINDS[$GHOSTSHELL_SUGGESTION_INDEX]}"
+    local origin="gs"
+    local ai_agent=""
+    local ai_provider=""
+    local ai_model=""
+    if (( GHOSTSHELL_LAST_FETCH_USED_AI == 1 )); then
+        origin="ai"
+        ai_agent="$GHOSTSHELL_LAST_FETCH_AI_AGENT"
+        ai_provider="$GHOSTSHELL_LAST_FETCH_AI_PROVIDER"
+        ai_model="$GHOSTSHELL_LAST_FETCH_AI_MODEL"
+    fi
     
     if _ghostshell_is_status_suggestion "$current"; then
         zle forward-word
     elif [[ "$mode" == "replace_full" ]]; then
         BUFFER="$(_ghostshell_canonicalize_buffer_spacing "$current")"
+        _ghostshell_set_suggestion_accept_state "$origin" "replace_full" "${kind:-normal}" "$ai_agent" "$ai_provider" "$ai_model"
         CURSOR=${#BUFFER}
         _ghostshell_clear_suggestions
         zle -R
@@ -1374,6 +1789,7 @@ _ghostshell_partial_accept() {
              BUFFER="${BUFFER}${first_word} "
         fi
         BUFFER="$(_ghostshell_canonicalize_buffer_spacing "$BUFFER")"
+        _ghostshell_set_suggestion_accept_state "$origin" "suffix_append" "${kind:-normal}" "$ai_agent" "$ai_provider" "$ai_model"
         CURSOR=${#BUFFER}
         _ghostshell_clear_suggestions
         zle -R
@@ -1428,12 +1844,14 @@ _ghostshell_cycle_prev() {
 _ghostshell_down_line_or_history() {
     _ghostshell_clear_suggestions
     zle down-line-or-history
+    _ghostshell_mark_manual_line_edit "human_edit"
     zle -R
 }
 
 _ghostshell_up_line_or_history() {
     _ghostshell_clear_suggestions
     zle up-line-or-history
+    _ghostshell_mark_manual_line_edit "human_edit"
     zle -R
 }
 
@@ -1468,6 +1886,11 @@ _ghostshell_accept_line() {
         return
     fi
 
+    if [[ -n "${BUFFER//[[:space:]]/}" ]]; then
+        _ghostshell_snapshot_pending_execution
+    else
+        _ghostshell_clear_pending_execution
+    fi
     _ghostshell_clear_suggestions
     _ghostshell_reset_line_state
     zle .accept-line
