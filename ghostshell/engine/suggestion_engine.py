@@ -1149,6 +1149,10 @@ class SuggestionEngine:
         provider = str(config.get("provider", "openai") or "openai").strip().lower()
         if provider == "history_only":
             allow_ai = False
+        buffer_value = str(getattr(ctx, "buffer", "") or "").strip()
+        if buffer_value and self._is_blocked_command(buffer_value):
+            allow_ai = False
+            logger.info("Disabling AI fallback for blocked command buffer")
 
         # Get vector-based candidates (up to 20)
         vector_candidates = self._get_vector_candidates(ctx)

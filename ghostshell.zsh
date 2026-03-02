@@ -33,6 +33,7 @@ typeset -g GHOSTSHELL_INTENT_OPTION_INDEX=1
 typeset -g GHOSTSHELL_INTENT_ACTIVE=0
 
 # Timer for pause detection
+typeset -g GHOSTSHELL_TIMER_FD=""
 typeset -g GHOSTSHELL_TIMER_PID=""
 typeset -g GHOSTSHELL_LAST_BUFFER=""
 typeset -g GHOSTSHELL_LAST_EXECUTED_CMD=""
@@ -104,6 +105,33 @@ typeset -g -a GHOSTSHELL_PATH_HEAVY_EXECUTABLES
 GHOSTSHELL_PATH_HEAVY_EXECUTABLES=(cd ls cat less more head tail vi vim nvim nano code source open cp mv mkdir rmdir touch find grep rg sed awk bat)
 typeset -g -a GHOSTSHELL_SCRIPT_EXECUTABLES
 GHOSTSHELL_SCRIPT_EXECUTABLES=(python python3 python3.11 python3.12 node bash sh zsh ruby perl php lua)
+typeset -g -a GHOSTSHELL_BLOCKED_EXECUTABLES
+GHOSTSHELL_BLOCKED_EXECUTABLES=(
+    rm
+    dd
+    wipefs
+    shred
+    fdisk
+    sfdisk
+    cfdisk
+    parted
+    diskutil
+    mkfs
+    newfs
+    mdadm
+    zpool
+    lvremove
+    vgremove
+    pvremove
+    cryptsetup
+    passwd
+    chpasswd
+    usermod
+    userdel
+    groupdel
+)
+typeset -g -a GHOSTSHELL_BLOCKED_EXECUTABLE_PREFIXES
+GHOSTSHELL_BLOCKED_EXECUTABLE_PREFIXES=(mkfs. mkfs_ newfs)
 
 _ghostshell_value_in_array() {
     local needle="$1"
@@ -171,6 +199,28 @@ _ghostshell_extract_executable_token() {
     exe="${exe:t}"
     print -r -- "${(L)exe}"
     return 0
+}
+
+_ghostshell_token_has_short_flag() {
+    local token="${1:l}"
+    local flag="${2:l}"
+
+    if [[ -z "$token" || -z "$flag" ]]; then
+        return 1
+    fi
+    if [[ "$token" == --* ]]; then
+        return 1
+    fi
+    if [[ "$token" == "-$flag" ]]; then
+        return 0
+    fi
+    if [[ "$token" == -* && ${#token} -gt 2 ]]; then
+        local flags="${token#-}"
+        if [[ "$flags" == *"$flag"* ]]; then
+            return 0
+        fi
+    fi
+    return 1
 }
 
 _ghostshell_normalize_pattern_token() {
@@ -391,7 +441,10 @@ _ghostshell_should_preserve_native_tab() {
 }
 
 _ghostshell_should_skip_ghostshell_for_buffer() {
-    _ghostshell_matches_disabled_pattern "$BUFFER"
+    if _ghostshell_matches_disabled_pattern "$BUFFER"; then
+        return 0
+    fi
+    _ghostshell_is_blocked_runtime_command "$BUFFER"
 }
 
 # ======================================================
@@ -1744,12 +1797,141 @@ PY
 
 _ghostshell_is_blocked_runtime_command() {
     local command="$1"
+    local -a tokens
+    local token=""
     local exe=""
-    exe="$(_ghostshell_extract_executable_token "$command")"
+    local exe_index=0
+    local i=1
+
+    tokens=(${(z)command})
+    if (( ${#tokens[@]} == 0 )); then
+        return 1
+    fi
+
+    while (( i <= ${#tokens[@]} )); do
+        token="${tokens[$i]}"
+        if [[ -z "$token" ]]; then
+            (( i++ ))
+            continue
+        fi
+        case "$token" in
+            sudo|command)
+                (( i++ ))
+                continue
+                ;;
+            env|/usr/bin/env)
+                (( i++ ))
+                while (( i <= ${#tokens[@]} )); do
+                    token="${tokens[$i]}"
+                    if [[ -z "$token" || "$token" == -* || "$token" == *=* ]]; then
+                        (( i++ ))
+                        continue
+                    fi
+                    break
+                done
+                continue
+                ;;
+            -*|*=*)
+                (( i++ ))
+                continue
+                ;;
+            *)
+                exe="${(L)${token:t}}"
+                exe_index=$i
+                break
+                ;;
+        esac
+    done
+
     if [[ -z "$exe" ]]; then
         return 1
     fi
-    [[ "$exe" == "rm" ]]
+
+    if _ghostshell_value_in_array "$exe" "${GHOSTSHELL_BLOCKED_EXECUTABLES[@]}"; then
+        return 0
+    fi
+
+    local prefix
+    for prefix in "${GHOSTSHELL_BLOCKED_EXECUTABLE_PREFIXES[@]}"; do
+        if [[ "$exe" == "$prefix"* ]]; then
+            return 0
+        fi
+    done
+
+    if [[ "$exe" == "history" ]]; then
+        for (( i = exe_index + 1; i <= ${#tokens[@]}; i++ )); do
+            token="${(L)${tokens[$i]}}"
+            if [[ -z "$token" ]]; then
+                continue
+            fi
+            if [[ "$token" == "--clear" ]]; then
+                return 0
+            fi
+            if _ghostshell_token_has_short_flag "$token" "c"; then
+                return 0
+            fi
+        done
+        return 1
+    fi
+
+    if [[ "$exe" == "git" ]]; then
+        local j=$(( exe_index + 1 ))
+        local subcmd=""
+        while (( j <= ${#tokens[@]} )); do
+            token="${tokens[$j]}"
+            if [[ -z "$token" ]]; then
+                (( j++ ))
+                continue
+            fi
+            case "$token" in
+                --)
+                    (( j++ ))
+                    break
+                    ;;
+                -C|-c|--exec-path|--git-dir|--work-tree|--namespace|--super-prefix|--config-env)
+                    (( j += 2 ))
+                    continue
+                    ;;
+                --exec-path=*|--git-dir=*|--work-tree=*|--namespace=*|--super-prefix=*|--config-env=*|-C*|-c*)
+                    (( j++ ))
+                    continue
+                    ;;
+                -*)
+                    (( j++ ))
+                    continue
+                    ;;
+                *)
+                    subcmd="${(L)token}"
+                    (( j++ ))
+                    break
+                    ;;
+            esac
+        done
+
+        if [[ "$subcmd" == "reset" ]]; then
+            for (( ; j <= ${#tokens[@]}; j++ )); do
+                token="${(L)${tokens[$j]}}"
+                if [[ "$token" == "--hard" ]]; then
+                    return 0
+                fi
+            done
+            return 1
+        fi
+
+        if [[ "$subcmd" == "clean" ]]; then
+            for (( ; j <= ${#tokens[@]}; j++ )); do
+                token="${(L)${tokens[$j]}}"
+                if [[ "$token" == "--force" || "$token" == "--force="* ]]; then
+                    return 0
+                fi
+                if _ghostshell_token_has_short_flag "$token" "f"; then
+                    return 0
+                fi
+            done
+        fi
+    fi
+
+    return 1
 }
 
 _ghostshell_preexec_hook() {
@@ -1930,22 +2112,45 @@ _ghostshell_has_visible_suggestion() {
 # ======================================================
 
 _ghostshell_start_timer() {
-    # Kill existing timer if any
+    # Stop any existing timer callback
     _ghostshell_stop_timer
-    
-    # Start a background timer that triggers after 0.15s
-    (
+
+    # Create a one-shot readable fd after 0.15s and hook it into ZLE.
+    local timer_fd=""
+    exec {timer_fd}< <(
         sleep 0.15
-        # Signal the main shell to fetch suggestions
-        kill -USR1 $$ 2>/dev/null
-    ) &!
-    GHOSTSHELL_TIMER_PID=$!
+        print -r -- "1"
+    ) || return
+
+    GHOSTSHELL_TIMER_FD="$timer_fd"
+    GHOSTSHELL_TIMER_PID=""
+    zle -F "$timer_fd" _ghostshell_on_timer_fd_ready 2>/dev/null
 }
 
 _ghostshell_stop_timer() {
-    if [[ -n "$GHOSTSHELL_TIMER_PID" ]]; then
-        kill $GHOSTSHELL_TIMER_PID 2>/dev/null
-        GHOSTSHELL_TIMER_PID=""
+    if [[ -n "$GHOSTSHELL_TIMER_FD" && "$GHOSTSHELL_TIMER_FD" == <-> ]]; then
+        zle -F "$GHOSTSHELL_TIMER_FD" 2>/dev/null
+        local fd_to_close="$GHOSTSHELL_TIMER_FD"
+        exec {fd_to_close}<&-
+        GHOSTSHELL_TIMER_FD=""
+    fi
+    GHOSTSHELL_TIMER_PID=""
+}
+
+_ghostshell_on_timer_fd_ready() {
+    local fd="$1"
+    if [[ -n "$fd" && "$fd" == <-> ]]; then
+        zle -F "$fd" 2>/dev/null
+        local discard=""
+        read -ru "$fd" discard 2>/dev/null || true
+        exec {fd}<&-
+    fi
+    if [[ "$GHOSTSHELL_TIMER_FD" == "$fd" ]]; then
+        GHOSTSHELL_TIMER_FD=""
+    fi
+    GHOSTSHELL_TIMER_PID=""
+    if zle; then
+        zle _ghostshell_on_timer_trigger
     fi
 }
 
@@ -1984,15 +2189,6 @@ _ghostshell_on_timer_trigger() {
 
 # Register the trigger function as a widget so it can access POSTDISPLAY
 zle -N _ghostshell_on_timer_trigger
-
-# Set up signal handler for timer
-TRAPUSR1() {
-    # Ensure we are in ZLE
-    if zle; then
-        # Invoke the update logic AS A WIDGET
-        zle _ghostshell_on_timer_trigger
-    fi
-}
 
 TRAPUSR2() {
     GHOSTSHELL_AI_SESSION_TIMER_PID=""

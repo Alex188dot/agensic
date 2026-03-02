@@ -2,6 +2,7 @@ import asyncio
 import importlib
 import unittest
 
+from ghostshell.engine.context import RequestContext
 from ghostshell.engine.suggestion_engine import SuggestionEngine
 
 cli_app = importlib.import_module("ghostshell.cli.app")
@@ -10,6 +11,7 @@ cli_app = importlib.import_module("ghostshell.cli.app")
 class ProviderRoutingTests(unittest.TestCase):
     def setUp(self):
         self.engine = SuggestionEngine.__new__(SuggestionEngine)
+        self.engine.vector_db = None
 
     def test_default_model_includes_new_providers(self):
         self.assertEqual(cli_app._default_model_for_provider("dashscope"), "dashscope/qwen-turbo")
@@ -53,6 +55,27 @@ class ProviderRoutingTests(unittest.TestCase):
         self.engine._get_vector_candidates = lambda _ctx: []
         suggestions, pool, pool_meta, used_ai = asyncio.run(
             self.engine.get_suggestions({"provider": "history_only"}, None, allow_ai=True)
+        )
+        self.assertEqual(suggestions, ["", "", ""])
+        self.assertEqual(len(pool), 20)
+        self.assertEqual(pool_meta, [])
+        self.assertFalse(used_ai)
+
+    def test_blocked_buffer_bypasses_ai_fallback(self):
+        self.engine._get_vector_candidates = lambda _ctx: []
+
+        async def _should_not_call_llm(*_args, **_kwargs):
+            raise AssertionError("LLM should not be called for blocked buffer")
+
+        self.engine._privacy_checked_acompletion = _should_not_call_llm
+        ctx = RequestContext(
+            history_file="",
+            cwd="/tmp",
+            buffer="rm ",
+            shell="zsh",
+        )
+        suggestions, pool, pool_meta, used_ai = asyncio.run(
+            self.engine.get_suggestions({"provider": "openai"}, ctx, allow_ai=True)
         )
         self.assertEqual(suggestions, ["", "", ""])
         self.assertEqual(len(pool), 20)

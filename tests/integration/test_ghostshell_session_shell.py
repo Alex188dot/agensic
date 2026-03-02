@@ -112,6 +112,69 @@ class GhostshellSessionShellTests(unittest.TestCase):
         self.assertIn("first\nsecond\n\n- bullet", result.stdout)
         self.assertNotIn("first\\nsecond", result.stdout)
 
+    def test_runtime_blocked_command_guard_filters_destructive_commands(self):
+        result = self._run_zsh(
+            """
+            _ghostshell_is_blocked_runtime_command "rm -rf /tmp/demo"; print -r -- "rm=$?"
+            _ghostshell_is_blocked_runtime_command "history -c"; print -r -- "history_clear=$?"
+            _ghostshell_is_blocked_runtime_command "git reset --hard HEAD~1"; print -r -- "git_reset_hard=$?"
+            _ghostshell_is_blocked_runtime_command "git clean -fdx"; print -r -- "git_clean_force=$?"
+            _ghostshell_is_blocked_runtime_command "mkfs.ext4 /dev/sdb1"; print -r -- "mkfs=$?"
+
+            _ghostshell_is_blocked_runtime_command "history 20"; print -r -- "history_list=$?"
+            _ghostshell_is_blocked_runtime_command "git reset --soft HEAD~1"; print -r -- "git_reset_soft=$?"
+            _ghostshell_is_blocked_runtime_command "git clean -n"; print -r -- "git_clean_dry_run=$?"
+            _ghostshell_is_blocked_runtime_command "echo hello"; print -r -- "echo=$?"
+            """
+        )
+        self.assertEqual(result.returncode, 0, msg=result.stderr)
+        lines = [line.strip() for line in result.stdout.splitlines() if line.strip()]
+        self.assertIn("rm=0", lines)
+        self.assertIn("history_clear=0", lines)
+        self.assertIn("git_reset_hard=0", lines)
+        self.assertIn("git_clean_force=0", lines)
+        self.assertIn("mkfs=0", lines)
+        self.assertIn("history_list=1", lines)
+        self.assertIn("git_reset_soft=1", lines)
+        self.assertIn("git_clean_dry_run=1", lines)
+        self.assertIn("echo=1", lines)
+
+    def test_pause_timer_does_not_register_usr1_trap(self):
+        result = self._run_zsh(
+            """
+            if typeset -f TRAPUSR1 >/dev/null 2>&1; then
+              print -r -- "trap_usr1=present"
+            else
+              print -r -- "trap_usr1=absent"
+            fi
+            """
+        )
+        self.assertEqual(result.returncode, 0, msg=result.stderr)
+        lines = [line.strip() for line in result.stdout.splitlines() if line.strip()]
+        self.assertIn("trap_usr1=absent", lines)
+
+    def test_blocked_buffer_is_skipped_for_inline_suggestions(self):
+        result = self._run_zsh(
+            """
+            BUFFER="shred -u "
+            _ghostshell_should_skip_ghostshell_for_buffer
+            print -r -- "skip_shred=$?"
+
+            BUFFER="passwd username "
+            _ghostshell_should_skip_ghostshell_for_buffer
+            print -r -- "skip_passwd=$?"
+
+            BUFFER="echo hello "
+            _ghostshell_should_skip_ghostshell_for_buffer
+            print -r -- "skip_echo=$?"
+            """
+        )
+        self.assertEqual(result.returncode, 0, msg=result.stderr)
+        lines = [line.strip() for line in result.stdout.splitlines() if line.strip()]
+        self.assertIn("skip_shred=0", lines)
+        self.assertIn("skip_passwd=0", lines)
+        self.assertIn("skip_echo=1", lines)
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -66,7 +66,41 @@ class CommandVectorDB:
     REPO_CONF_HIGH_MIN_ACCEPTS = 6
     REPO_EXECUTE_CAP = 3
     HELP_DAMPENING_PENALTY = 0.25
-    BLOCKED_EXECUTABLES = {"rm"}
+    BLOCKED_EXECUTABLES = {
+        "rm",
+        "dd",
+        "wipefs",
+        "shred",
+        "fdisk",
+        "sfdisk",
+        "cfdisk",
+        "parted",
+        "diskutil",
+        "mkfs",
+        "newfs",
+        "mdadm",
+        "zpool",
+        "lvremove",
+        "vgremove",
+        "pvremove",
+        "cryptsetup",
+        "passwd",
+        "chpasswd",
+        "usermod",
+        "userdel",
+        "groupdel",
+    }
+    BLOCKED_EXECUTABLE_PREFIXES = {"mkfs.", "mkfs_", "newfs"}
+    GIT_GLOBAL_OPTIONS_WITH_VALUE = {
+        "-C",
+        "-c",
+        "--exec-path",
+        "--git-dir",
+        "--work-tree",
+        "--namespace",
+        "--super-prefix",
+        "--config-env",
+    }
     PREFIX_SCAN_LIMIT = 2000
     SEMANTIC_VECTOR_TOPN = 80
     EXEC_FUZZ_SCOPE_THRESHOLD = 84.0
@@ -630,8 +664,13 @@ class CommandVectorDB:
 
     @staticmethod
     def extract_executable(tokens: List[str]) -> str:
+        executable, _ = CommandVectorDB.extract_executable_with_index(tokens)
+        return executable
+
+    @staticmethod
+    def extract_executable_with_index(tokens: List[str]) -> Tuple[str, int]:
         if not tokens:
-            return ""
+            return ("", -1)
 
         i = 0
         n = len(tokens)
@@ -670,18 +709,116 @@ class CommandVectorDB:
                 i += 1
                 continue
 
-            return token
+            return (token, i)
 
-        return ""
+        return ("", -1)
+
+    @staticmethod
+    def _token_has_short_flag(token: str, flag: str) -> bool:
+        value = (token or "").strip().lower()
+        short = (flag or "").strip().lower()
+        if not value or not short:
+            return False
+        if value.startswith("--"):
+            return False
+        if value == f"-{short}":
+            return True
+        if value.startswith("-") and len(value) > 2:
+            return short in value[1:]
+        return False
+
+    @classmethod
+    def _history_clears_state(cls, args: List[str]) -> bool:
+        for raw in args:
+            token = (raw or "").strip().lower()
+            if not token:
+                continue
+            if token == "--clear":
+                return True
+            if cls._token_has_short_flag(token, "c"):
+                return True
+        return False
+
+    @classmethod
+    def _extract_git_subcommand(cls, args: List[str]) -> Tuple[str, List[str]]:
+        i = 0
+        n = len(args)
+        while i < n:
+            token = (args[i] or "").strip()
+            if not token:
+                i += 1
+                continue
+
+            if token == "--":
+                i += 1
+                break
+
+            if token in cls.GIT_GLOBAL_OPTIONS_WITH_VALUE:
+                i += 2
+                continue
+
+            if token.startswith(("--exec-path=", "--git-dir=", "--work-tree=", "--namespace=", "--super-prefix=", "--config-env=")):
+                i += 1
+                continue
+
+            # Handles compact forms like -Cpath or -ckey=value.
+            if token.startswith("-C") and token != "-C":
+                i += 1
+                continue
+            if token.startswith("-c") and token != "-c":
+                i += 1
+                continue
+
+            if token.startswith("-"):
+                i += 1
+                continue
+
+            subcommand = token.lower()
+            remaining = []
+            for value in args[i + 1:]:
+                clean = (value or "").strip().lower()
+                if clean:
+                    remaining.append(clean)
+            return (subcommand, remaining)
+
+        return ("", [])
+
+    @classmethod
+    def _is_git_destructive_subcommand(cls, args: List[str]) -> bool:
+        subcommand, remaining = cls._extract_git_subcommand(args)
+        if not subcommand:
+            return False
+
+        if subcommand == "reset":
+            return "--hard" in remaining
+
+        if subcommand == "clean":
+            for token in remaining:
+                if token == "--force" or token.startswith("--force="):
+                    return True
+                if cls._token_has_short_flag(token, "f"):
+                    return True
+
+        return False
 
     @staticmethod
     def is_blocked_command(command: str) -> bool:
         tokens = CommandVectorDB.tokenize_command(command)
-        executable = CommandVectorDB.extract_executable(tokens)
+        executable, executable_index = CommandVectorDB.extract_executable_with_index(tokens)
         if not executable:
             return False
         executable_name = os.path.basename(executable).strip().lower()
-        return executable_name in CommandVectorDB.BLOCKED_EXECUTABLES
+        if executable_name in CommandVectorDB.BLOCKED_EXECUTABLES:
+            return True
+        if any(executable_name.startswith(prefix) for prefix in CommandVectorDB.BLOCKED_EXECUTABLE_PREFIXES):
+            return True
+
+        args = tokens[executable_index + 1:] if executable_index >= 0 else []
+        if executable_name == "history" and CommandVectorDB._history_clears_state(args):
+            return True
+        if executable_name == "git" and CommandVectorDB._is_git_destructive_subcommand(args):
+            return True
+        return False
 
     @staticmethod
     def extract_context_key(buffer_context: str) -> str:
