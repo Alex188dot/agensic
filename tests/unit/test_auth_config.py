@@ -27,6 +27,8 @@ class AuthConfigTests(unittest.TestCase):
         self.assertIsInstance(payload, dict)
         self.assertEqual(load_auth_token(path=self.auth_path), "token-123")
         self.assertEqual(str(payload.get("auth_token", "")), "token-123")
+        self.assertGreater(int(payload.get("created_at", 0) or 0), 0)
+        self.assertGreater(int(payload.get("last_rotated_at", 0) or 0), 0)
 
     def test_auth_file_permissions_are_owner_only(self):
         save_auth_token("token-123", path=self.auth_path)

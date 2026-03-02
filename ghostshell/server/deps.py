@@ -280,5 +280,21 @@ def request_has_valid_auth(request: Request) -> bool:
     return False
 
 
+def auth_failure_reason(request: Request) -> str:
+    custom_token = str(request.headers.get(HEADER_CUSTOM_AUTH, "") or "").strip()
+    bearer = _extract_bearer_token(request.headers.get(HEADER_AUTHORIZATION, ""))
+    if not custom_token and not bearer:
+        return "auth_missing"
+    return "auth_invalid"
+
+
+def rotate_local_auth_token() -> str:
+    from ghostshell.config.auth import rotate_auth_token
+
+    token = rotate_auth_token()
+    _AUTH_CACHE.get_token(force_reload=True)
+    return token
+
+
 def unauthorized_exception() -> HTTPException:
     return HTTPException(status_code=401, detail="unauthorized")

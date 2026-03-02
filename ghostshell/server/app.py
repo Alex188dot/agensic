@@ -19,7 +19,7 @@ from ghostshell.server.routes_provenance import router as provenance_router
 async def lifespan(app: FastAPI):
     deps.logger.info("Starting GhostShell server...")
     deps.reset_shutdown_state()
-    deps.ensure_local_auth_token()
+    deps.rotate_local_auth_token()
     deps.log_parallelism_settings_once()
     startup_history = deps.get_history_file(os.environ.get("SHELL", "zsh"))
     if startup_history:
@@ -56,6 +56,13 @@ app = FastAPI(lifespan=lifespan)
 @app.middleware("http")
 async def enforce_local_auth(request: Request, call_next):
     if not deps.request_has_valid_auth(request):
+        deps.logger.warning(
+            "local auth rejected method=%s path=%s client=%s reason=%s",
+            str(request.method or ""),
+            str(request.url.path or ""),
+            deps.get_client_id(request),
+            deps.auth_failure_reason(request),
+        )
         return JSONResponse(status_code=401, content={"detail": "unauthorized"})
     return await call_next(request)
 

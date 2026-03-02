@@ -1,4 +1,5 @@
 import typer
+import click
 import json
 import os
 import shutil
@@ -27,6 +28,7 @@ from questionary.prompts import common
 from questionary.prompts.common import InquirerControl
 from questionary.styles import merge_styles_default
 from questionary import utils
+from typer.core import TyperGroup
 from ghostshell.version import __version__
 from ghostshell.config.loader import (
     MAX_LLM_CALLS_PER_LINE,
@@ -36,16 +38,59 @@ from ghostshell.config.loader import (
 )
 from ghostshell.config.auth import (
     AuthTokenCache,
+    AUTH_FILE,
     build_auth_headers,
+    load_auth_payload,
     rotate_auth_token,
 )
 from ghostshell.engine.provenance import build_local_proof_metadata, sign_proof_payload
 
-app = typer.Typer(add_completion=False)
+class GhostShellRootGroup(TyperGroup):
+    _AUTH_HELP_ALIASES = ("auth rotate", "auth status")
+
+    def list_commands(self, ctx):
+        names = list(super().list_commands(ctx))
+        out: list[str] = []
+        inserted_auth = False
+        for name in names:
+            if name == "auth":
+                continue
+            out.append(name)
+            if name == "doctor":
+                out.extend(self._AUTH_HELP_ALIASES)
+                inserted_auth = True
+        if not inserted_auth and "auth" in names:
+            out.extend(self._AUTH_HELP_ALIASES)
+        return out
+
+    def get_command(self, ctx, cmd_name):
+        if cmd_name in self._AUTH_HELP_ALIASES:
+            auth_group = super().get_command(ctx, "auth")
+            if isinstance(auth_group, click.Group):
+                sub_name = cmd_name.split(" ", 1)[1]
+                sub_cmd = auth_group.get_command(ctx, sub_name)
+                if sub_cmd is None:
+                    return None
+                return click.Command(
+                    name=cmd_name,
+                    callback=getattr(sub_cmd, "callback", None),
+                    params=list(getattr(sub_cmd, "params", [])),
+                    help=getattr(sub_cmd, "help", None),
+                    short_help=getattr(sub_cmd, "short_help", None),
+                    hidden=getattr(sub_cmd, "hidden", False),
+                    deprecated=getattr(sub_cmd, "deprecated", False),
+                )
+            return None
+        return super().get_command(ctx, cmd_name)
+
+
+app = typer.Typer(add_completion=False, cls=GhostShellRootGroup)
 provenance_registry_app = typer.Typer(add_completion=False, help="Manage provenance agent registry")
 ai_session_app = typer.Typer(add_completion=False, help="Manage AI session signing context")
-app.add_typer(provenance_registry_app, name="provenance-registry")
-app.add_typer(ai_session_app, name="ai-session")
+auth_app = typer.Typer(add_completion=False, help="Manage local API auth token")
+app.add_typer(provenance_registry_app, name="provenance-registry", hidden=True)
+app.add_typer(ai_session_app, name="ai-session", hidden=True)
+app.add_typer(auth_app, name="auth", hidden=True)
 console = Console()
 
 CONFIG_DIR = os.path.expanduser("~/.ghostshell")
@@ -181,6 +226,15 @@ def _daemon_request(method: str, path: str, timeout: float, **kwargs):
 
 def _print_daemon_auth_hint() -> None:
     console.print("[yellow]Daemon auth failed.[/yellow] Run `aiterminal setup`, reload your shell, and retry.")
+
+
+def _rotate_auth_token_or_exit(context: str) -> None:
+    try:
+        rotate_auth_token()
+        _DAEMON_AUTH_CACHE.get_token(force_reload=True)
+    except Exception as exc:
+        console.print(f"[red]Failed to rotate local auth token ({context}):[/red] {exc}")
+        raise typer.Exit(code=1)
 
 
 def _repair_cli_enabled() -> bool:
@@ -1380,12 +1434,7 @@ def _wait_for_bootstrap_ready(started_pid: int | None = None) -> tuple[bool, int
 @app.command()
 def setup():
     ensure_config_dir()
-    try:
-        rotate_auth_token()
-        _DAEMON_AUTH_CACHE.get_token(force_reload=True)
-    except Exception as exc:
-        console.print(f"[red]Failed to rotate local auth token:[/red] {exc}")
-        raise typer.Exit(code=1)
+    _rotate_auth_token_or_exit("setup")
     console.print(
         Panel.fit("[bold cyan]GhostShell Configuration[/bold cyan] [bold #ff8c00](Esc = back)[/bold #ff8c00]")
     )
@@ -1474,6 +1523,7 @@ def enable_startup():
 def start():
     """Start the background AI daemon manually."""
     ensure_config_dir()
+    _rotate_auth_token_or_exit("start")
     if is_port_open():
         payload = _fetch_daemon_status()
         bootstrap = payload.get("bootstrap", {}) if isinstance(payload, dict) else {}
@@ -1753,6 +1803,64 @@ def doctor():
     console.print("[green]Doctor result:[/green] OK")
 
 
+def _format_ts_display(ts_value: int) -> str:
+    ts = int(ts_value or 0)
+    if ts <= 0:
+        return "-"
+    return time.strftime("%Y-%m-%d %H:%M:%S", time.localtime(ts))
+
+
+@auth_app.command("rotate")
+def auth_rotate():
+    """Rotate local daemon auth token."""
+    ensure_config_dir()
+    _rotate_auth_token_or_exit("auth rotate")
+    payload = load_auth_payload(AUTH_FILE) or {}
+    last_rotated_at = int(payload.get("last_rotated_at", 0) or 0)
+    console.print("[green]✔ Local auth token rotated.[/green]")
+    console.print(f"[dim]path={AUTH_FILE}[/dim]")
+    console.print(f"[dim]last_rotated_at={_format_ts_display(last_rotated_at)}[/dim]")
+
+
+@auth_app.command("status")
+def auth_status(
+    as_json: bool = typer.Option(False, "--json", help="Print raw JSON payload"),
+):
+    """Show local daemon auth token metadata."""
+    target = Path(AUTH_FILE).expanduser()
+    exists = target.exists() and target.is_file()
+    payload = load_auth_payload(AUTH_FILE) if exists else None
+    created_at = int((payload or {}).get("created_at", 0) or 0)
+    last_rotated_at = int((payload or {}).get("last_rotated_at", created_at) or created_at)
+    try:
+        mtime = int(target.stat().st_mtime) if exists else 0
+    except Exception:
+        mtime = 0
+
+    status_payload = {
+        "status": "ok",
+        "path": str(target),
+        "exists": bool(exists),
+        "created_at": created_at,
+        "created_at_display": _format_ts_display(created_at),
+        "last_rotated_at": last_rotated_at,
+        "last_rotated_at_display": _format_ts_display(last_rotated_at),
+        "file_mtime": mtime,
+        "file_mtime_display": _format_ts_display(mtime),
+    }
+    if as_json:
+        console.print_json(data=status_payload)
+        return
+
+    style = "green" if exists and payload else "yellow"
+    state = "present" if exists and payload else "missing_or_invalid"
+    console.print(f"[{style}]auth status: {state}[/{style}]")
+    console.print(f"path: {status_payload['path']}")
+    console.print(f"created_at: {status_payload['created_at_display']}")
+    console.print(f"last_rotated_at: {status_payload['last_rotated_at_display']}")
+    console.print(f"file_mtime: {status_payload['file_mtime_display']}")
+
+
 @app.command()
 def provenance(
     limit: int = typer.Option(50, "--limit", min=1, max=500, help="Max rows to return"),
@@ -1943,7 +2051,7 @@ def ai_session_status():
     )
 
 
-@app.command("ai-exec", context_settings={"allow_extra_args": True, "ignore_unknown_options": True})
+@app.command("ai-exec", context_settings={"allow_extra_args": True, "ignore_unknown_options": True}, hidden=True)
 def ai_exec(
     ctx: typer.Context,
     agent: str = typer.Option("", "--agent", help="Agent identifier, for example codex"),
@@ -2037,7 +2145,7 @@ def ai_exec(
     raise typer.Exit(code=exit_code)
 
 
-@app.command()
+@app.command(hidden=True)
 def wrap(
     agent: str = typer.Argument(..., help="Agent identifier"),
     model: str = typer.Option("gpt-5.3", "--model", help="Default model for the wrapper"),

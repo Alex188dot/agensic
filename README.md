@@ -93,7 +93,10 @@ All local API routes require auth via one of:
 - `X-GhostShell-Auth: <auth_token>`
 
 The token is stored at `~/.ghostshell/auth.json` and is created automatically on daemon startup.
-`aiterminal setup` rotates this token on each run.
+Token rotation happens automatically on:
+- daemon startup (including reboot/startup LaunchAgent boot)
+- `aiterminal start`
+- `aiterminal setup`
 
 Authenticated curl example:
 
@@ -184,6 +187,13 @@ Run:
 
 ```bash
 aiterminal setup
+```
+
+Local auth utilities:
+
+```bash
+aiterminal auth status
+aiterminal auth rotate
 ```
 
 Diagnostics:

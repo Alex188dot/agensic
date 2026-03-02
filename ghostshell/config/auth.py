@@ -23,17 +23,21 @@ def _normalize_auth_payload(payload: object) -> dict | None:
         return None
     version = int(payload.get("version", AUTH_VERSION) or AUTH_VERSION)
     created_at = int(payload.get("created_at", int(time.time())) or int(time.time()))
+    last_rotated_at = int(payload.get("last_rotated_at", created_at) or created_at)
     return {
         "version": version,
         "created_at": created_at,
+        "last_rotated_at": last_rotated_at,
         "auth_token": token,
     }
 
 
 def _auth_payload_for_token(token: str) -> dict:
+    now = int(time.time())
     return {
         "version": AUTH_VERSION,
-        "created_at": int(time.time()),
+        "created_at": now,
+        "last_rotated_at": now,
         "auth_token": str(token or "").strip(),
     }
 

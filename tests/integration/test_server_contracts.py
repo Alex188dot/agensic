@@ -47,7 +47,7 @@ class ServerContractTests(unittest.TestCase):
     def setUpClass(cls):
         if TestClient is None:
             raise unittest.SkipTest(f"Server dependencies unavailable: {SERVER_IMPORT_ERROR}")
-        with patch.object(deps, "ensure_local_auth_token", return_value=cls.AUTH_TOKEN):
+        with patch.object(deps, "rotate_local_auth_token", return_value=cls.AUTH_TOKEN):
             cls.client = TestClient(app)
 
     def setUp(self):
@@ -78,9 +78,22 @@ class ServerContractTests(unittest.TestCase):
             self.assertIn("shutdown", body)
 
     def test_local_auth_required_for_status(self):
-        response = self._request_without_auth("GET", "/status")
+        with patch.object(deps.logger, "warning") as warning_mock:
+            response = self._request_without_auth("GET", "/status")
         self.assertEqual(response.status_code, 401)
         self.assertEqual(response.json().get("detail"), "unauthorized")
+        self.assertTrue(any(len(args) >= 5 and args[4] == "auth_missing" for args, _ in warning_mock.call_args_list))
+
+    def test_local_auth_invalid_token_logs_reason(self):
+        with patch.object(deps.logger, "warning") as warning_mock:
+            response = self._request_without_auth(
+                "GET",
+                "/status",
+                headers={"Authorization": "Bearer wrong-token"},
+            )
+        self.assertEqual(response.status_code, 401)
+        self.assertEqual(response.json().get("detail"), "unauthorized")
+        self.assertTrue(any(len(args) >= 5 and args[4] == "auth_invalid" for args, _ in warning_mock.call_args_list))
 
     def test_local_auth_accepts_custom_header(self):
         response = self._request_without_auth(

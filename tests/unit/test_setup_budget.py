@@ -44,6 +44,15 @@ class SetupBudgetTests(unittest.TestCase):
             cli_app.setup()
         rotate_mock.assert_called_once()
 
+    def test_start_rotates_local_auth_token(self):
+        with patch.object(cli_app, "_rotate_auth_token_or_exit") as rotate_mock, patch.object(
+            cli_app, "is_port_open", return_value=True
+        ), patch.object(
+            cli_app, "_fetch_daemon_status", return_value={"bootstrap": {"ready": True, "indexed_commands": 0}}
+        ), patch.object(cli_app.console, "print"):
+            cli_app.start()
+        rotate_mock.assert_called_once_with("start")
+
 
 if __name__ == "__main__":
     unittest.main()
