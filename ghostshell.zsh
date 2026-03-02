@@ -676,35 +676,42 @@ _ghostshell_print_intent_preview() {
     local explanation="$3"
     local alternatives="$4"
     local copy_block="$5"
-    local green=$'\033[32m'
-    local light_blue=$'\033[94m'
-    local reset=$'\033[0m'
-
     zle -I
     print -r -- ""
     print -r -- "GhostShell command mode (#)"
     print -r -- "Question: $question"
     print -r -- ""
-    print -r -- "Copy-ready command:"
-    print -r -- '```bash'
-    print -r -- "${green}${copy_block}${reset}"
-    print -r -- '```'
-    print -r -- ""
+    local markdown=""
+    markdown+="Copy-ready command:"
+    markdown+=$'\n\n'
+    markdown+='```bash'
+    markdown+=$'\n'
+    markdown+="$copy_block"
+    markdown+=$'\n'
+    markdown+='```'
+    markdown+=$'\n'
     if [[ -n "$explanation" ]]; then
-        print -r -- "$explanation"
+        markdown+=$'\n'
+        markdown+="$explanation"
+        markdown+=$'\n'
     fi
     if [[ -n "$alternatives" ]]; then
         local -a alt_items
         alt_items=("${(@s:|||:)alternatives}")
         if [[ ${#alt_items[@]} -gt 0 ]]; then
-            print -r -- ""
-            print -r -- "Alternatives:"
+            markdown+=$'\n'
+            markdown+="Alternatives:"
+            markdown+=$'\n'
             local alt
             for alt in "${alt_items[@]}"; do
-                [[ -n "$alt" ]] && print -r -- "${light_blue}- $alt${reset}"
+                if [[ -n "$alt" ]]; then
+                    markdown+="- $alt"
+                    markdown+=$'\n'
+                fi
             done
         fi
     fi
+    _ghostshell_render_markdown_or_plain "$markdown"
 }
 
 _ghostshell_print_intent_refusal() {
@@ -716,6 +723,54 @@ _ghostshell_print_intent_refusal() {
     print -r -- "Question: $question"
     print -r -- ""
     print -r -- "${explanation:-I can only help with terminal commands. Use '##' for general questions.}"
+}
+
+_ghostshell_decode_common_escapes() {
+    local text="$1"
+    local newline=$'\n'
+    local tab=$'\t'
+    local prev="$text"
+    local i
+    for i in 1 2; do
+        if [[ "$text" != *\\n* && "$text" != *\\r* && "$text" != *\\t* ]]; then
+            break
+        fi
+        text="${text//\\r\\n/$newline}"
+        text="${text//\\n/$newline}"
+        text="${text//\\r/$newline}"
+        text="${text//\\t/$tab}"
+        if [[ "$text" == "$prev" ]]; then
+            break
+        fi
+        prev="$text"
+    done
+    print -r -- "$text"
+}
+
+_ghostshell_render_markdown_or_plain() {
+    local text="$1"
+    text="$(_ghostshell_decode_common_escapes "$text")"
+    local rendered=0
+    if command -v python3 >/dev/null 2>&1; then
+        GHOSTSHELL_MARKDOWN_TEXT="$text" \
+        python3 -c "
+import os
+text = os.environ.get('GHOSTSHELL_MARKDOWN_TEXT', '')
+try:
+    from rich.console import Console
+    from rich.markdown import Markdown
+    console = Console(soft_wrap=True)
+    console.print(Markdown(text))
+except Exception:
+    print(text)
+" 2>/dev/null
+        if [[ "$?" -eq 0 ]]; then
+            rendered=1
+        fi
+    fi
+    if [[ "$rendered" -ne 1 ]]; then
+        print -r -- "$text"
+    fi
 }
 
 _ghostshell_reset_intent_state() {
@@ -765,7 +820,7 @@ _ghostshell_print_assist_reply() {
     zle -I
     print -r -- ""
     print -r -- "GhostShell assistant (##)"
-    print -r -- "$answer"
+    _ghostshell_render_markdown_or_plain "$answer"
 }
 
 _ghostshell_resolve_intent_command() {
@@ -792,87 +847,54 @@ _ghostshell_resolve_intent_command() {
         return 0
     fi
 
-    local escaped_body="${body//\'/\'\\\'\'}"
-    local escaped_pwd="${PWD//\'/\'\\\'\'}"
-    local escaped_term="${TERM//\'/\'\\\'\'}"
     local platform_name="$(uname -s 2>/dev/null || echo unknown)"
-    local escaped_platform="${platform_name//\'/\'\\\'\'}"
     _ghostshell_reload_auth_token_if_needed
     local response
-    response=$(
-        GHOSTSHELL_AUTH_TOKEN="$GHOSTSHELL_AUTH_TOKEN" \
-        python3 -c "
-import urllib.request, json, shlex
-import os
-
-def safe_line(v):
-    return str(v or '').replace('\\r', ' ').replace('\\n', ' ').strip()
-
-payload = {
-    'intent_text': '''$escaped_body''',
-    'working_directory': '''$escaped_pwd''',
-    'shell': 'zsh',
-    'terminal': '''$escaped_term''',
-    'platform': '''$escaped_platform''',
-}
-try:
-    token = str(os.environ.get('GHOSTSHELL_AUTH_TOKEN', '') or '').strip()
-    headers = {'Content-Type': 'application/json'}
-    if token:
-        headers['Authorization'] = 'Bearer ' + token
-        headers['X-GhostShell-Auth'] = token
-    req = urllib.request.Request('http://127.0.0.1:22000/intent', data=json.dumps(payload).encode('utf-8'), headers=headers)
-    with urllib.request.urlopen(req, timeout=3.0) as r:
-        result = json.load(r)
-    status = safe_line(result.get('status', 'error'))
-    primary = safe_line(result.get('primary_command', ''))
-    explanation = safe_line(result.get('explanation', ''))
-    alternatives = result.get('alternatives', [])
-    if not isinstance(alternatives, list):
-        alternatives = []
-    alternatives = [safe_line(item) for item in alternatives if safe_line(item)]
-    alternatives_blob = '|||'.join(alternatives[:2])
-    copy_block = safe_line(result.get('copy_block', primary))
-    ai_agent = safe_line(result.get('ai_agent', ''))
-    ai_provider = safe_line(result.get('ai_provider', ''))
-    ai_model = safe_line(result.get('ai_model', ''))
-except Exception:
-    status = 'error'
-    primary = ''
-    explanation = 'Could not resolve command mode right now.'
-    alternatives_blob = ''
-    copy_block = ''
-    ai_agent = ''
-    ai_provider = ''
-    ai_model = ''
-print('status=' + shlex.quote(status))
-print('primary=' + shlex.quote(primary))
-print('explanation=' + shlex.quote(explanation))
-print('alternatives=' + shlex.quote(alternatives_blob))
-print('copy_block=' + shlex.quote(copy_block))
-print('ai_agent=' + shlex.quote(ai_agent))
-print('ai_provider=' + shlex.quote(ai_provider))
-print('ai_model=' + shlex.quote(ai_model))
-" 2>/dev/null
+    local -a helper_cmd
+    helper_cmd=(
+        python3 "$GHOSTSHELL_CLIENT_HELPER"
+        --op intent
+        --format shell_lines_v1
+        --timeout 3.0
+        --intent-text "$body"
+        --working-directory "$PWD"
+        --shell "zsh"
+        --terminal "$TERM"
+        --platform "$platform_name"
     )
+    if [[ -n "$GHOSTSHELL_AUTH_TOKEN" ]]; then
+        helper_cmd+=(--auth-token "$GHOSTSHELL_AUTH_TOKEN")
+    fi
+    response="$("${helper_cmd[@]}" 2>/dev/null)"
 
-    local nl_status=""
+    local nl_status="error"
     local nl_primary=""
-    local nl_explanation=""
+    local nl_explanation="Could not resolve command mode right now."
     local nl_alternatives=""
     local nl_copy_block=""
     local nl_ai_agent=""
     local nl_ai_provider=""
     local nl_ai_model=""
-    response="${response//status=/nl_status=}"
-    response="${response//primary=/nl_primary=}"
-    response="${response//explanation=/nl_explanation=}"
-    response="${response//alternatives=/nl_alternatives=}"
-    response="${response//copy_block=/nl_copy_block=}"
-    response="${response//ai_agent=/nl_ai_agent=}"
-    response="${response//ai_provider=/nl_ai_provider=}"
-    response="${response//ai_model=/nl_ai_model=}"
-    eval "$response"
+    local -a response_lines
+    response_lines=("${(@f)response}")
+    if (( ${#response_lines[@]} >= 12 )) \
+        && [[ "${response_lines[1]}" == "ghostshell_shell_lines_v1" ]] \
+        && [[ "${response_lines[2]}" == "intent" ]]; then
+        nl_status="${response_lines[5]}"
+        nl_primary="${response_lines[6]}"
+        nl_explanation="${response_lines[7]}"
+        nl_alternatives="${response_lines[8]}"
+        nl_copy_block="${response_lines[9]}"
+        nl_ai_agent="${response_lines[10]}"
+        nl_ai_provider="${response_lines[11]}"
+        nl_ai_model="${response_lines[12]}"
+        if [[ -z "$nl_status" ]]; then
+            nl_status="error"
+        fi
+        if [[ -z "$nl_explanation" ]]; then
+            nl_explanation="Could not resolve command mode right now."
+        fi
+    fi
 
     if [[ "$nl_status" != "ok" || -z "$nl_primary" ]]; then
         _ghostshell_print_intent_refusal "$body" "${nl_explanation:-No command generated.}"
@@ -920,44 +942,62 @@ _ghostshell_resolve_general_assist() {
         return 0
     fi
 
-    local escaped_body="${body//\'/\'\\\'\'}"
-    local escaped_pwd="${PWD//\'/\'\\\'\'}"
-    local escaped_term="${TERM//\'/\'\\\'\'}"
     local platform_name="$(uname -s 2>/dev/null || echo unknown)"
-    local escaped_platform="${platform_name//\'/\'\\\'\'}"
     _ghostshell_reload_auth_token_if_needed
-    local answer
-    answer=$(
-        GHOSTSHELL_AUTH_TOKEN="$GHOSTSHELL_AUTH_TOKEN" \
-        python3 -c "
-import urllib.request, json
-import os
-payload = {
-    'prompt_text': '''$escaped_body''',
-    'working_directory': '''$escaped_pwd''',
-    'shell': 'zsh',
-    'terminal': '''$escaped_term''',
-    'platform': '''$escaped_platform''',
-}
-try:
-    token = str(os.environ.get('GHOSTSHELL_AUTH_TOKEN', '') or '').strip()
-    headers = {'Content-Type': 'application/json'}
-    if token:
-        headers['Authorization'] = 'Bearer ' + token
-        headers['X-GhostShell-Auth'] = token
-    req = urllib.request.Request('http://127.0.0.1:22000/assist', data=json.dumps(payload).encode('utf-8'), headers=headers)
-    with urllib.request.urlopen(req, timeout=4.0) as r:
-        result = json.load(r)
-    answer = str(result.get('answer', '') or '').replace('\\r', ' ').strip()
-except Exception:
-    answer = 'Could not fetch assistant reply right now.'
-print(answer)
-" 2>/dev/null
+    local response
+    local -a helper_cmd
+    helper_cmd=(
+        python3 "$GHOSTSHELL_CLIENT_HELPER"
+        --op assist
+        --format shell_lines_v1
+        --timeout 4.0
+        --prompt-text "$body"
+        --working-directory "$PWD"
+        --shell "zsh"
+        --terminal "$TERM"
+        --platform "$platform_name"
     )
-
-    if [[ -z "$answer" ]]; then
-        answer="No response."
+    if [[ -n "$GHOSTSHELL_AUTH_TOKEN" ]]; then
+        helper_cmd+=(--auth-token "$GHOSTSHELL_AUTH_TOKEN")
     fi
+    response="$("${helper_cmd[@]}" 2>/dev/null)"
+
+    local answer
+    answer="Could not fetch assistant reply right now."
+    local -a response_lines
+    response_lines=("${(@f)response}")
+    if (( ${#response_lines[@]} >= 5 )) \
+        && [[ "${response_lines[1]}" == "ghostshell_shell_lines_v1" ]] \
+        && [[ "${response_lines[2]}" == "assist" ]]; then
+        local answer_count_raw="${response_lines[5]}"
+        if [[ "$answer_count_raw" == <-> ]]; then
+            local answer_count="$answer_count_raw"
+            local answer_last_index=$((5 + answer_count))
+            if (( ${#response_lines[@]} >= answer_last_index )); then
+                if (( answer_count > 0 )); then
+                    answer="${(j:\n:)response_lines[6,$answer_last_index]}"
+                else
+                    answer=""
+                fi
+            else
+                # Fallback for malformed or mixed versions: treat line 5 as legacy answer text.
+                answer="${response_lines[5]}"
+            fi
+        else
+            # Backward compatibility with older shell_lines_v1 assist shape (single answer line).
+            answer="${response_lines[5]}"
+        fi
+        if [[ -z "$answer" ]]; then
+            if [[ "${response_lines[3]}" == "1" ]]; then
+                answer="No response."
+            else
+                answer="Could not fetch assistant reply right now."
+            fi
+        fi
+    fi
+    # Some providers return markdown with literal escape sequences ("\\n") instead of real newlines.
+    # Decode common escapes so terminal markdown rendering preserves structure.
+    answer="$(_ghostshell_decode_common_escapes "$answer")"
 
     GHOSTSHELL_LAST_NL_INPUT="$raw"
     GHOSTSHELL_LAST_NL_KIND="assist"

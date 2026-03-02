@@ -421,6 +421,47 @@ This means:
 - **server.py**: HTTP API endpoints
 - **privacy_guard.py**: Sanitization and fail-closed privacy checks before LLM egress
 - **ghostshell.zsh**: Shell integration, UI, keyboard handling
+- **shell_client.py**: Shell helper for `/predict`, `/intent`, and `/assist`
+
+### Shell Helper Contract
+
+`shell_client.py` supports:
+
+- `--op predict|intent|assist` (default `predict`)
+- `--format json|shell_lines_v1` (default `json`)
+- shared context args: `--working-directory`, `--shell`, `--terminal`, `--platform`
+- mode-specific args: `--intent-text` (`intent`), `--prompt-text` (`assist`)
+- input precedence: CLI args first, stdin JSON fallback for missing values
+
+Compatibility behavior:
+
+- Existing `predict` stdin JSON input and JSON output remain the default.
+- `intent` and `assist` can use `shell_lines_v1` for shell-safe parsing without `eval`.
+
+`shell_lines_v1` layout:
+
+1. line 1: `ghostshell_shell_lines_v1`
+2. line 2: operation (`intent` or `assist`)
+3. line 3: helper `ok` (`1` or `0`)
+4. line 4: `error_code` (empty when `ok=1`)
+
+`intent` payload lines:
+
+1. line 5: `status`
+2. line 6: `primary_command`
+3. line 7: `explanation`
+4. line 8: `alternatives_blob` (`|||` separator, max 2 alternatives)
+5. line 9: `copy_block`
+6. line 10: `ai_agent`
+7. line 11: `ai_provider`
+8. line 12: `ai_model`
+
+`assist` payload lines:
+
+1. line 5: `answer_line_count` (integer)
+2. line 6..N: raw `answer` lines (multiline markdown preserved)
+
+`intent` fields are single-line sanitized values (`\r`/`\n` replaced by spaces, trimmed). `assist` preserves multiline markdown by emitting a line count plus raw lines. This transport is intended to be reused by future bash/Linux and PowerShell adapters.
 
 ## Technical Details
 

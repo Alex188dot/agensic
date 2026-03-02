@@ -101,6 +101,17 @@ class GhostshellSessionShellTests(unittest.TestCase):
         self.assertGreaterEqual(len(traces), 2)
         self.assertNotEqual(traces[-2], traces[-1])
 
+    def test_decode_common_escapes_turns_backslash_n_into_newlines(self):
+        result = self._run_zsh(
+            """
+            decoded="$(_ghostshell_decode_common_escapes 'first\\nsecond\\n\\n- bullet')"
+            print -r -- "$decoded"
+            """
+        )
+        self.assertEqual(result.returncode, 0, msg=result.stderr)
+        self.assertIn("first\nsecond\n\n- bullet", result.stdout)
+        self.assertNotIn("first\\nsecond", result.stdout)
+
 
 if __name__ == "__main__":
     unittest.main()
