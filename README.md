@@ -88,6 +88,20 @@ python server.py
 
 The server runs on `http://127.0.0.1:22000`
 
+All local API routes require auth via one of:
+- `Authorization: Bearer <auth_token>`
+- `X-GhostShell-Auth: <auth_token>`
+
+The token is stored at `~/.ghostshell/auth.json` and is created automatically on daemon startup.
+`aiterminal setup` rotates this token on each run.
+
+Authenticated curl example:
+
+```bash
+TOKEN="$(python3 -c 'import json, pathlib; p=pathlib.Path.home()/".ghostshell"/"auth.json"; print(json.loads(p.read_text()).get("auth_token",""))')"
+curl -H "Authorization: Bearer $TOKEN" http://127.0.0.1:22000/status
+```
+
 ### Project Structure
 
 Runtime entrypoints remain at the project root:
@@ -458,9 +472,16 @@ kill -9 <PID>
 
 ### No suggestions appearing
 
-1. Check server is running: `curl http://127.0.0.1:22000`
+1. Check server is running with auth:
+   `TOKEN="$(python3 -c 'import json, pathlib; p=pathlib.Path.home()/".ghostshell"/"auth.json"; print(json.loads(p.read_text()).get("auth_token",""))')"; curl -H "Authorization: Bearer $TOKEN" http://127.0.0.1:22000/status`
 2. Check logs: Server prints to stdout
 3. Verify config: `cat ~/.ghostshell/config.json`
+
+### 401 unauthorized from localhost API
+
+1. Run `aiterminal setup` to rotate/regenerate `~/.ghostshell/auth.json`
+2. Reload shell config (for `ghostshell.zsh`): `source ~/.zshrc`
+3. Retry the command
 
 ### Vector DB initialization slow
 

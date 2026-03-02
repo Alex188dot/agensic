@@ -1,13 +1,16 @@
 import argparse
 import json
+import os
 import socket
 import sys
 import urllib.error
 import urllib.request
 from typing import Any
 
+from ghostshell.config.auth import AuthTokenCache, build_auth_headers
 
 PREDICT_URL = "http://127.0.0.1:22000/predict"
+_AUTH_CACHE = AuthTokenCache()
 
 
 def _emit(payload: dict[str, Any]) -> None:
@@ -136,8 +139,17 @@ def _normalize_predict_response(result: Any) -> dict[str, Any] | None:
 def main() -> None:
     parser = argparse.ArgumentParser(add_help=False)
     parser.add_argument("--timeout", type=float, default=3.0)
+    parser.add_argument("--auth-token", type=str, default="")
     args = parser.parse_args()
     timeout = max(0.2, float(args.timeout or 3.0))
+    auth_token = str(args.auth_token or "").strip()
+    if not auth_token:
+        auth_token = str(os.environ.get("GHOSTSHELL_AUTH_TOKEN", "") or "").strip()
+    if not auth_token:
+        try:
+            auth_token = _AUTH_CACHE.get_token()
+        except Exception:
+            auth_token = ""
 
     try:
         raw = sys.stdin.read()
@@ -160,16 +172,21 @@ def main() -> None:
         return
 
     try:
+        headers = {"Content-Type": "application/json"}
+        headers.update(build_auth_headers(auth_token))
         req = urllib.request.Request(
             PREDICT_URL,
             data=json.dumps(payload).encode("utf-8"),
-            headers={"Content-Type": "application/json"},
+            headers=headers,
             method="POST",
         )
         with urllib.request.urlopen(req, timeout=timeout) as response:
             body = response.read().decode("utf-8", errors="replace")
-    except urllib.error.HTTPError:
-        _error("predict_http_error")
+    except urllib.error.HTTPError as exc:
+        if int(getattr(exc, "code", 0) or 0) == 401:
+            _error("auth_failed")
+        else:
+            _error("predict_http_error")
         return
     except urllib.error.URLError as exc:
         reason = getattr(exc, "reason", exc)

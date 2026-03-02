@@ -41,15 +41,32 @@ class _FakeVectorDB:
 
 
 class ServerContractTests(unittest.TestCase):
+    AUTH_TOKEN = "test-auth-token"
+
     @classmethod
     def setUpClass(cls):
         if TestClient is None:
             raise unittest.SkipTest(f"Server dependencies unavailable: {SERVER_IMPORT_ERROR}")
-        cls.client = TestClient(app)
+        with patch.object(deps, "ensure_local_auth_token", return_value=cls.AUTH_TOKEN):
+            cls.client = TestClient(app)
 
     def setUp(self):
         deps.reset_shutdown_state()
         deps.set_uvicorn_server(None)
+        self._auth_patcher = patch.object(deps, "get_local_auth_token", return_value=self.AUTH_TOKEN)
+        self._auth_patcher.start()
+        self.client.headers.update({"Authorization": f"Bearer {self.AUTH_TOKEN}"})
+
+    def tearDown(self):
+        self._auth_patcher.stop()
+
+    def _request_without_auth(self, method: str, path: str, **kwargs):
+        original = self.client.headers.pop("Authorization", None)
+        try:
+            return self.client.request(method, path, **kwargs)
+        finally:
+            if original is not None:
+                self.client.headers["Authorization"] = original
 
     def test_status_contract(self):
         with patch.object(deps.engine, "get_bootstrap_status", return_value={"ready": True, "phase": "ready"}):
@@ -59,6 +76,24 @@ class ServerContractTests(unittest.TestCase):
             self.assertEqual(body["status"], "ok")
             self.assertIn("bootstrap", body)
             self.assertIn("shutdown", body)
+
+    def test_local_auth_required_for_status(self):
+        response = self._request_without_auth("GET", "/status")
+        self.assertEqual(response.status_code, 401)
+        self.assertEqual(response.json().get("detail"), "unauthorized")
+
+    def test_local_auth_accepts_custom_header(self):
+        response = self._request_without_auth(
+            "GET",
+            "/status",
+            headers={"X-GhostShell-Auth": self.AUTH_TOKEN},
+        )
+        self.assertEqual(response.status_code, 200)
+
+    def test_local_auth_required_for_command_store_list(self):
+        response = self._request_without_auth("GET", "/command_store/list")
+        self.assertEqual(response.status_code, 401)
+        self.assertEqual(response.json().get("detail"), "unauthorized")
 
     def test_predict_contract(self):
         async def _fake_get_suggestions(config, req_context, allow_ai=True):

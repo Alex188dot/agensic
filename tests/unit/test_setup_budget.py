@@ -1,5 +1,6 @@
 import unittest
 import importlib
+from unittest.mock import patch
 
 cli_app = importlib.import_module("ghostshell.cli.app")
 
@@ -33,6 +34,15 @@ class SetupBudgetTests(unittest.TestCase):
         self.assertTrue(cli_app._is_llm_budget_unlimited({"llm_budget_unlimited": True}))
         updated = cli_app._with_llm_budget_unlimited({}, True)
         self.assertTrue(updated["llm_budget_unlimited"])
+
+    def test_setup_rotates_local_auth_token(self):
+        with patch.object(cli_app, "rotate_auth_token") as rotate_mock, patch.object(
+            cli_app, "_setup_select", return_value=cli_app.BACK_SIGNAL
+        ), patch.object(cli_app.console, "print"), patch.object(
+            cli_app._DAEMON_AUTH_CACHE, "get_token", return_value="test-auth-token"
+        ):
+            cli_app.setup()
+        rotate_mock.assert_called_once()
 
 
 if __name__ == "__main__":

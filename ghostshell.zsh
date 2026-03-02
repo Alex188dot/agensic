@@ -88,9 +88,12 @@ fi
 typeset -g GHOSTSHELL_SOURCE_DIR="${GHOSTSHELL_SOURCE_PATH:A:h}"
 typeset -g GHOSTSHELL_HOME="${HOME}/.ghostshell"
 typeset -g GHOSTSHELL_CONFIG_PATH="${HOME}/.ghostshell/config.json"
+typeset -g GHOSTSHELL_AUTH_PATH="${HOME}/.ghostshell/auth.json"
 typeset -g GHOSTSHELL_CLIENT_HELPER="${GHOSTSHELL_SOURCE_DIR}/shell_client.py"
 typeset -g GHOSTSHELL_PLUGIN_LOG="${GHOSTSHELL_HOME}/plugin.log"
 typeset -g GHOSTSHELL_CONFIG_MTIME=""
+typeset -g GHOSTSHELL_AUTH_MTIME=""
+typeset -g GHOSTSHELL_AUTH_TOKEN=""
 typeset -g GHOSTSHELL_FETCH_ATTEMPT_COUNT=0
 typeset -g GHOSTSHELL_FETCH_SUCCESS_COUNT=0
 typeset -g GHOSTSHELL_LAST_FETCH_ERROR_CODE=""
@@ -193,6 +196,47 @@ _ghostshell_get_config_mtime() {
     local mtime
     mtime="$(stat -f '%m' "$GHOSTSHELL_CONFIG_PATH" 2>/dev/null)"
     print -r -- "$mtime"
+}
+
+_ghostshell_get_auth_mtime() {
+    if [[ ! -f "$GHOSTSHELL_AUTH_PATH" ]]; then
+        print -r -- ""
+        return
+    fi
+    local mtime
+    mtime="$(stat -f '%m' "$GHOSTSHELL_AUTH_PATH" 2>/dev/null)"
+    print -r -- "$mtime"
+}
+
+_ghostshell_reload_auth_token_if_needed() {
+    local current_mtime
+    current_mtime="$(_ghostshell_get_auth_mtime)"
+    if [[ "$current_mtime" == "$GHOSTSHELL_AUTH_MTIME" ]]; then
+        return
+    fi
+    GHOSTSHELL_AUTH_MTIME="$current_mtime"
+    GHOSTSHELL_AUTH_TOKEN=""
+    if [[ -z "$current_mtime" ]]; then
+        return
+    fi
+
+    local escaped_path="${GHOSTSHELL_AUTH_PATH//\'/\'\\\'\'}"
+    local token
+    token="$(
+        python3 -c "
+import json
+path = '''$escaped_path'''
+try:
+    with open(path, 'r', encoding='utf-8') as fh:
+        payload = json.load(fh)
+except Exception:
+    payload = {}
+if not isinstance(payload, dict):
+    payload = {}
+print(str(payload.get('auth_token', '') or '').strip())
+" 2>/dev/null
+    )"
+    GHOSTSHELL_AUTH_TOKEN="$token"
 }
 
 _ghostshell_reload_disabled_patterns_if_needed() {
@@ -460,8 +504,14 @@ print(json.dumps(payload, separators=(',', ':')))
         return
     fi
 
+    _ghostshell_reload_auth_token_if_needed
     local response_json
-    response_json="$(printf '%s' "$request_json" | python3 "$GHOSTSHELL_CLIENT_HELPER" --timeout 3.0 2>/dev/null)"
+    local -a helper_cmd
+    helper_cmd=(python3 "$GHOSTSHELL_CLIENT_HELPER" --timeout 3.0)
+    if [[ -n "$GHOSTSHELL_AUTH_TOKEN" ]]; then
+        helper_cmd+=(--auth-token "$GHOSTSHELL_AUTH_TOKEN")
+    fi
+    response_json="$(printf '%s' "$request_json" | "${helper_cmd[@]}" 2>/dev/null)"
 
     local parsed
     parsed="$(
@@ -747,9 +797,13 @@ _ghostshell_resolve_intent_command() {
     local escaped_term="${TERM//\'/\'\\\'\'}"
     local platform_name="$(uname -s 2>/dev/null || echo unknown)"
     local escaped_platform="${platform_name//\'/\'\\\'\'}"
+    _ghostshell_reload_auth_token_if_needed
     local response
-    response=$(python3 -c "
+    response=$(
+        GHOSTSHELL_AUTH_TOKEN="$GHOSTSHELL_AUTH_TOKEN" \
+        python3 -c "
 import urllib.request, json, shlex
+import os
 
 def safe_line(v):
     return str(v or '').replace('\\r', ' ').replace('\\n', ' ').strip()
@@ -762,7 +816,12 @@ payload = {
     'platform': '''$escaped_platform''',
 }
 try:
-    req = urllib.request.Request('http://127.0.0.1:22000/intent', data=json.dumps(payload).encode('utf-8'), headers={'Content-Type': 'application/json'})
+    token = str(os.environ.get('GHOSTSHELL_AUTH_TOKEN', '') or '').strip()
+    headers = {'Content-Type': 'application/json'}
+    if token:
+        headers['Authorization'] = 'Bearer ' + token
+        headers['X-GhostShell-Auth'] = token
+    req = urllib.request.Request('http://127.0.0.1:22000/intent', data=json.dumps(payload).encode('utf-8'), headers=headers)
     with urllib.request.urlopen(req, timeout=3.0) as r:
         result = json.load(r)
     status = safe_line(result.get('status', 'error'))
@@ -794,7 +853,8 @@ print('copy_block=' + shlex.quote(copy_block))
 print('ai_agent=' + shlex.quote(ai_agent))
 print('ai_provider=' + shlex.quote(ai_provider))
 print('ai_model=' + shlex.quote(ai_model))
-" 2>/dev/null)
+" 2>/dev/null
+    )
 
     local nl_status=""
     local nl_primary=""
@@ -865,9 +925,13 @@ _ghostshell_resolve_general_assist() {
     local escaped_term="${TERM//\'/\'\\\'\'}"
     local platform_name="$(uname -s 2>/dev/null || echo unknown)"
     local escaped_platform="${platform_name//\'/\'\\\'\'}"
+    _ghostshell_reload_auth_token_if_needed
     local answer
-    answer=$(python3 -c "
+    answer=$(
+        GHOSTSHELL_AUTH_TOKEN="$GHOSTSHELL_AUTH_TOKEN" \
+        python3 -c "
 import urllib.request, json
+import os
 payload = {
     'prompt_text': '''$escaped_body''',
     'working_directory': '''$escaped_pwd''',
@@ -876,14 +940,20 @@ payload = {
     'platform': '''$escaped_platform''',
 }
 try:
-    req = urllib.request.Request('http://127.0.0.1:22000/assist', data=json.dumps(payload).encode('utf-8'), headers={'Content-Type': 'application/json'})
+    token = str(os.environ.get('GHOSTSHELL_AUTH_TOKEN', '') or '').strip()
+    headers = {'Content-Type': 'application/json'}
+    if token:
+        headers['Authorization'] = 'Bearer ' + token
+        headers['X-GhostShell-Auth'] = token
+    req = urllib.request.Request('http://127.0.0.1:22000/assist', data=json.dumps(payload).encode('utf-8'), headers=headers)
     with urllib.request.urlopen(req, timeout=4.0) as r:
         result = json.load(r)
     answer = str(result.get('answer', '') or '').replace('\\r', ' ').strip()
 except Exception:
     answer = 'Could not fetch assistant reply right now.'
 print(answer)
-" 2>/dev/null)
+" 2>/dev/null
+    )
 
     if [[ -z "$answer" ]]; then
         answer="No response."
@@ -1493,13 +1563,20 @@ _ghostshell_send_feedback() {
     if _ghostshell_matches_disabled_pattern "$buffer" || _ghostshell_matches_disabled_pattern "$accepted"; then
         return
     fi
+    _ghostshell_reload_auth_token_if_needed
     # Fire and forget feedback to server for zvec feedback stats
     (
         local escaped_buf="${buffer//\'/\'\\\'\'}"
         local escaped_acc="${accepted//\'/\'\\\'\'}"
         local escaped_pwd="${PWD//\'/\'\\\'\'}"
         local json_data="{\"command_buffer\": \"$escaped_buf\", \"accepted_suggestion\": \"$escaped_acc\", \"accept_mode\": \"${accept_mode}\", \"working_directory\": \"$escaped_pwd\"}"
+        local -a auth_headers
+        auth_headers=()
+        if [[ -n "$GHOSTSHELL_AUTH_TOKEN" ]]; then
+            auth_headers=(-H "Authorization: Bearer $GHOSTSHELL_AUTH_TOKEN" -H "X-GhostShell-Auth: $GHOSTSHELL_AUTH_TOKEN")
+        fi
         curl -s -X POST "http://127.0.0.1:22000/feedback" \
+             "${auth_headers[@]}" \
              -H "Content-Type: application/json" \
              -d "$json_data" > /dev/null 2>&1
     ) &!
@@ -1611,8 +1688,15 @@ PY
     if [[ -z "$json_data" ]]; then
         return
     fi
+    _ghostshell_reload_auth_token_if_needed
     (
+        local -a auth_headers
+        auth_headers=()
+        if [[ -n "$GHOSTSHELL_AUTH_TOKEN" ]]; then
+            auth_headers=(-H "Authorization: Bearer $GHOSTSHELL_AUTH_TOKEN" -H "X-GhostShell-Auth: $GHOSTSHELL_AUTH_TOKEN")
+        fi
         curl -s -X POST "http://127.0.0.1:22000/log_command" \
+             "${auth_headers[@]}" \
              -H "Content-Type: application/json" \
              -d "$json_data" > /dev/null 2>&1
     ) &!
@@ -2264,6 +2348,7 @@ _ghostshell_capture_native_escape_binding emacs
 _ghostshell_capture_native_escape_binding viins
 _ghostshell_capture_native_escape_binding vicmd
 _ghostshell_reload_disabled_patterns_if_needed
+_ghostshell_reload_auth_token_if_needed
 _ghostshell_ensure_ai_session_timer
 
 # --- Core Controls ---

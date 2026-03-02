@@ -30,6 +30,8 @@ class ShutdownLifespanTests(unittest.TestCase):
         ]
 
         with patch.object(deps, "get_history_file", return_value=""), patch.object(
+            deps, "ensure_local_auth_token", return_value="test-auth-token"
+        ), patch.object(
             deps, "wait_for_active_jobs_to_drain", return_value=False
         ), patch.object(deps, "shutdown_snapshot", side_effect=snapshots), patch.object(
             deps.logger, "warning"

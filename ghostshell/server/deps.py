@@ -3,10 +3,11 @@ import logging
 import os
 import threading
 import time
+import hmac
 from collections import defaultdict, deque
 from typing import Any, Callable
 
-from fastapi import HTTPException
+from fastapi import HTTPException, Request
 
 os.environ["TOKENIZERS_PARALLELISM"] = "false"
 os.environ.setdefault("OMP_NUM_THREADS", "1")
@@ -17,6 +18,7 @@ os.environ.setdefault("NUMEXPR_NUM_THREADS", "1")
 
 from ghostshell.engine import RequestContext, SuggestionEngine
 from ghostshell.config.loader import normalize_config_payload
+from ghostshell.config.auth import AuthTokenCache, HEADER_AUTHORIZATION, HEADER_CUSTOM_AUTH
 from ghostshell.privacy import PrivacyGuard
 from ghostshell.utils.history import rewrite_history_without_commands
 from ghostshell.utils.shell import command_matches_pattern, sanitize_patterns
@@ -39,6 +41,7 @@ _RATE_LIMIT_WINDOW_SECONDS = 60.0
 _RATE_LIMIT_STATE: dict[str, deque[float]] = defaultdict(deque)
 _ENV_SETTINGS_LOG_LOCK = threading.Lock()
 _ENV_SETTINGS_LOGGED = False
+_AUTH_CACHE = AuthTokenCache()
 
 
 class ShutdownCoordinator:
@@ -243,3 +246,39 @@ def normalize_unique_commands(commands: list[str], vector_db) -> list[str]:
         seen.add(normalized)
         out.append(normalized)
     return out
+
+
+def ensure_local_auth_token() -> str:
+    return _AUTH_CACHE.get_token(force_reload=True)
+
+
+def get_local_auth_token() -> str:
+    return _AUTH_CACHE.get_token()
+
+
+def _extract_bearer_token(value: str) -> str:
+    raw = str(value or "").strip()
+    if not raw:
+        return ""
+    if raw.lower().startswith("bearer "):
+        return raw[7:].strip()
+    return ""
+
+
+def request_has_valid_auth(request: Request) -> bool:
+    expected = get_local_auth_token()
+    if not expected:
+        return False
+
+    custom_token = str(request.headers.get(HEADER_CUSTOM_AUTH, "") or "").strip()
+    if custom_token and hmac.compare_digest(custom_token, expected):
+        return True
+
+    bearer = _extract_bearer_token(request.headers.get(HEADER_AUTHORIZATION, ""))
+    if bearer and hmac.compare_digest(bearer, expected):
+        return True
+    return False
+
+
+def unauthorized_exception() -> HTTPException:
+    return HTTPException(status_code=401, detail="unauthorized")

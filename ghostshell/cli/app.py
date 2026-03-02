@@ -34,6 +34,11 @@ from ghostshell.config.loader import (
     normalize_config_payload,
     save_config_file,
 )
+from ghostshell.config.auth import (
+    AuthTokenCache,
+    build_auth_headers,
+    rotate_auth_token,
+)
 from ghostshell.engine.provenance import build_local_proof_metadata, sign_proof_payload
 
 app = typer.Typer(add_completion=False)
@@ -62,6 +67,8 @@ EVENTS_DIR = os.path.join(CONFIG_DIR, "events")
 SNAPSHOTS_DIR = os.path.join(CONFIG_DIR, "snapshots")
 DEFAULT_SIGNING_AGENT = "unknown"
 DEFAULT_SIGNING_MODEL = "unknown-model"
+DAEMON_BASE_URL = "http://127.0.0.1:22000"
+_DAEMON_AUTH_CACHE = AuthTokenCache()
 
 class _BackSignal:
     pass
@@ -150,6 +157,30 @@ def _load_config() -> dict:
 
 def _save_config(config: dict):
     save_config_file(config, CONFIG_FILE)
+
+
+def _daemon_auth_headers() -> dict[str, str]:
+    try:
+        token = _DAEMON_AUTH_CACHE.get_token()
+    except Exception:
+        return {}
+    return build_auth_headers(token)
+
+
+def _daemon_request(method: str, path: str, timeout: float, **kwargs):
+    if path.startswith("http://") or path.startswith("https://"):
+        url = path
+    else:
+        url = f"{DAEMON_BASE_URL}{path}"
+    supplied_headers = kwargs.pop("headers", None)
+    merged_headers = _daemon_auth_headers()
+    if isinstance(supplied_headers, dict):
+        merged_headers.update({str(k): str(v) for k, v in supplied_headers.items()})
+    return requests.request(method.upper(), url, headers=merged_headers, timeout=timeout, **kwargs)
+
+
+def _print_daemon_auth_hint() -> None:
+    console.print("[yellow]Daemon auth failed.[/yellow] Run `aiterminal setup`, reload your shell, and retry.")
 
 
 def _repair_cli_enabled() -> bool:
@@ -261,7 +292,7 @@ def _release_fix_lock(fd: int | None) -> None:
 
 def _repair_export_snapshot() -> tuple[dict | None, str]:
     try:
-        response = requests.post("http://127.0.0.1:22000/repair/export", timeout=20)
+        response = _daemon_request("POST", "/repair/export", timeout=20)
     except Exception as exc:
         return (None, str(exc))
     if response.status_code != 200:
@@ -283,8 +314,9 @@ def _repair_export_snapshot() -> tuple[dict | None, str]:
 
 def _repair_import_snapshot(snapshot: dict) -> tuple[dict | None, str]:
     try:
-        response = requests.post(
-            "http://127.0.0.1:22000/repair/import",
+        response = _daemon_request(
+            "POST",
+            "/repair/import",
             json={"snapshot": snapshot},
             timeout=35,
         )
@@ -816,14 +848,18 @@ def _configure_llm_budget(existing_config: dict):
         return
 
 def _command_store_request(method: str, path: str, payload: dict | None = None) -> dict | None:
-    url = f"http://127.0.0.1:22000{path}"
     try:
-        response = requests.request(method.upper(), url, json=payload, timeout=20)
+        response = _daemon_request(method.upper(), path, json=payload, timeout=20)
     except Exception as exc:
         console.print(f"[red]Failed to reach daemon:[/red] {exc}")
         return None
 
     if response.status_code != 200:
+        if response.status_code == 401:
+            console.print(
+                "[red]Daemon authentication failed.[/red] Run `aiterminal setup`, reload your shell, and retry."
+            )
+            return None
         body = response.text.strip()
         if body:
             console.print(f"[red]Command store request failed ({response.status_code}):[/red] {body}")
@@ -1282,7 +1318,7 @@ def _wait_for_port_close(timeout_seconds: float = 10.0, interval_seconds: float 
 
 def _fetch_daemon_status() -> dict | None:
     try:
-        response = requests.get("http://127.0.0.1:22000/status", timeout=0.8)
+        response = _daemon_request("GET", "/status", timeout=0.8)
         if response.status_code != 200:
             return None
         return response.json()
@@ -1344,6 +1380,12 @@ def _wait_for_bootstrap_ready(started_pid: int | None = None) -> tuple[bool, int
 @app.command()
 def setup():
     ensure_config_dir()
+    try:
+        rotate_auth_token()
+        _DAEMON_AUTH_CACHE.get_token(force_reload=True)
+    except Exception as exc:
+        console.print(f"[red]Failed to rotate local auth token:[/red] {exc}")
+        raise typer.Exit(code=1)
     console.print(
         Panel.fit("[bold cyan]GhostShell Configuration[/bold cyan] [bold #ff8c00](Esc = back)[/bold #ff8c00]")
     )
@@ -1485,7 +1527,7 @@ def stop():
     if is_port_open():
         try:
             console.print("[cyan]Requesting graceful shutdown...[/cyan]")
-            response = requests.post("http://127.0.0.1:22000/shutdown", timeout=4)
+            response = _daemon_request("POST", "/shutdown", timeout=4)
             if response.status_code == 200:
                 console.print("[green]✔ Shutdown request accepted.[/green]")
                 graceful_stopped = _wait_for_port_close(timeout_seconds=12.0, interval_seconds=0.2)
@@ -1548,8 +1590,9 @@ def test():
     """Test the AI connection manually."""
     console.print("[bold]Testing connection to GhostShell Daemon (Port 22000)...[/bold]")
     try:
-        response = requests.post(
-            "http://127.0.0.1:22000/predict",
+        response = _daemon_request(
+            "POST",
+            "/predict",
             json={
                 "command_buffer": "git comm",
                 "cursor_position": 8,
@@ -1734,8 +1777,9 @@ def provenance(
         "provider": str(provider or "").strip(),
     }
     try:
-        response = requests.get(
-            "http://127.0.0.1:22000/provenance/runs",
+        response = _daemon_request(
+            "GET",
+            "/provenance/runs",
             params=params,
             timeout=8,
         )
@@ -1744,6 +1788,8 @@ def provenance(
         raise typer.Exit(code=1)
 
     if response.status_code != 200:
+        if response.status_code == 401:
+            _print_daemon_auth_hint()
         body = response.text.strip()
         if body:
             console.print(f"[red]Provenance request failed ({response.status_code}):[/red] {body}")
@@ -1971,12 +2017,15 @@ def ai_exec(
     }
 
     try:
-        response = requests.post(
-            "http://127.0.0.1:22000/log_command",
+        response = _daemon_request(
+            "POST",
+            "/log_command",
             json=payload,
             timeout=8,
         )
         if response.status_code != 200:
+            if response.status_code == 401:
+                _print_daemon_auth_hint()
             body = response.text.strip()
             if body:
                 console.print(f"[yellow]Warning: log_command failed ({response.status_code}):[/yellow] {body}")
@@ -2015,8 +2064,9 @@ def provenance_registry_list(
 ):
     params = {"status": str(status or "").strip()}
     try:
-        response = requests.get(
-            "http://127.0.0.1:22000/provenance/registry/agents",
+        response = _daemon_request(
+            "GET",
+            "/provenance/registry/agents",
             params=params,
             timeout=8,
         )
@@ -2025,6 +2075,8 @@ def provenance_registry_list(
         raise typer.Exit(code=1)
 
     if response.status_code != 200:
+        if response.status_code == 401:
+            _print_daemon_auth_hint()
         console.print(f"[red]Registry list failed ({response.status_code}).[/red]")
         raise typer.Exit(code=1)
 
@@ -2061,8 +2113,9 @@ def provenance_registry_show_agent(
     as_json: bool = typer.Option(False, "--json", help="Print raw JSON payload"),
 ):
     try:
-        response = requests.get(
-            f"http://127.0.0.1:22000/provenance/registry/agents/{agent_id}",
+        response = _daemon_request(
+            "GET",
+            f"/provenance/registry/agents/{agent_id}",
             timeout=8,
         )
     except Exception as exc:
@@ -2073,6 +2126,8 @@ def provenance_registry_show_agent(
         console.print(f"[yellow]Agent not found: {agent_id}[/yellow]")
         raise typer.Exit(code=1)
     if response.status_code != 200:
+        if response.status_code == 401:
+            _print_daemon_auth_hint()
         console.print(f"[red]Show-agent failed ({response.status_code}).[/red]")
         raise typer.Exit(code=1)
 
@@ -2090,8 +2145,9 @@ def provenance_registry_refresh(
     as_json: bool = typer.Option(False, "--json", help="Print raw JSON payload"),
 ):
     try:
-        response = requests.post(
-            "http://127.0.0.1:22000/provenance/registry/refresh",
+        response = _daemon_request(
+            "POST",
+            "/provenance/registry/refresh",
             params={"force": "true" if force else "false"},
             timeout=10,
         )
@@ -2100,6 +2156,8 @@ def provenance_registry_refresh(
         raise typer.Exit(code=1)
 
     if response.status_code != 200:
+        if response.status_code == 401:
+            _print_daemon_auth_hint()
         console.print(f"[red]Registry refresh failed ({response.status_code}).[/red]")
         raise typer.Exit(code=1)
 
@@ -2120,8 +2178,9 @@ def provenance_registry_verify(
     as_json: bool = typer.Option(False, "--json", help="Print raw JSON payload"),
 ):
     try:
-        response = requests.get(
-            "http://127.0.0.1:22000/provenance/registry/verify",
+        response = _daemon_request(
+            "GET",
+            "/provenance/registry/verify",
             timeout=8,
         )
     except Exception as exc:
@@ -2129,6 +2188,8 @@ def provenance_registry_verify(
         raise typer.Exit(code=1)
 
     if response.status_code != 200:
+        if response.status_code == 401:
+            _print_daemon_auth_hint()
         console.print(f"[red]Registry verify failed ({response.status_code}).[/red]")
         raise typer.Exit(code=1)
 

@@ -3,7 +3,8 @@ import os
 import signal
 
 import uvicorn
-from fastapi import FastAPI
+from fastapi import FastAPI, Request
+from fastapi.responses import JSONResponse
 
 from ghostshell.server import deps
 from ghostshell.server.routes_admin import router as admin_router
@@ -18,6 +19,7 @@ from ghostshell.server.routes_provenance import router as provenance_router
 async def lifespan(app: FastAPI):
     deps.logger.info("Starting GhostShell server...")
     deps.reset_shutdown_state()
+    deps.ensure_local_auth_token()
     deps.log_parallelism_settings_once()
     startup_history = deps.get_history_file(os.environ.get("SHELL", "zsh"))
     if startup_history:
@@ -49,6 +51,15 @@ async def lifespan(app: FastAPI):
 
 
 app = FastAPI(lifespan=lifespan)
+
+
+@app.middleware("http")
+async def enforce_local_auth(request: Request, call_next):
+    if not deps.request_has_valid_auth(request):
+        return JSONResponse(status_code=401, content={"detail": "unauthorized"})
+    return await call_next(request)
+
+
 app.include_router(predict_router)
 app.include_router(intent_router)
 app.include_router(assist_router)

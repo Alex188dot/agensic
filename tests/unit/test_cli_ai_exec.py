@@ -23,7 +23,10 @@ class CliAiExecTests(unittest.TestCase):
                 "proof_key_fingerprint": "deadbeefdeadbeef",
                 "proof_host_fingerprint": "cafebabecafebabe",
             },
-        ), patch("ghostshell.cli.app.requests.post", return_value=_MockResponse()) as mock_post:
+        ), patch(
+            "ghostshell.cli.app._daemon_auth_headers",
+            return_value={},
+        ), patch("ghostshell.cli.app.requests.request", return_value=_MockResponse()) as mock_request:
             result = self.runner.invoke(
                 app,
                 [
@@ -42,7 +45,7 @@ class CliAiExecTests(unittest.TestCase):
         self.assertEqual(sign_args[1], "unknown")
         self.assertEqual(sign_args[2], "unknown-model")
 
-        payload = mock_post.call_args.kwargs["json"]
+        payload = mock_request.call_args.kwargs["json"]
         self.assertEqual(payload["provenance_ai_agent"], "unknown")
         self.assertEqual(payload["provenance_ai_model"], "unknown-model")
         self.assertEqual(payload["proof_signer_scope"], "local-hmac")
@@ -57,7 +60,10 @@ class CliAiExecTests(unittest.TestCase):
                 "proof_key_fingerprint": "",
                 "proof_host_fingerprint": "",
             },
-        ), patch("ghostshell.cli.app.requests.post", return_value=_MockResponse()) as mock_post:
+        ), patch(
+            "ghostshell.cli.app._daemon_auth_headers",
+            return_value={},
+        ), patch("ghostshell.cli.app.requests.request", return_value=_MockResponse()) as mock_request:
             result = self.runner.invoke(
                 app,
                 [
@@ -75,7 +81,7 @@ class CliAiExecTests(unittest.TestCase):
 
         self.assertEqual(result.exit_code, 7)
         self.assertNotIn("Warning: ai-exec missing identity", result.stdout)
-        payload = mock_post.call_args.kwargs["json"]
+        payload = mock_request.call_args.kwargs["json"]
         self.assertEqual(payload["provenance_ai_agent"], "codex")
         self.assertEqual(payload["proof_agent"], "codex")
         self.assertEqual(payload["provenance_ai_model"], "gpt-5.3")
