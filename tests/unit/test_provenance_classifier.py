@@ -50,6 +50,24 @@ class ProvenanceClassifierTests(unittest.TestCase):
             out = classify_command_run("git status", payload)
         self.assertEqual(out["label"], "HUMAN_TYPED")
 
+    def test_human_edit_classifies_as_human_typed(self):
+        payload = {"provenance_last_action": "human_edit"}
+        with patch(
+            "ghostshell.engine.provenance.inspect_process_lineage",
+            return_value={"lineage": [], "hints": []},
+        ):
+            out = classify_command_run("git status", payload)
+        self.assertEqual(out["label"], "HUMAN_TYPED")
+
+    def test_human_paste_classifies_as_human_typed(self):
+        payload = {"provenance_last_action": "human_paste"}
+        with patch(
+            "ghostshell.engine.provenance.inspect_process_lineage",
+            return_value={"lineage": [], "hints": []},
+        ):
+            out = classify_command_run("git status", payload)
+        self.assertEqual(out["label"], "HUMAN_TYPED")
+
     def test_proof_signature_present_overrides_human_typed(self):
         payload = {
             "provenance_last_action": "human_typed",

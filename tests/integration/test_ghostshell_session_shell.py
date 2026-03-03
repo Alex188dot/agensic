@@ -101,6 +101,67 @@ class GhostshellSessionShellTests(unittest.TestCase):
         self.assertGreaterEqual(len(traces), 2)
         self.assertNotEqual(traces[-2], traces[-1])
 
+    def test_preexec_preserves_human_edit_pending_state(self):
+        result = self._run_zsh(
+            """
+            GHOSTSHELL_LINE_LAST_ACTION="human_edit"
+            _ghostshell_snapshot_pending_execution
+            _ghostshell_reset_provenance_line_state
+            _ghostshell_preexec_hook "echo hi"
+            print -r -- "${GHOSTSHELL_PENDING_LAST_ACTION:-}|${GHOSTSHELL_PENDING_ACCEPTED_ORIGIN:-}"
+            """
+        )
+        self.assertEqual(result.returncode, 0, msg=result.stderr)
+        lines = [line.strip() for line in result.stdout.splitlines() if line.strip()]
+        self.assertIn("human_edit|", lines)
+
+    def test_preexec_preserves_human_paste_pending_state(self):
+        result = self._run_zsh(
+            """
+            GHOSTSHELL_LINE_LAST_ACTION="human_paste"
+            _ghostshell_snapshot_pending_execution
+            _ghostshell_reset_provenance_line_state
+            _ghostshell_preexec_hook "echo hi"
+            print -r -- "${GHOSTSHELL_PENDING_LAST_ACTION:-}|${GHOSTSHELL_PENDING_ACCEPTED_ORIGIN:-}"
+            """
+        )
+        self.assertEqual(result.returncode, 0, msg=result.stderr)
+        lines = [line.strip() for line in result.stdout.splitlines() if line.strip()]
+        self.assertIn("human_paste|", lines)
+
+    def test_preexec_preserves_gs_accept_pending_state(self):
+        result = self._run_zsh(
+            """
+            _ghostshell_set_suggestion_accept_state "gs" "suffix_append" "normal" "" "" ""
+            _ghostshell_snapshot_pending_execution
+            _ghostshell_reset_provenance_line_state
+            _ghostshell_preexec_hook "echo hi"
+            print -r -- "${GHOSTSHELL_PENDING_LAST_ACTION:-}|${GHOSTSHELL_PENDING_ACCEPTED_ORIGIN:-}"
+            """
+        )
+        self.assertEqual(result.returncode, 0, msg=result.stderr)
+        lines = [line.strip() for line in result.stdout.splitlines() if line.strip()]
+        self.assertIn("suggestion_accept|gs", lines)
+
+    def test_preexec_refreshes_proof_without_clobbering_pending_action(self):
+        result = self._run_zsh(
+            """
+            GHOSTSHELL_PENDING_LAST_ACTION="human_edit"
+            GHOSTSHELL_PENDING_ACCEPTED_ORIGIN=""
+            GHOSTSHELL_NEXT_PROOF_LABEL="AI_EXECUTED"
+            GHOSTSHELL_NEXT_PROOF_AGENT="codex"
+            GHOSTSHELL_NEXT_PROOF_MODEL="gpt-5.3"
+            GHOSTSHELL_NEXT_PROOF_TRACE="trace-preexec-proof"
+            GHOSTSHELL_NEXT_PROOF_TIMESTAMP="123"
+            GHOSTSHELL_NEXT_PROOF_SIGNATURE="sig"
+            _ghostshell_preexec_hook "echo hi"
+            print -r -- "${GHOSTSHELL_PENDING_LAST_ACTION:-}|${GHOSTSHELL_PENDING_PROOF_LABEL:-}|${GHOSTSHELL_PENDING_PROOF_TRACE:-}|${GHOSTSHELL_NEXT_PROOF_TRACE:-}"
+            """
+        )
+        self.assertEqual(result.returncode, 0, msg=result.stderr)
+        lines = [line.strip() for line in result.stdout.splitlines() if line.strip()]
+        self.assertIn("human_edit|AI_EXECUTED|trace-preexec-proof|", lines)
+
     def test_decode_common_escapes_turns_backslash_n_into_newlines(self):
         result = self._run_zsh(
             """
