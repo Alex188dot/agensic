@@ -56,6 +56,7 @@ class StateBackendTests(unittest.TestCase):
                 registry_version="builtin-2026-02-28",
                 registry_status="verified",
                 source="runtime",
+                duration_ms=321,
                 shell_pid=123,
                 evidence=["last_action=human_typed"],
                 payload={"provenance_last_action": "human_typed"},
@@ -67,6 +68,7 @@ class StateBackendTests(unittest.TestCase):
             self.assertEqual(len(runs), 1)
             self.assertEqual(runs[0]["run_id"], "run-1")
             self.assertEqual(runs[0]["label"], "HUMAN_TYPED")
+            self.assertEqual(runs[0]["duration_ms"], 321)
             self.assertEqual(runs[0]["agent_name"], "Planner A")
             self.assertEqual(runs[0]["raw_model"], "gpt-5.3")
             self.assertEqual(runs[0]["normalized_model"], "gpt-5-codex")
@@ -128,6 +130,29 @@ class StateBackendTests(unittest.TestCase):
             removed = restored.prune_command_runs(older_than_ts=1700000001)
             self.assertEqual(removed, 1)
             self.assertEqual(restored.list_command_runs(limit=5), [])
+
+    def test_list_command_runs_keyset_pagination(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            db_path = os.path.join(tmp, "state.sqlite")
+            store = SQLiteStateStore(db_path, journal=None)
+            for idx in range(5):
+                store.record_command_provenance(
+                    command=f"echo {idx}",
+                    label="UNKNOWN",
+                    confidence=0.1,
+                    ts=1700000000 + idx,
+                    run_id=f"run-{idx}",
+                )
+
+            first = store.list_command_runs(limit=2)
+            self.assertEqual(len(first), 2)
+            second = store.list_command_runs(
+                limit=2,
+                before_ts=int(first[-1]["ts"]),
+                before_run_id=str(first[-1]["run_id"]),
+            )
+            self.assertEqual(len(second), 2)
+            self.assertNotEqual(first[0]["run_id"], second[0]["run_id"])
 
     def test_event_idempotency_with_applied_events(self):
         with tempfile.TemporaryDirectory() as tmp:

@@ -1593,6 +1593,7 @@ class SuggestionEngine:
         self,
         command: str,
         exit_code: int | None = None,
+        duration_ms: int | None = None,
         source: str = "unknown",
         working_directory: str | None = None,
         provenance_payload: dict | None = None,
@@ -1650,6 +1651,7 @@ class SuggestionEngine:
                 source=normalized_source,
                 working_directory=str(working_directory or ""),
                 exit_code=exit_code,
+                duration_ms=(max(0, int(duration_ms)) if duration_ms is not None else None),
                 shell_pid=(
                     int(payload.get("shell_pid"))
                     if payload.get("shell_pid", None) is not None
@@ -1688,6 +1690,8 @@ class SuggestionEngine:
         label: str = "",
         command_contains: str = "",
         since_ts: int = 0,
+        before_ts: int = 0,
+        before_run_id: str = "",
         tier: str = "",
         agent: str = "",
         agent_name: str = "",
@@ -1701,6 +1705,8 @@ class SuggestionEngine:
                 label=label,
                 command_contains=command_contains,
                 since_ts=since_ts,
+                before_ts=before_ts,
+                before_run_id=before_run_id,
                 tier=tier,
                 agent=agent,
                 agent_name=agent_name,
@@ -1709,6 +1715,45 @@ class SuggestionEngine:
         except Exception as exc:
             logger.error(
                 "Failed to list command provenance rows: %s",
+                self.privacy_guard.sanitize_for_log(str(exc)),
+            )
+            return []
+
+    def semantic_command_runs(
+        self,
+        query: str,
+        limit: int = 50,
+        since_ts: int = 0,
+        label: str = "",
+        tier: str = "",
+        agent: str = "",
+        agent_name: str = "",
+        provider: str = "",
+    ) -> list[dict]:
+        clean_query = str(query or "").strip()
+        if not clean_query or self.state_store is None:
+            return []
+        try:
+            vector_db = self._ensure_vector_db()
+            ranked_commands = vector_db.search_commands_for_provenance(
+                clean_query,
+                limit=max(1, min(200, int(limit or 50))),
+            )
+            if not ranked_commands:
+                return []
+            return self.state_store.list_latest_runs_for_commands(
+                ranked_commands,
+                since_ts=since_ts,
+                label=label,
+                tier=tier,
+                agent=agent,
+                agent_name=agent_name,
+                provider=provider,
+                limit=limit,
+            )
+        except Exception as exc:
+            logger.error(
+                "Failed semantic provenance search: %s",
                 self.privacy_guard.sanitize_for_log(str(exc)),
             )
             return []

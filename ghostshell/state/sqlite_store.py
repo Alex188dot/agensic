@@ -96,6 +96,7 @@ class SQLiteStateStore:
                     source TEXT NOT NULL DEFAULT 'unknown',
                     working_directory TEXT NOT NULL DEFAULT '',
                     exit_code INTEGER,
+                    duration_ms INTEGER,
                     shell_pid INTEGER,
                     evidence_json TEXT NOT NULL DEFAULT '[]',
                     payload_json TEXT NOT NULL DEFAULT '{}',
@@ -143,6 +144,7 @@ class SQLiteStateStore:
             "agent_source": "TEXT NOT NULL DEFAULT ''",
             "registry_version": "TEXT NOT NULL DEFAULT ''",
             "registry_status": "TEXT NOT NULL DEFAULT ''",
+            "duration_ms": "INTEGER",
         }
         for name, ddl in required_columns.items():
             if name in existing:
@@ -361,6 +363,7 @@ class SQLiteStateStore:
                 source = str(event.get("source", "unknown") or "unknown").strip().lower()
                 working_directory = str(event.get("working_directory", "") or "").strip()
                 exit_code = event.get("exit_code", None)
+                duration_ms = event.get("duration_ms", None)
                 shell_pid = event.get("shell_pid", None)
                 evidence_json = self._json_dumps(event.get("evidence", []), "[]")
                 payload_json = self._json_dumps(event.get("payload", {}), "{}")
@@ -370,9 +373,9 @@ class SQLiteStateStore:
                         run_id, ts, command, label, confidence, agent, agent_name, provider, model,
                         raw_model, normalized_model, model_fingerprint, evidence_tier, agent_source,
                         registry_version, registry_status, source, working_directory, exit_code,
-                        shell_pid, evidence_json, payload_json, created_at
+                        duration_ms, shell_pid, evidence_json, payload_json, created_at
                     )
-                    VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                     ON CONFLICT(run_id) DO NOTHING
                     """,
                     (
@@ -395,6 +398,7 @@ class SQLiteStateStore:
                         source,
                         working_directory,
                         (int(exit_code) if exit_code is not None else None),
+                        (max(0, int(duration_ms)) if duration_ms is not None else None),
                         (int(shell_pid) if shell_pid is not None else None),
                         evidence_json,
                         payload_json,
@@ -586,6 +590,7 @@ class SQLiteStateStore:
         source: str = "unknown",
         working_directory: str = "",
         exit_code: Optional[int] = None,
+        duration_ms: Optional[int] = None,
         shell_pid: Optional[int] = None,
         evidence: Optional[List[str]] = None,
         payload: Optional[Dict[str, object]] = None,
@@ -617,6 +622,7 @@ class SQLiteStateStore:
             "source": str(source or "unknown").strip().lower(),
             "working_directory": str(working_directory or "").strip(),
             "exit_code": (int(exit_code) if exit_code is not None else None),
+            "duration_ms": (max(0, int(duration_ms)) if duration_ms is not None else None),
             "shell_pid": (int(shell_pid) if shell_pid is not None else None),
             "evidence": list(evidence or []),
             "payload": dict(payload or {}),
@@ -778,9 +784,50 @@ class SQLiteStateStore:
                 ).fetchall()
         return [self._clean_command(str(row["command"] or "")) for row in rows if row["command"]]
 
-    def list_command_runs(
-        self,
-        limit: int = 50,
+    @staticmethod
+    def _decode_command_run_row(row: sqlite3.Row) -> Dict[str, object]:
+        evidence_raw = str(row["evidence_json"] or "[]")
+        payload_raw = str(row["payload_json"] or "{}")
+        try:
+            evidence = json.loads(evidence_raw)
+        except Exception:
+            evidence = []
+        if not isinstance(evidence, list):
+            evidence = []
+        try:
+            payload = json.loads(payload_raw)
+        except Exception:
+            payload = {}
+        if not isinstance(payload, dict):
+            payload = {}
+        return {
+            "run_id": str(row["run_id"] or ""),
+            "ts": int(row["ts"] or 0),
+            "command": str(row["command"] or ""),
+            "label": str(row["label"] or ""),
+            "confidence": float(row["confidence"] or 0.0),
+            "agent": str(row["agent"] or ""),
+            "agent_name": str(row["agent_name"] or ""),
+            "provider": str(row["provider"] or ""),
+            "model": str(row["model"] or ""),
+            "raw_model": str(row["raw_model"] or ""),
+            "normalized_model": str(row["normalized_model"] or ""),
+            "model_fingerprint": str(row["model_fingerprint"] or ""),
+            "evidence_tier": str(row["evidence_tier"] or ""),
+            "agent_source": str(row["agent_source"] or ""),
+            "registry_version": str(row["registry_version"] or ""),
+            "registry_status": str(row["registry_status"] or ""),
+            "source": str(row["source"] or ""),
+            "working_directory": str(row["working_directory"] or ""),
+            "exit_code": (int(row["exit_code"]) if row["exit_code"] is not None else None),
+            "duration_ms": (int(row["duration_ms"]) if row["duration_ms"] is not None else None),
+            "shell_pid": (int(row["shell_pid"]) if row["shell_pid"] is not None else None),
+            "evidence": evidence,
+            "payload": payload,
+        }
+
+    @staticmethod
+    def _command_runs_filter_clause(
         label: str = "",
         command_contains: str = "",
         since_ts: int = 0,
@@ -788,26 +835,16 @@ class SQLiteStateStore:
         agent: str = "",
         agent_name: str = "",
         provider: str = "",
-    ) -> List[Dict[str, object]]:
-        row_limit = max(1, min(500, int(limit or 50)))
+    ) -> Tuple[List[str], List[object]]:
+        query = ["WHERE ts >= ?"]
+        params: List[object] = [int(since_ts or 0)]
         label_filter = str(label or "").strip()
         command_filter = str(command_contains or "").strip()
-        since = int(since_ts or 0)
         tier_filter = str(tier or "").strip().lower()
         agent_filter = str(agent or "").strip().lower()
         agent_name_filter = str(agent_name or "").strip()
         provider_filter = str(provider or "").strip().lower()
 
-        query = [
-            """
-            SELECT run_id, ts, command, label, confidence, agent, agent_name, provider, model, raw_model, normalized_model,
-                   model_fingerprint, evidence_tier, agent_source, registry_version, registry_status,
-                   source, working_directory, exit_code, shell_pid, evidence_json, payload_json
-            FROM command_runs
-            WHERE ts >= ?
-            """
-        ]
-        params: List[object] = [since]
         if label_filter:
             query.append("AND label = ?")
             params.append(label_filter)
@@ -826,58 +863,128 @@ class SQLiteStateStore:
         if provider_filter:
             query.append("AND provider = ?")
             params.append(provider_filter)
-        query.append("ORDER BY ts DESC LIMIT ?")
-        params.append(row_limit)
-        sql = "\n".join(query)
+        return (query, params)
 
-        out: List[Dict[str, object]] = []
+    def list_command_runs(
+        self,
+        limit: int = 50,
+        label: str = "",
+        command_contains: str = "",
+        since_ts: int = 0,
+        before_ts: int = 0,
+        before_run_id: str = "",
+        tier: str = "",
+        agent: str = "",
+        agent_name: str = "",
+        provider: str = "",
+    ) -> List[Dict[str, object]]:
+        row_limit = max(1, min(500, int(limit or 50)))
+        keyset_ts = int(before_ts or 0)
+        keyset_run_id = str(before_run_id or "").strip()
+
+        select_clause = """
+            SELECT run_id, ts, command, label, confidence, agent, agent_name, provider, model, raw_model, normalized_model,
+                   model_fingerprint, evidence_tier, agent_source, registry_version, registry_status,
+                   source, working_directory, exit_code, duration_ms, shell_pid, evidence_json, payload_json
+            FROM command_runs
+        """
+        where_clause, params = self._command_runs_filter_clause(
+            label=label,
+            command_contains=command_contains,
+            since_ts=since_ts,
+            tier=tier,
+            agent=agent,
+            agent_name=agent_name,
+            provider=provider,
+        )
+        if keyset_ts > 0:
+            if keyset_run_id:
+                where_clause.append("AND (ts < ? OR (ts = ? AND run_id < ?))")
+                params.extend([keyset_ts, keyset_ts, keyset_run_id])
+            else:
+                where_clause.append("AND ts < ?")
+                params.append(keyset_ts)
+        sql = "\n".join(
+            [
+                select_clause,
+                *where_clause,
+                "ORDER BY ts DESC, run_id DESC",
+                "LIMIT ?",
+            ]
+        )
+        params.append(row_limit)
+
         with self._lock, self._conn() as conn:
             rows = conn.execute(sql, tuple(params)).fetchall()
-        for row in rows:
-            evidence_raw = str(row["evidence_json"] or "[]")
-            payload_raw = str(row["payload_json"] or "{}")
-            try:
-                evidence = json.loads(evidence_raw)
-            except Exception:
-                evidence = []
-            if not isinstance(evidence, list):
-                evidence = []
-            try:
-                payload = json.loads(payload_raw)
-            except Exception:
-                payload = {}
-            if not isinstance(payload, dict):
-                payload = {}
-            out.append(
-                {
-                    "run_id": str(row["run_id"] or ""),
-                    "ts": int(row["ts"] or 0),
-                    "command": str(row["command"] or ""),
-                    "label": str(row["label"] or ""),
-                    "confidence": float(row["confidence"] or 0.0),
-                    "agent": str(row["agent"] or ""),
-                    "agent_name": str(row["agent_name"] or ""),
-                    "provider": str(row["provider"] or ""),
-                    "model": str(row["model"] or ""),
-                    "raw_model": str(row["raw_model"] or ""),
-                    "normalized_model": str(row["normalized_model"] or ""),
-                    "model_fingerprint": str(row["model_fingerprint"] or ""),
-                    "evidence_tier": str(row["evidence_tier"] or ""),
-                    "agent_source": str(row["agent_source"] or ""),
-                    "registry_version": str(row["registry_version"] or ""),
-                    "registry_status": str(row["registry_status"] or ""),
-                    "source": str(row["source"] or ""),
-                    "working_directory": str(row["working_directory"] or ""),
-                    "exit_code": (
-                        int(row["exit_code"]) if row["exit_code"] is not None else None
-                    ),
-                    "shell_pid": (
-                        int(row["shell_pid"]) if row["shell_pid"] is not None else None
-                    ),
-                    "evidence": evidence,
-                    "payload": payload,
-                }
-            )
+        return [self._decode_command_run_row(row) for row in rows]
+
+    def list_latest_runs_for_commands(
+        self,
+        ranked_commands: List[str],
+        since_ts: int = 0,
+        label: str = "",
+        tier: str = "",
+        agent: str = "",
+        agent_name: str = "",
+        provider: str = "",
+        limit: int = 50,
+    ) -> List[Dict[str, object]]:
+        ordered_unique: List[str] = []
+        seen: set[str] = set()
+        for value in ranked_commands:
+            command = self._clean_command(value)
+            if not command or command in seen:
+                continue
+            seen.add(command)
+            ordered_unique.append(command)
+
+        if not ordered_unique:
+            return []
+
+        row_limit = max(1, min(200, int(limit or 50)))
+        rows_by_command: Dict[str, Dict[str, object]] = {}
+        select_clause = """
+            SELECT run_id, ts, command, label, confidence, agent, agent_name, provider, model, raw_model, normalized_model,
+                   model_fingerprint, evidence_tier, agent_source, registry_version, registry_status,
+                   source, working_directory, exit_code, duration_ms, shell_pid, evidence_json, payload_json
+            FROM command_runs
+        """
+        with self._lock, self._conn() as conn:
+            for command in ordered_unique:
+                where_clause, params = self._command_runs_filter_clause(
+                    label=label,
+                    command_contains="",
+                    since_ts=since_ts,
+                    tier=tier,
+                    agent=agent,
+                    agent_name=agent_name,
+                    provider=provider,
+                )
+                where_clause.append("AND command = ?")
+                params.append(command)
+                sql = "\n".join(
+                    [
+                        select_clause,
+                        *where_clause,
+                        "ORDER BY ts DESC, run_id DESC",
+                        "LIMIT 1",
+                    ]
+                )
+                row = conn.execute(sql, tuple(params)).fetchone()
+                if row is None:
+                    continue
+                rows_by_command[command] = self._decode_command_run_row(row)
+                if len(rows_by_command) >= row_limit:
+                    break
+
+        out: List[Dict[str, object]] = []
+        for command in ordered_unique:
+            row = rows_by_command.get(command)
+            if row is None:
+                continue
+            out.append(row)
+            if len(out) >= row_limit:
+                break
         return out
 
     def prune_command_runs(self, older_than_ts: int) -> int:
@@ -1147,9 +1254,9 @@ class SQLiteStateStore:
                             run_id, ts, command, label, confidence, agent, agent_name, provider, model,
                             raw_model, normalized_model, model_fingerprint, evidence_tier, agent_source,
                             registry_version, registry_status, source, working_directory, exit_code,
-                            shell_pid, evidence_json, payload_json, created_at
+                            duration_ms, shell_pid, evidence_json, payload_json, created_at
                         )
-                        VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                        VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                         ON CONFLICT(run_id) DO UPDATE SET
                             ts = MAX(command_runs.ts, excluded.ts),
                             command = excluded.command,
@@ -1169,6 +1276,7 @@ class SQLiteStateStore:
                             source = excluded.source,
                             working_directory = excluded.working_directory,
                             exit_code = excluded.exit_code,
+                            duration_ms = excluded.duration_ms,
                             shell_pid = excluded.shell_pid,
                             evidence_json = excluded.evidence_json,
                             payload_json = excluded.payload_json
@@ -1195,6 +1303,11 @@ class SQLiteStateStore:
                             (
                                 int(row.get("exit_code"))
                                 if row.get("exit_code", None) is not None
+                                else None
+                            ),
+                            (
+                                max(0, int(row.get("duration_ms")))
+                                if row.get("duration_ms", None) is not None
                                 else None
                             ),
                             (

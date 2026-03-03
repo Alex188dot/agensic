@@ -18,6 +18,14 @@ cp shell_client.py "$INSTALL_DIR/"
 rm -rf "$INSTALL_DIR/ghostshell"
 cp -R ghostshell "$INSTALL_DIR/"
 
+# 2b. Install local provenance TUI sidecar if already built
+mkdir -p "$INSTALL_DIR/bin"
+LOCAL_TUI_BIN="$PWD/rust/provenance_tui/target/release/ghostshell-provenance-tui"
+if [ -x "$LOCAL_TUI_BIN" ]; then
+    cp "$LOCAL_TUI_BIN" "$INSTALL_DIR/bin/ghostshell-provenance-tui"
+    chmod +x "$INSTALL_DIR/bin/ghostshell-provenance-tui"
+fi
+
 # 3. Install Python Dependencies
 echo "📦 Installing Python dependencies..."
 pip3 install -r "$INSTALL_DIR/requirements.txt"

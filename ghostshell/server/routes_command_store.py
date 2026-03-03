@@ -29,6 +29,13 @@ def log_command(data: LogCommandPayload, background_tasks: BackgroundTasks) -> L
                 exit_code = int(raw_exit_code)
             except (TypeError, ValueError):
                 return {"status": "ignored", "reason": "invalid_exit_code"}
+        raw_duration_ms = data.duration_ms
+        duration_ms = None
+        if raw_duration_ms is not None:
+            try:
+                duration_ms = max(0, int(raw_duration_ms))
+            except (TypeError, ValueError):
+                return {"status": "ignored", "reason": "invalid_duration_ms"}
 
         source = str(data.source or "unknown").strip().lower()
         if source not in {"runtime", "history", "unknown"}:
@@ -70,6 +77,7 @@ def log_command(data: LogCommandPayload, background_tasks: BackgroundTasks) -> L
             deps.engine.log_executed_command,
             command,
             exit_code,
+            duration_ms,
             source,
             working_directory,
             provenance_payload,

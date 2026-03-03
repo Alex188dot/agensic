@@ -135,6 +135,7 @@ class LogCommandResponse(BaseModel):
 class LogCommandPayload(BaseModel):
     command: str
     exit_code: int | None = None
+    duration_ms: int | None = None
     source: str = "unknown"
     working_directory: str | None = Field(default=None, max_length=2048)
     shell_pid: int | None = None
@@ -224,6 +225,7 @@ class ProvenanceRunEntry(BaseModel):
     source: str = ""
     working_directory: str = ""
     exit_code: int | None = None
+    duration_ms: int | None = None
     shell_pid: int | None = None
     evidence: list[str] = Field(default_factory=list)
     payload: dict[str, Any] = Field(default_factory=dict)

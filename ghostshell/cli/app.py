@@ -1,11 +1,15 @@
 import typer
 import click
+import csv
 import json
 import os
+import hashlib
 import shutil
 import subprocess
 import sys
 import time
+import tarfile
+import tempfile
 import requests
 import questionary
 import socket
@@ -110,6 +114,11 @@ LAST_INDEXED_PATH = os.path.join(CONFIG_DIR, "last_indexed_line")
 STATE_SQLITE_PATH = os.path.join(CONFIG_DIR, "state.sqlite")
 EVENTS_DIR = os.path.join(CONFIG_DIR, "events")
 SNAPSHOTS_DIR = os.path.join(CONFIG_DIR, "snapshots")
+BIN_DIR = os.path.join(CONFIG_DIR, "bin")
+PROVENANCE_TUI_BIN = os.path.join(BIN_DIR, "ghostshell-provenance-tui")
+DEFAULT_TUI_MANIFEST_URL = (
+    "https://github.com/Alex188dot/ai-terminal/releases/latest/download/provenance_tui_manifest.json"
+)
 DEFAULT_SIGNING_AGENT = "unknown"
 DEFAULT_SIGNING_MODEL = "unknown-model"
 DAEMON_BASE_URL = "http://127.0.0.1:22000"
@@ -226,6 +235,319 @@ def _daemon_request(method: str, path: str, timeout: float, **kwargs):
 
 def _print_daemon_auth_hint() -> None:
     console.print("[yellow]Daemon auth failed.[/yellow] Run `aiterminal setup`, reload your shell, and retry.")
+
+
+def _file_sha256(path: str) -> str:
+    h = hashlib.sha256()
+    with open(path, "rb") as f:
+        for chunk in iter(lambda: f.read(1024 * 1024), b""):
+            if not chunk:
+                break
+            h.update(chunk)
+    return h.hexdigest()
+
+
+def _platform_tag() -> str:
+    machine = (os.uname().machine if hasattr(os, "uname") else "").strip().lower()
+    if sys.platform == "darwin" and machine in {"arm64", "aarch64"}:
+        return "darwin-arm64"
+    if sys.platform == "darwin" and machine in {"x86_64", "amd64"}:
+        return "darwin-x64"
+    if sys.platform.startswith("linux") and machine in {"x86_64", "amd64"}:
+        return "linux-x64"
+    if sys.platform.startswith("linux") and machine in {"arm64", "aarch64"}:
+        return "linux-arm64"
+    return f"{sys.platform}-{machine or 'unknown'}"
+
+
+def _platform_rust_target() -> str:
+    machine = (os.uname().machine if hasattr(os, "uname") else "").strip().lower()
+    if sys.platform == "darwin" and machine in {"arm64", "aarch64"}:
+        return "aarch64-apple-darwin"
+    if sys.platform == "darwin" and machine in {"x86_64", "amd64"}:
+        return "x86_64-apple-darwin"
+    if sys.platform.startswith("linux") and machine in {"x86_64", "amd64"}:
+        return "x86_64-unknown-linux-gnu"
+    if sys.platform.startswith("linux") and machine in {"arm64", "aarch64"}:
+        return "aarch64-unknown-linux-gnu"
+    return ""
+
+
+def _local_provenance_tui_candidates() -> list[str]:
+    explicit = str(os.environ.get("GHOSTSHELL_PROVENANCE_TUI_LOCAL_BIN", "") or "").strip()
+    cwd = os.getcwd()
+    target = _platform_rust_target()
+    candidates = [
+        explicit,
+        PROVENANCE_TUI_BIN,
+        os.path.join(cwd, "rust", "provenance_tui", "target", "release", "ghostshell-provenance-tui"),
+        (
+            os.path.join(
+                cwd,
+                "rust",
+                "provenance_tui",
+                "target",
+                target,
+                "release",
+                "ghostshell-provenance-tui",
+            )
+            if target
+            else ""
+        ),
+        os.path.join(PROJECT_ROOT, "rust", "provenance_tui", "target", "release", "ghostshell-provenance-tui"),
+        (
+            os.path.join(
+                PROJECT_ROOT,
+                "rust",
+                "provenance_tui",
+                "target",
+                target,
+                "release",
+                "ghostshell-provenance-tui",
+            )
+            if target
+            else ""
+        ),
+    ]
+    out: list[str] = []
+    seen: set[str] = set()
+    for path in candidates:
+        normalized = str(path or "").strip()
+        if not normalized or normalized in seen:
+            continue
+        seen.add(normalized)
+        out.append(normalized)
+    return out
+
+
+def _resolve_local_provenance_tui_binary() -> str:
+    for candidate in _local_provenance_tui_candidates():
+        if os.path.isfile(candidate) and os.access(candidate, os.X_OK):
+            return candidate
+    return ""
+
+
+def _fetch_provenance_tui_manifest() -> dict:
+    manifest_url = str(
+        os.environ.get("GHOSTSHELL_PROVENANCE_TUI_MANIFEST_URL", DEFAULT_TUI_MANIFEST_URL) or ""
+    ).strip()
+    if not manifest_url:
+        raise RuntimeError("missing_manifest_url")
+    response = requests.get(manifest_url, timeout=12)
+    response.raise_for_status()
+    payload = response.json()
+    if not isinstance(payload, dict):
+        raise RuntimeError("invalid_manifest_payload")
+    return payload
+
+
+def _resolve_provenance_tui_platform_entry(manifest: dict) -> dict:
+    platforms = manifest.get("platforms", {})
+    if not isinstance(platforms, dict):
+        raise RuntimeError("manifest_missing_platforms")
+    tag = _platform_tag()
+    entry = platforms.get(tag)
+    if not isinstance(entry, dict):
+        raise RuntimeError(f"platform_not_supported:{tag}")
+    return entry
+
+
+def _install_provenance_tui_binary(entry: dict) -> str:
+    artifact_url = str(entry.get("url", "") or "").strip()
+    artifact_sha = str(entry.get("artifact_sha256", "") or "").strip().lower()
+    binary_sha = str(entry.get("binary_sha256", "") or "").strip().lower()
+    binary_name = str(entry.get("binary", "ghostshell-provenance-tui") or "ghostshell-provenance-tui").strip()
+    if not artifact_url:
+        raise RuntimeError("manifest_missing_artifact_url")
+
+    os.makedirs(BIN_DIR, exist_ok=True)
+    if os.path.exists(PROVENANCE_TUI_BIN) and binary_sha:
+        if _file_sha256(PROVENANCE_TUI_BIN).lower() == binary_sha:
+            return PROVENANCE_TUI_BIN
+
+    with tempfile.TemporaryDirectory(prefix="ghostshell-tui-") as tmp:
+        artifact_path = os.path.join(tmp, "provenance_tui.tar.gz")
+        with requests.get(artifact_url, timeout=30, stream=True) as response:
+            response.raise_for_status()
+            with open(artifact_path, "wb") as f:
+                for chunk in response.iter_content(chunk_size=1024 * 1024):
+                    if not chunk:
+                        continue
+                    f.write(chunk)
+
+        if artifact_sha:
+            got = _file_sha256(artifact_path).lower()
+            if got != artifact_sha:
+                raise RuntimeError("artifact_checksum_mismatch")
+
+        with tarfile.open(artifact_path, mode="r:gz") as tar:
+            members = [m for m in tar.getmembers() if m.isfile()]
+            target = None
+            for member in members:
+                if os.path.basename(member.name) == binary_name:
+                    target = member
+                    break
+            if target is None and members:
+                target = members[0]
+            if target is None:
+                raise RuntimeError("artifact_missing_binary")
+            source = tar.extractfile(target)
+            if source is None:
+                raise RuntimeError("artifact_extract_failed")
+            with source as src, open(PROVENANCE_TUI_BIN, "wb") as out:
+                shutil.copyfileobj(src, out)
+
+    os.chmod(PROVENANCE_TUI_BIN, 0o755)
+    if binary_sha:
+        got_bin = _file_sha256(PROVENANCE_TUI_BIN).lower()
+        if got_bin != binary_sha:
+            raise RuntimeError("binary_checksum_mismatch")
+    return PROVENANCE_TUI_BIN
+
+
+def _ensure_provenance_tui_binary() -> str:
+    local_bin = _resolve_local_provenance_tui_binary()
+    if local_bin:
+        return local_bin
+    try:
+        manifest = _fetch_provenance_tui_manifest()
+        entry = _resolve_provenance_tui_platform_entry(manifest)
+        return _install_provenance_tui_binary(entry)
+    except Exception as manifest_exc:
+        local_bin = _resolve_local_provenance_tui_binary()
+        if local_bin:
+            return local_bin
+        raise RuntimeError(
+            "provenance_tui_unavailable:"
+            f"{manifest_exc}; "
+            "for local dev build run: cargo build --manifest-path rust/provenance_tui/Cargo.toml --release"
+        ) from manifest_exc
+
+
+def _export_provenance_rows_to_file(payload: dict, export_format: str, out_path: str) -> None:
+    runs = payload.get("runs", []) if isinstance(payload, dict) else []
+    rows = runs if isinstance(runs, list) else []
+    os.makedirs(os.path.dirname(os.path.abspath(out_path)), exist_ok=True)
+    if export_format == "json":
+        with open(out_path, "w", encoding="utf-8") as f:
+            json.dump({"runs": rows, "total": len(rows)}, f, ensure_ascii=True, indent=2)
+        return
+    if export_format != "csv":
+        raise RuntimeError("unsupported_export_format")
+
+    fieldnames = [
+        "run_id",
+        "ts",
+        "command",
+        "label",
+        "confidence",
+        "agent",
+        "agent_name",
+        "provider",
+        "model",
+        "raw_model",
+        "normalized_model",
+        "model_fingerprint",
+        "evidence_tier",
+        "agent_source",
+        "registry_version",
+        "registry_status",
+        "source",
+        "working_directory",
+        "exit_code",
+        "duration_ms",
+        "shell_pid",
+    ]
+    with open(out_path, "w", encoding="utf-8", newline="") as f:
+        writer = csv.DictWriter(f, fieldnames=fieldnames)
+        writer.writeheader()
+        for row in rows:
+            if not isinstance(row, dict):
+                continue
+            writer.writerow({name: row.get(name, "") for name in fieldnames})
+
+
+def _fallback_export_provenance(
+    limit: int,
+    label: str,
+    contains: str,
+    since_ts: int,
+    tier: str,
+    agent: str,
+    agent_name: str,
+    provider: str,
+    export_format: str,
+    out_path: str,
+) -> None:
+    response = _daemon_request(
+        "GET",
+        "/provenance/runs",
+        params={
+            "limit": int(limit),
+            "label": str(label or "").strip(),
+            "command_contains": str(contains or "").strip(),
+            "since_ts": int(since_ts or 0),
+            "tier": str(tier or "").strip(),
+            "agent": str(agent or "").strip(),
+            "agent_name": str(agent_name or "").strip(),
+            "provider": str(provider or "").strip(),
+        },
+        timeout=8,
+    )
+    if response.status_code != 200:
+        body = response.text.strip()
+        raise RuntimeError(f"export_request_failed:{response.status_code}:{body}")
+    payload = response.json()
+    _export_provenance_rows_to_file(payload, export_format=export_format, out_path=out_path)
+
+
+def _run_provenance_tui(
+    limit: int,
+    label: str,
+    contains: str,
+    since_ts: int,
+    tier: str,
+    agent: str,
+    agent_name: str,
+    provider: str,
+    export_format: str,
+    out_path: str,
+) -> bool:
+    binary_path = _ensure_provenance_tui_binary()
+    token = ""
+    try:
+        token = _DAEMON_AUTH_CACHE.get_token()
+    except Exception:
+        token = ""
+
+    cmd = [
+        binary_path,
+        "--daemon-url",
+        DAEMON_BASE_URL,
+        "--limit",
+        str(max(1, min(500, int(limit or 50)))),
+    ]
+    if token:
+        cmd.extend(["--auth-token", token])
+    if label:
+        cmd.extend(["--label", label])
+    if contains:
+        cmd.extend(["--contains", contains])
+    if since_ts > 0:
+        cmd.extend(["--since-ts", str(int(since_ts))])
+    if tier:
+        cmd.extend(["--tier", tier])
+    if agent:
+        cmd.extend(["--agent", agent])
+    if agent_name:
+        cmd.extend(["--agent-name", agent_name])
+    if provider:
+        cmd.extend(["--provider", provider])
+    if export_format:
+        cmd.extend(["--export", export_format, "--out", out_path])
+
+    result = subprocess.run(cmd, check=False)
+    return int(result.returncode or 0) == 0
 
 
 def _rotate_auth_token_or_exit(context: str) -> None:
@@ -1871,9 +2193,76 @@ def provenance(
     agent: str = typer.Option("", "--agent", help="Filter by inferred agent"),
     agent_name: str = typer.Option("", "--agent-name", help="Filter by optional agent display name"),
     provider: str = typer.Option("", "--provider", help="Filter by provider"),
+    tui: bool = typer.Option(False, "--tui", help="Open full-screen provenance TUI"),
+    export: str = typer.Option("", "--export", help="When used with --tui, export current view to json or csv"),
+    out: str = typer.Option("", "--out", help="Output file path for --export"),
     as_json: bool = typer.Option(False, "--json", help="Print raw JSON payload"),
 ):
     """Show command provenance attribution history."""
+    export_format = str(export or "").strip().lower()
+    if export_format and export_format not in {"json", "csv"}:
+        console.print("[red]Invalid --export value. Use json or csv.[/red]")
+        raise typer.Exit(code=2)
+    if export_format and not out:
+        console.print("[red]--out is required when using --export.[/red]")
+        raise typer.Exit(code=2)
+
+    if tui:
+        try:
+            ok = _run_provenance_tui(
+                limit=limit,
+                label=label,
+                contains=contains,
+                since_ts=since_ts,
+                tier=tier,
+                agent=agent,
+                agent_name=agent_name,
+                provider=provider,
+                export_format=export_format,
+                out_path=out,
+            )
+            if ok:
+                if export_format:
+                    console.print(f"[green]Exported provenance rows to:[/green] {out}")
+                return
+            console.print("[yellow]TUI exited with non-zero status, falling back.[/yellow]")
+            if export_format:
+                _fallback_export_provenance(
+                    limit=limit,
+                    label=label,
+                    contains=contains,
+                    since_ts=since_ts,
+                    tier=tier,
+                    agent=agent,
+                    agent_name=agent_name,
+                    provider=provider,
+                    export_format=export_format,
+                    out_path=out,
+                )
+                console.print(f"[green]Exported provenance rows to:[/green] {out}")
+                return
+        except Exception as exc:
+            console.print(f"[yellow]TUI unavailable, falling back:[/yellow] {exc}")
+            if export_format:
+                try:
+                    _fallback_export_provenance(
+                        limit=limit,
+                        label=label,
+                        contains=contains,
+                        since_ts=since_ts,
+                        tier=tier,
+                        agent=agent,
+                        agent_name=agent_name,
+                        provider=provider,
+                        export_format=export_format,
+                        out_path=out,
+                    )
+                    console.print(f"[green]Exported provenance rows to:[/green] {out}")
+                    return
+                except Exception as export_exc:
+                    console.print(f"[red]Export failed:[/red] {export_exc}")
+                    raise typer.Exit(code=1)
+
     params = {
         "limit": int(limit),
         "label": str(label or "").strip(),
@@ -2086,11 +2475,15 @@ def ai_exec(
     proof_metadata = build_local_proof_metadata()
 
     command_text = shlex.join(args)
+    started = time.perf_counter()
+    duration_ms = None
     try:
         result = subprocess.run(args, check=False)
         exit_code = int(result.returncode or 0)
+        duration_ms = max(0, int((time.perf_counter() - started) * 1000.0))
     except KeyboardInterrupt:
         exit_code = 130
+        duration_ms = max(0, int((time.perf_counter() - started) * 1000.0))
     except Exception as exc:
         console.print(f"[red]Command execution failed:[/red] {exc}")
         raise typer.Exit(code=1)
@@ -2098,6 +2491,7 @@ def ai_exec(
     payload = {
         "command": command_text,
         "exit_code": exit_code,
+        "duration_ms": duration_ms,
         "source": clean_source,
         "working_directory": os.getcwd(),
         "shell_pid": os.getppid(),

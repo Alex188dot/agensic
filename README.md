@@ -154,6 +154,32 @@ aiterminal ai-exec --agent codex --model gpt-5.3 -- echo ok
 
 If agent/model are omitted, GhostShell defaults to `agent=unknown` and `model=unknown-model` and prints a warning.
 
+### Provenance TUI
+
+Open the full-screen provenance interface:
+
+```bash
+aiterminal provenance --tui
+```
+
+Export the current filtered dataset in one shot:
+
+```bash
+aiterminal provenance --tui --export json --out ./provenance.json
+aiterminal provenance --tui --export csv --out ./provenance.csv
+```
+
+Local development before publishing releases:
+
+```bash
+cargo build --manifest-path rust/provenance_tui/Cargo.toml --release
+aiterminal provenance --tui
+```
+
+Optional overrides:
+- `GHOSTSHELL_PROVENANCE_TUI_MANIFEST_URL` to point to a custom manifest URL
+- `GHOSTSHELL_PROVENANCE_TUI_LOCAL_BIN` to force a specific local sidecar binary
+
 ### 4. First Run Initialization
 
 The first time you use GhostShell, it will:

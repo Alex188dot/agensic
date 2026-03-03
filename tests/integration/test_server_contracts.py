@@ -325,11 +325,12 @@ class ServerContractTests(unittest.TestCase):
             args = log_exec.call_args[0]
             self.assertEqual(args[0], "git status")
             self.assertEqual(args[1], 0)
-            self.assertEqual(args[2], "runtime")
-            self.assertEqual(args[3], "/tmp/repo-x")
-            self.assertIsInstance(args[4], dict)
-            self.assertIn("provenance_last_action", args[4])
-            self.assertEqual(args[4].get("provenance_agent_name"), "Planner A")
+            self.assertIsNone(args[2])
+            self.assertEqual(args[3], "runtime")
+            self.assertEqual(args[4], "/tmp/repo-x")
+            self.assertIsInstance(args[5], dict)
+            self.assertIn("provenance_last_action", args[5])
+            self.assertEqual(args[5].get("provenance_agent_name"), "Planner A")
 
     def test_provenance_runs_contract(self):
         sample = [
@@ -353,6 +354,7 @@ class ServerContractTests(unittest.TestCase):
                 "source": "runtime",
                 "working_directory": "/tmp",
                 "exit_code": 0,
+                "duration_ms": 88,
                 "shell_pid": 123,
                 "evidence": ["last_action=human_typed"],
                 "payload": {"provenance_last_action": "human_typed"},
@@ -360,7 +362,7 @@ class ServerContractTests(unittest.TestCase):
         ]
         with patch.object(deps.engine, "list_command_runs", return_value=sample) as mocked:
             response = self.client.get(
-                "/provenance/runs?limit=20&label=HUMAN_TYPED&tier=integrated&agent=codex&agent_name=PlannerA&provider=openai"
+                "/provenance/runs?limit=20&label=HUMAN_TYPED&tier=integrated&agent=codex&agent_name=PlannerA&provider=openai&before_ts=1700000500&before_run_id=run-zzz"
             )
             self.assertEqual(response.status_code, 200)
             body = response.json()
@@ -372,6 +374,49 @@ class ServerContractTests(unittest.TestCase):
             self.assertEqual(kwargs.get("agent"), "codex")
             self.assertEqual(kwargs.get("agent_name"), "PlannerA")
             self.assertEqual(kwargs.get("provider"), "openai")
+            self.assertEqual(kwargs.get("before_ts"), 1700000500)
+            self.assertEqual(kwargs.get("before_run_id"), "run-zzz")
+
+    def test_provenance_runs_semantic_contract(self):
+        sample = [
+            {
+                "run_id": "run-sem-1",
+                "ts": 1700000010,
+                "command": "git commit -m test",
+                "label": "AI_EXECUTED",
+                "confidence": 0.99,
+                "agent": "codex",
+                "agent_name": "PlannerA",
+                "provider": "openai",
+                "model": "gpt-5.3",
+                "raw_model": "gpt-5.3",
+                "normalized_model": "gpt-5-codex",
+                "model_fingerprint": "codex_gpt-5-codex",
+                "evidence_tier": "integrated",
+                "agent_source": "payload_ai",
+                "registry_version": "builtin-2026-02-28",
+                "registry_status": "verified",
+                "source": "runtime",
+                "working_directory": "/tmp",
+                "exit_code": 0,
+                "duration_ms": 12,
+                "shell_pid": 321,
+                "evidence": [],
+                "payload": {},
+            }
+        ]
+        with patch.object(deps.engine, "semantic_command_runs", return_value=sample) as mocked:
+            response = self.client.get(
+                "/provenance/runs/semantic?query=commit&limit=20&tier=integrated&agent=codex&agent_name=PlannerA&provider=openai"
+            )
+            self.assertEqual(response.status_code, 200)
+            body = response.json()
+            self.assertEqual(body.get("status"), "ok")
+            self.assertEqual(body.get("total"), 1)
+            kwargs = mocked.call_args.kwargs
+            self.assertEqual(kwargs.get("query"), "commit")
+            self.assertEqual(kwargs.get("tier"), "integrated")
+            self.assertEqual(kwargs.get("agent"), "codex")
 
     def test_provenance_registry_contracts(self):
         with patch.object(

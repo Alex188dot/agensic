@@ -48,6 +48,7 @@ class CliAiExecTests(unittest.TestCase):
         payload = mock_request.call_args.kwargs["json"]
         self.assertEqual(payload["provenance_ai_agent"], "unknown")
         self.assertEqual(payload["provenance_ai_model"], "unknown-model")
+        self.assertGreaterEqual(int(payload.get("duration_ms", -1) or -1), 0)
         self.assertEqual(payload["proof_signer_scope"], "local-hmac")
         self.assertEqual(payload["proof_key_fingerprint"], "deadbeefdeadbeef")
         self.assertEqual(payload["proof_host_fingerprint"], "cafebabecafebabe")
@@ -85,6 +86,7 @@ class CliAiExecTests(unittest.TestCase):
         self.assertEqual(payload["provenance_ai_agent"], "codex")
         self.assertEqual(payload["proof_agent"], "codex")
         self.assertEqual(payload["provenance_ai_model"], "gpt-5.3")
+        self.assertGreaterEqual(int(payload.get("duration_ms", -1) or -1), 0)
 
 
 if __name__ == "__main__":

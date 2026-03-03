@@ -2366,6 +2366,45 @@ class CommandVectorDB:
             logger.error(f"Error searching database: {exc}")
             return []
 
+    def search_commands_for_provenance(self, query: str, limit: int = 50) -> List[str]:
+        normalized_query = self.normalize_command(query)
+        if not normalized_query:
+            return []
+
+        row_limit = max(1, min(200, int(limit or 50)))
+        semantic_topk = max(row_limit * 4, self.SEMANTIC_VECTOR_TOPN)
+        ranked = self.search(normalized_query, topk=semantic_topk)
+
+        out: List[str] = []
+        seen: set[str] = set()
+        for command, _ in ranked:
+            normalized = self.normalize_command(command)
+            if not normalized or normalized in seen:
+                continue
+            if self.is_blocked_command(normalized):
+                continue
+            if self.is_removed_command(normalized):
+                continue
+            seen.add(normalized)
+            out.append(normalized)
+            if len(out) >= row_limit:
+                return out
+
+        # Fallback for cases where vector recall is empty but lexical prefix still helps.
+        for command in self._get_lexical_prefix_matches(normalized_query, topk=row_limit):
+            normalized = self.normalize_command(command)
+            if not normalized or normalized in seen:
+                continue
+            if self.is_blocked_command(normalized):
+                continue
+            if self.is_removed_command(normalized):
+                continue
+            seen.add(normalized)
+            out.append(normalized)
+            if len(out) >= row_limit:
+                break
+        return out
+
     def get_prefix_or_semantic_matches(self, prefix: str, topk: int = 100) -> List[Dict[str, str]]:
         if not prefix:
             return []
