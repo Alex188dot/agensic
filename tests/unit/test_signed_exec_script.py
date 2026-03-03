@@ -103,6 +103,37 @@ class SignedExecScriptTests(unittest.TestCase):
             ],
         )
 
+    def test_strict_verify_emits_telling_error_message_when_provenance_not_found(self):
+        result, captured = self._run_script(
+            [
+                "--verify-mode",
+                "strict",
+                "--verify-max-wait-ms",
+                "1",
+                "--",
+                "echo",
+                "ok",
+            ]
+        )
+        self.assertEqual(result.returncode, 86, msg=result.stderr)
+        self.assertEqual(
+            captured,
+            [
+                "ai-exec",
+                "--agent",
+                "unknown",
+                "--model",
+                "unknown-model",
+                "--",
+                "echo",
+                "ok",
+            ],
+        )
+        self.assertIn("ERROR: terminal-commands enforcement triggered", result.stderr)
+        self.assertIn("EXAMPLE (one-off):", result.stderr)
+        self.assertIn("./scripts/signed_exec.sh --agent <agent_id>", result.stderr)
+        self.assertIn("./scripts/signed_session.sh stop", result.stderr)
+
 
 if __name__ == "__main__":
     unittest.main()

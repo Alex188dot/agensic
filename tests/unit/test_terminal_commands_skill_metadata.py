@@ -36,7 +36,11 @@ class TerminalCommandsSkillMetadataTests(unittest.TestCase):
 
     def test_skill_references_wrapper_scripts_that_exist(self):
         text = SKILL_MD.read_text(encoding="utf-8")
-        wrapper_paths = ["scripts/signed_session.sh", "scripts/signed_exec.sh"]
+        wrapper_paths = [
+            "scripts/signed_session.sh",
+            "scripts/signed_exec.sh",
+            "scripts/enforce_signed_batch.sh",
+        ]
         for rel_path in wrapper_paths:
             with self.subTest(rel_path=rel_path):
                 self.assertIn(rel_path, text)
