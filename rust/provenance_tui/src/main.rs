@@ -1561,7 +1561,14 @@ fn handle_key(app: &mut App, key: KeyEvent) -> bool {
     }
 
     match key.code {
-        KeyCode::Esc => return true,
+        KeyCode::Esc => {
+            // Ignore escape bytes that are likely part of an unparsed terminal control sequence
+            // (for example malformed mouse wheel input), so they don't force-close the TUI.
+            if is_standalone_escape() {
+                return true;
+            }
+            flush_stdin_input_buffer();
+        }
         KeyCode::Char('c') if key.modifiers.contains(KeyModifiers::CONTROL) => return true,
         KeyCode::Char('f') if key.modifiers.contains(KeyModifiers::CONTROL) => {
             app.input_mode = true
@@ -1596,6 +1603,14 @@ fn handle_key(app: &mut App, key: KeyEvent) -> bool {
         _ => {}
     }
     false
+}
+
+fn is_standalone_escape() -> bool {
+    match event::poll(Duration::from_millis(0)) {
+        Ok(false) => true,
+        Ok(true) => false,
+        Err(_) => true,
+    }
 }
 
 fn handle_mouse(app: &mut App, mouse: MouseEvent) {
@@ -1726,14 +1741,24 @@ fn run_interactive(client: &Client, args: &Args) -> Result<(), String> {
     while !exit_requested {
         draw_ui(&mut terminal, &app).map_err(|e| format!("draw failed: {}", e))?;
 
-        if event::poll(Duration::from_millis(50)).map_err(|e| format!("poll failed: {}", e))? {
-            let ev = event::read().map_err(|e| format!("read event failed: {}", e))?;
-            match ev {
-                Event::Key(key) => {
-                    exit_requested = handle_key(&mut app, key);
+        match event::poll(Duration::from_millis(50)) {
+            Ok(true) => match event::read() {
+                Ok(ev) => match ev {
+                    Event::Key(key) => {
+                        exit_requested = handle_key(&mut app, key);
+                    }
+                    Event::Mouse(mouse) => handle_mouse(&mut app, mouse),
+                    _ => {}
+                },
+                Err(err) => {
+                    app.status = format!("Input read error (recovered): {}", err);
+                    flush_stdin_input_buffer();
                 }
-                Event::Mouse(mouse) => handle_mouse(&mut app, mouse),
-                _ => {}
+            },
+            Ok(false) => {}
+            Err(err) => {
+                app.status = format!("Input poll error (recovered): {}", err);
+                flush_stdin_input_buffer();
             }
         }
 
@@ -1750,6 +1775,10 @@ fn run_interactive(client: &Client, args: &Args) -> Result<(), String> {
     terminal
         .show_cursor()
         .map_err(|e| format!("show cursor failed: {}", e))?;
+    io::stdout()
+        .flush()
+        .map_err(|e| format!("stdout flush failed: {}", e))?;
+    flush_stdin_input_buffer();
     Ok(())
 }
 
@@ -1757,6 +1786,7 @@ fn cleanup_terminal() {
     let _ = disable_raw_mode();
     let mut stdout = io::stdout();
     let _ = execute!(stdout, LeaveAlternateScreen, DisableMouseCapture);
+    let _ = stdout.flush();
     flush_stdin_input_buffer();
 }
 
