@@ -16,10 +16,16 @@ class CliProvenanceTuiTests(unittest.TestCase):
         self.assertEqual(result.exit_code, 0)
         run_tui.assert_called_once()
 
-    def test_provenance_tui_export_requires_output_path(self):
-        result = self.runner.invoke(app, ["provenance", "--tui", "--export", "json"])
-        self.assertEqual(result.exit_code, 2)
-        self.assertIn("--out is required", result.stdout)
+    def test_provenance_tui_export_defaults_output_path(self):
+        with patch("ghostshell.cli.app._default_export_path", return_value="/tmp/default-prov.json"), patch(
+            "ghostshell.cli.app._run_provenance_tui",
+            return_value=True,
+        ) as run_tui:
+            result = self.runner.invoke(app, ["provenance", "--tui", "--export", "json"])
+        self.assertEqual(result.exit_code, 0)
+        kwargs = run_tui.call_args.kwargs
+        self.assertEqual(kwargs.get("out_path"), "/tmp/default-prov.json")
+        self.assertIn("Exported provenance rows to:", result.stdout)
 
     def test_provenance_tui_export_falls_back_when_sidecar_fails(self):
         with patch("ghostshell.cli.app._run_provenance_tui", return_value=False), patch(

@@ -162,12 +162,23 @@ Open the full-screen provenance interface:
 aiterminal provenance --tui
 ```
 
+Inside the TUI filter panel (`f`), `time` now supports:
+- `last_7d` (default)
+- `last_30d`
+- `custom` (start/end `YYYY-MM-DD`, within last 365 days, max 30 days inclusive)
+
+Footer behavior:
+- line 1 always shows key shortcuts/command bar
+- line 2 always shows current status/error text (including semantic fallback errors)
+
 Export the current filtered dataset in one shot:
 
 ```bash
 aiterminal provenance --tui --export json --out ./provenance.json
 aiterminal provenance --tui --export csv --out ./provenance.csv
 ```
+
+Without `--out`, exports default to `~/Downloads/provenance_export_<timestamp>.<ext>`.
 
 Local development before publishing releases:
 
@@ -179,6 +190,15 @@ aiterminal provenance --tui
 Optional overrides:
 - `GHOSTSHELL_PROVENANCE_TUI_MANIFEST_URL` to point to a custom manifest URL
 - `GHOSTSHELL_PROVENANCE_TUI_LOCAL_BIN` to force a specific local sidecar binary
+
+Release publish helper (build + manifest + GitHub upload):
+
+```bash
+./scripts/publish_provenance_tui_release.sh <tag>
+```
+
+Environment override:
+- `GITHUB_REPO` defaults to `Alex188dot/ai-terminal`
 
 ### 4. First Run Initialization
 

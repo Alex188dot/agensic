@@ -70,6 +70,14 @@ _PROVIDER_ENV_API_KEYS: dict[str, str] = {
     "zai": "ZAI_API_KEY",
 }
 
+COMMAND_PROVENANCE_RETENTION_DAYS = 365
+COMMAND_PROVENANCE_RETENTION_SECONDS = COMMAND_PROVENANCE_RETENTION_DAYS * 24 * 3600
+
+
+def command_provenance_prune_cutoff(now_ts: int) -> int:
+    return int(now_ts or 0) - COMMAND_PROVENANCE_RETENTION_SECONDS
+
+
 class SuggestionEngine:
     def __init__(self):
         self.inventory = self._get_simple_inventory()
@@ -1674,7 +1682,7 @@ class SuggestionEngine:
         # Bound prune cost to at most once per hour.
         if now_ts - int(self._last_command_runs_prune_ts or 0) < 3600:
             return
-        cutoff = now_ts - (30 * 24 * 3600)
+        cutoff = command_provenance_prune_cutoff(now_ts)
         try:
             self.state_store.prune_command_runs(cutoff)
             self._last_command_runs_prune_ts = now_ts

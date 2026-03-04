@@ -1,3 +1,4 @@
+use chrono::{Duration as ChronoDuration, Local, NaiveDate, TimeZone};
 use clap::Parser;
 use crossterm::event::{self, Event, KeyCode, KeyEvent, KeyEventKind, KeyModifiers};
 use crossterm::execute;
@@ -14,6 +15,7 @@ use reqwest::blocking::Client;
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 use std::collections::BTreeSet;
+use std::env;
 use std::fs::{self, File};
 use std::io::{self, Stdout, Write};
 use std::path::Path;
@@ -94,6 +96,10 @@ struct RunsResponse {
     runs: Vec<RunEntry>,
 }
 
+const SECONDS_PER_DAY: i64 = 24 * 60 * 60;
+const PROVENANCE_MAX_LOOKBACK_DAYS: i64 = 365;
+const CUSTOM_TIME_RANGE_MAX_DAYS: i64 = 30;
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum SortMode {
     TimeDesc,
@@ -122,13 +128,67 @@ impl SortMode {
     }
 }
 
-#[derive(Clone, Debug, Default)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum TimeFilterMode {
+    Last7d,
+    Last30d,
+    Custom,
+}
+
+impl TimeFilterMode {
+    fn as_str(self) -> &'static str {
+        match self {
+            Self::Last7d => "last_7d",
+            Self::Last30d => "last_30d",
+            Self::Custom => "custom",
+        }
+    }
+
+    fn from_str(value: &str) -> Option<Self> {
+        match value {
+            "last_7d" => Some(Self::Last7d),
+            "last_30d" => Some(Self::Last30d),
+            "custom" => Some(Self::Custom),
+            _ => None,
+        }
+    }
+}
+
+impl Default for TimeFilterMode {
+    fn default() -> Self {
+        Self::Last7d
+    }
+}
+
+#[derive(Clone, Debug)]
 struct Filters {
     label: String,
     tier: String,
     agent: String,
     provider: String,
     exit: String,
+    time_mode: TimeFilterMode,
+    custom_start: String,
+    custom_end: String,
+    custom_since_ts: Option<i64>,
+    custom_before_ts: Option<i64>,
+}
+
+impl Default for Filters {
+    fn default() -> Self {
+        Self {
+            label: String::new(),
+            tier: String::new(),
+            agent: String::new(),
+            provider: String::new(),
+            exit: String::new(),
+            time_mode: TimeFilterMode::Last7d,
+            custom_start: String::new(),
+            custom_end: String::new(),
+            custom_since_ts: None,
+            custom_before_ts: None,
+        }
+    }
 }
 
 struct App {
@@ -149,17 +209,20 @@ struct App {
     semantic_dirty: bool,
     sort_mode: SortMode,
     filters: Filters,
+    time_popup_open: bool,
+    time_popup_start_input: String,
+    time_popup_end_input: String,
+    time_popup_focus: usize,
+    time_popup_error: String,
 }
 
 impl App {
     fn new(client: Client, args: Args) -> Self {
-        let filters = Filters {
-            label: args.label.clone(),
-            tier: args.tier.clone(),
-            agent: args.agent.clone(),
-            provider: args.provider.clone(),
-            exit: String::new(),
-        };
+        let mut filters = Filters::default();
+        filters.label = args.label.clone();
+        filters.tier = args.tier.clone();
+        filters.agent = args.agent.clone();
+        filters.provider = args.provider.clone();
         Self {
             client,
             auth_token: args.auth_token.clone(),
@@ -178,6 +241,11 @@ impl App {
             semantic_dirty: false,
             sort_mode: SortMode::TimeDesc,
             filters,
+            time_popup_open: false,
+            time_popup_start_input: String::new(),
+            time_popup_end_input: String::new(),
+            time_popup_focus: 0,
+            time_popup_error: String::new(),
         }
     }
 
@@ -223,7 +291,27 @@ impl App {
         row.label.to_lowercase().contains(&q)
     }
 
-    fn row_passes_filters(&self, row: &RunEntry) -> bool {
+    fn effective_since_ts(&self, now_ts: i64) -> i64 {
+        self.args.since_ts.max(time_filter_since_ts(
+            self.filters.time_mode,
+            self.filters.custom_since_ts,
+            now_ts,
+        ))
+    }
+
+    fn effective_before_ts(&self) -> Option<i64> {
+        if self.filters.time_mode == TimeFilterMode::Custom {
+            self.filters.custom_before_ts
+        } else {
+            None
+        }
+    }
+
+    fn row_passes_filters(&self, row: &RunEntry, now_ts: i64) -> bool {
+        let since_ts = self.effective_since_ts(now_ts);
+        if !ts_within_time_bounds(row.ts, since_ts, self.effective_before_ts()) {
+            return false;
+        }
         if !self.filters.label.is_empty() && row.label != self.filters.label {
             return false;
         }
@@ -253,10 +341,11 @@ impl App {
         };
 
         let query = self.search.trim().to_string();
+        let now_ts = now_epoch_seconds();
         let mut out: Vec<RunEntry> = source
             .into_iter()
             .filter(|row| Self::search_hit(row, &query))
-            .filter(|row| self.row_passes_filters(row))
+            .filter(|row| self.row_passes_filters(row, now_ts))
             .collect();
 
         out.sort_by(|left, right| match self.sort_mode {
@@ -303,15 +392,30 @@ impl App {
         before_ts: i64,
         before_run_id: &str,
     ) -> Result<Vec<RunEntry>, String> {
+        let now_ts = now_epoch_seconds();
+        let effective_since_ts = self.effective_since_ts(now_ts);
+        let mut effective_before_ts = if before_ts > 0 { Some(before_ts) } else { None };
+        let mut effective_before_run_id = before_run_id.trim().to_string();
+        if let Some(time_before_ts) = self.effective_before_ts() {
+            if let Some(existing_before_ts) = effective_before_ts {
+                if existing_before_ts > time_before_ts {
+                    effective_before_ts = Some(time_before_ts);
+                    effective_before_run_id.clear();
+                }
+            } else {
+                effective_before_ts = Some(time_before_ts);
+            }
+        }
+
         let mut params: Vec<(String, String)> = vec![
             ("limit".to_string(), self.args.limit.to_string()),
-            ("since_ts".to_string(), self.args.since_ts.to_string()),
+            ("since_ts".to_string(), effective_since_ts.to_string()),
         ];
-        if before_ts > 0 {
-            params.push(("before_ts".to_string(), before_ts.to_string()));
+        if let Some(value) = effective_before_ts {
+            params.push(("before_ts".to_string(), value.to_string()));
         }
-        if !before_run_id.trim().is_empty() {
-            params.push(("before_run_id".to_string(), before_run_id.to_string()));
+        if !effective_before_run_id.is_empty() {
+            params.push(("before_run_id".to_string(), effective_before_run_id));
         }
         if !self.filters.label.is_empty() {
             params.push(("label".to_string(), self.filters.label.clone()));
@@ -350,10 +454,12 @@ impl App {
     }
 
     fn fetch_semantic(&self, query: &str) -> Result<Vec<RunEntry>, String> {
+        let now_ts = now_epoch_seconds();
+        let effective_since_ts = self.effective_since_ts(now_ts);
         let mut params: Vec<(String, String)> = vec![
             ("query".to_string(), query.to_string()),
             ("limit".to_string(), self.args.limit.to_string()),
-            ("since_ts".to_string(), self.args.since_ts.to_string()),
+            ("since_ts".to_string(), effective_since_ts.to_string()),
         ];
         if !self.filters.label.is_empty() {
             params.push(("label".to_string(), self.filters.label.clone()));
@@ -495,8 +601,16 @@ impl App {
         self.selected = next as usize;
     }
 
-    fn filter_fields() -> [&'static str; 5] {
-        ["label", "tier", "agent", "provider", "exit"]
+    fn filter_fields() -> [&'static str; 7] {
+        [
+            "label",
+            "tier",
+            "agent",
+            "provider",
+            "exit",
+            "time",
+            "[Reset All]",
+        ]
     }
 
     fn field_values(&self, field: &str) -> Vec<String> {
@@ -506,7 +620,32 @@ impl App {
             "agent" => unique_values(self.base_rows.iter().map(|r| r.agent.clone())),
             "provider" => unique_values(self.base_rows.iter().map(|r| r.provider.clone())),
             "exit" => vec!["".to_string(), "0".to_string(), "nonzero".to_string()],
+            "time" => vec![
+                TimeFilterMode::Last7d.as_str().to_string(),
+                TimeFilterMode::Last30d.as_str().to_string(),
+                TimeFilterMode::Custom.as_str().to_string(),
+            ],
+            "[Reset All]" => vec!["<Press Left/Right/Enter to Reset>".to_string()],
             _ => vec!["".to_string()],
+        }
+    }
+
+    fn time_filter_display_value(&self) -> String {
+        match self.filters.time_mode {
+            TimeFilterMode::Last7d => TimeFilterMode::Last7d.as_str().to_string(),
+            TimeFilterMode::Last30d => TimeFilterMode::Last30d.as_str().to_string(),
+            TimeFilterMode::Custom => {
+                if self.filters.custom_start.is_empty() || self.filters.custom_end.is_empty() {
+                    TimeFilterMode::Custom.as_str().to_string()
+                } else {
+                    format!(
+                        "{}({}..{})",
+                        TimeFilterMode::Custom.as_str(),
+                        self.filters.custom_start,
+                        self.filters.custom_end
+                    )
+                }
+            }
         }
     }
 
@@ -517,18 +656,115 @@ impl App {
             "agent" => self.filters.agent.clone(),
             "provider" => self.filters.provider.clone(),
             "exit" => self.filters.exit.clone(),
+            "time" => self.time_filter_display_value(),
+            "[Reset All]" => "<Press Left/Right/Enter to Reset>".to_string(),
             _ => String::new(),
         }
     }
 
+    fn apply_time_preset(&mut self, mode: TimeFilterMode) {
+        self.filters.time_mode = mode;
+        self.semantic_dirty = !self.search.trim().is_empty();
+        self.refresh_base();
+        self.apply_view();
+    }
+
+    fn open_custom_time_popup(&mut self) {
+        self.time_popup_open = true;
+        self.filter_menu = false;
+        self.time_popup_focus = 0;
+        self.time_popup_error.clear();
+        if !self.filters.custom_start.is_empty() && !self.filters.custom_end.is_empty() {
+            self.time_popup_start_input = self.filters.custom_start.clone();
+            self.time_popup_end_input = self.filters.custom_end.clone();
+            return;
+        }
+        let today = Local::now().date_naive();
+        let start = today - ChronoDuration::days(6);
+        self.time_popup_start_input = start.format("%Y-%m-%d").to_string();
+        self.time_popup_end_input = today.format("%Y-%m-%d").to_string();
+    }
+
+    fn submit_custom_time_popup(&mut self) {
+        let today = Local::now().date_naive();
+        match validate_custom_time_range(
+            &self.time_popup_start_input,
+            &self.time_popup_end_input,
+            today,
+        ) {
+            Ok((start_date, end_date)) => {
+                let since_ts = match local_date_midnight_ts(start_date) {
+                    Ok(value) => value,
+                    Err(err) => {
+                        self.time_popup_error = err;
+                        return;
+                    }
+                };
+                let next_day = match end_date.checked_add_signed(ChronoDuration::days(1)) {
+                    Some(value) => value,
+                    None => {
+                        self.time_popup_error =
+                            "Could not compute custom range end date".to_string();
+                        return;
+                    }
+                };
+                let before_ts = match local_date_midnight_ts(next_day) {
+                    Ok(value) => value,
+                    Err(err) => {
+                        self.time_popup_error = err;
+                        return;
+                    }
+                };
+                self.filters.time_mode = TimeFilterMode::Custom;
+                self.filters.custom_start = start_date.format("%Y-%m-%d").to_string();
+                self.filters.custom_end = end_date.format("%Y-%m-%d").to_string();
+                self.filters.custom_since_ts = Some(since_ts);
+                self.filters.custom_before_ts = Some(before_ts);
+                self.time_popup_open = false;
+                self.time_popup_error.clear();
+                self.status = format!(
+                    "Time filter set to custom {}..{}",
+                    self.filters.custom_start, self.filters.custom_end
+                );
+                self.semantic_dirty = !self.search.trim().is_empty();
+                self.refresh_base();
+                self.apply_view();
+            }
+            Err(err) => {
+                self.time_popup_error = err;
+            }
+        }
+    }
+
     fn set_field_current(&mut self, field: &str, value: String) {
+        let mut should_refresh = true;
         match field {
             "label" => self.filters.label = value,
             "tier" => self.filters.tier = value,
             "agent" => self.filters.agent = value,
             "provider" => self.filters.provider = value,
             "exit" => self.filters.exit = value,
+            "time" => match TimeFilterMode::from_str(value.as_str()) {
+                Some(TimeFilterMode::Last7d) => self.apply_time_preset(TimeFilterMode::Last7d),
+                Some(TimeFilterMode::Last30d) => self.apply_time_preset(TimeFilterMode::Last30d),
+                Some(TimeFilterMode::Custom) => {
+                    should_refresh = false;
+                    self.open_custom_time_popup();
+                }
+                None => {
+                    should_refresh = false;
+                }
+            },
+            "[Reset All]" => {
+                self.filters = Filters::default();
+            }
             _ => {}
+        }
+        if field == "time" {
+            return;
+        }
+        if !should_refresh {
+            return;
         }
         self.semantic_dirty = !self.search.trim().is_empty();
         self.refresh_base();
@@ -541,7 +777,11 @@ impl App {
         if values.is_empty() {
             return;
         }
-        let current = self.field_current(field);
+        let current = if field == "time" {
+            self.filters.time_mode.as_str().to_string()
+        } else {
+            self.field_current(field)
+        };
         let pos = values.iter().position(|v| v == &current).unwrap_or(0) as isize;
         let len = values.len() as isize;
         let next = (pos + step).rem_euclid(len) as usize;
@@ -566,11 +806,102 @@ where
     out
 }
 
+fn time_filter_since_ts(mode: TimeFilterMode, custom_since_ts: Option<i64>, now_ts: i64) -> i64 {
+    let bounded_now_ts = now_ts.max(0);
+    match mode {
+        TimeFilterMode::Last7d => bounded_now_ts.saturating_sub(7 * SECONDS_PER_DAY),
+        TimeFilterMode::Last30d => bounded_now_ts.saturating_sub(30 * SECONDS_PER_DAY),
+        TimeFilterMode::Custom => {
+            custom_since_ts.unwrap_or_else(|| bounded_now_ts.saturating_sub(7 * SECONDS_PER_DAY))
+        }
+    }
+}
+
+fn local_date_midnight_ts(date: NaiveDate) -> Result<i64, String> {
+    let Some(midnight) = date.and_hms_opt(0, 0, 0) else {
+        return Err(format!(
+            "Could not parse midnight timestamp for {}",
+            date.format("%Y-%m-%d")
+        ));
+    };
+    let Some(local_dt) = Local.from_local_datetime(&midnight).single() else {
+        return Err(format!(
+            "Could not map {} to local timezone midnight",
+            date.format("%Y-%m-%d")
+        ));
+    };
+    Ok(local_dt.timestamp())
+}
+
+fn validate_custom_time_range(
+    start_input: &str,
+    end_input: &str,
+    today: NaiveDate,
+) -> Result<(NaiveDate, NaiveDate), String> {
+    let start_trimmed = start_input.trim();
+    let end_trimmed = end_input.trim();
+    let start_date = NaiveDate::parse_from_str(start_trimmed, "%Y-%m-%d")
+        .map_err(|_| "Start date must be in YYYY-MM-DD format".to_string())?;
+    let end_date = NaiveDate::parse_from_str(end_trimmed, "%Y-%m-%d")
+        .map_err(|_| "End date must be in YYYY-MM-DD format".to_string())?;
+    if start_date > end_date {
+        return Err("Start date must be before or equal to end date".to_string());
+    }
+    let earliest_allowed = today - ChronoDuration::days(PROVENANCE_MAX_LOOKBACK_DAYS);
+    if start_date < earliest_allowed || end_date < earliest_allowed {
+        return Err(format!(
+            "Dates must be within the last {} days",
+            PROVENANCE_MAX_LOOKBACK_DAYS
+        ));
+    }
+    if start_date > today || end_date > today {
+        return Err("Dates cannot be in the future".to_string());
+    }
+    let span_days = end_date.signed_duration_since(start_date).num_days() + 1;
+    if span_days > CUSTOM_TIME_RANGE_MAX_DAYS {
+        return Err(format!(
+            "Custom range cannot exceed {} days",
+            CUSTOM_TIME_RANGE_MAX_DAYS
+        ));
+    }
+    Ok((start_date, end_date))
+}
+
+fn ts_within_time_bounds(ts: i64, since_ts: i64, before_ts: Option<i64>) -> bool {
+    if ts < since_ts {
+        return false;
+    }
+    if let Some(bound) = before_ts {
+        if ts >= bound {
+            return false;
+        }
+    }
+    true
+}
+
 fn now_epoch_seconds() -> i64 {
     let Ok(duration) = SystemTime::now().duration_since(UNIX_EPOCH) else {
         return 0;
     };
     duration.as_secs() as i64
+}
+
+fn default_export_dir() -> String {
+    let home = env::var("HOME").unwrap_or_else(|_| ".".to_string());
+    let downloads = format!("{}/Downloads", home);
+    if Path::new(&downloads).is_dir() {
+        return downloads;
+    }
+    home
+}
+
+fn default_export_path(ext: &str) -> String {
+    format!(
+        "{}/provenance_export_{}.{}",
+        default_export_dir(),
+        now_epoch_seconds(),
+        ext
+    )
 }
 
 fn truncate_cell(value: &str, max: usize) -> String {
@@ -633,14 +964,14 @@ fn draw_ui(terminal: &mut Terminal<CrosstermBackend<Stdout>>, app: &App) -> io::
                     .add_modifier(Modifier::BOLD),
             ),
             Span::raw(if app.search.is_empty() {
-                "(type /)"
+                "(type Ctrl+F)"
             } else {
                 app.search.as_str()
             }),
             Span::raw("    "),
             Span::styled(format!("mode={} ", mode), Style::default().fg(Color::Yellow)),
             Span::raw(format!(
-                "filters[label={}, tier={}, agent={}, provider={}, exit={}] rows={}",
+                "filters[label={}, tier={}, agent={}, provider={}, exit={}, time={}] rows={}",
                 if app.filters.label.is_empty() {
                     "*"
                 } else {
@@ -666,6 +997,7 @@ fn draw_ui(terminal: &mut Terminal<CrosstermBackend<Stdout>>, app: &App) -> io::
                 } else {
                     app.filters.exit.as_str()
                 },
+                app.time_filter_display_value(),
                 app.view_rows.len(),
             )),
         ]))
@@ -674,7 +1006,7 @@ fn draw_ui(terminal: &mut Terminal<CrosstermBackend<Stdout>>, app: &App) -> io::
 
         let compact = area.width < 120;
         let header_style = Style::default()
-            .fg(Color::White)
+            .fg(Color::Cyan)
             .add_modifier(Modifier::BOLD);
         let rows: Vec<Row> = app
             .view_rows
@@ -682,12 +1014,17 @@ fn draw_ui(terminal: &mut Terminal<CrosstermBackend<Stdout>>, app: &App) -> io::
             .enumerate()
             .map(|(idx, row)| {
                 let base_style = if idx % 2 == 0 {
-                    Style::default().fg(Color::Gray)
+                    Style::default().fg(Color::DarkGray)
                 } else {
                     Style::default().fg(Color::White)
                 };
+                let dt = Local.timestamp_opt(row.ts, 0).single();
+                let time_str = match dt {
+                    Some(date) => date.format("%m/%d/%y %H:%M:%S").to_string(),
+                    None => row.ts.to_string(),
+                };
                 let mut cells = vec![
-                    Cell::from(row.ts.to_string()),
+                    Cell::from(time_str),
                     Cell::from(truncate_cell(&App::actor_of(row), 18)),
                     Cell::from(if compact {
                         truncate_cell(&row.command, 40)
@@ -707,7 +1044,7 @@ fn draw_ui(terminal: &mut Terminal<CrosstermBackend<Stdout>>, app: &App) -> io::
 
         let constraints = if compact {
             vec![
-                Constraint::Length(12),
+                Constraint::Length(18),
                 Constraint::Length(16),
                 Constraint::Min(30),
                 Constraint::Length(6),
@@ -715,7 +1052,7 @@ fn draw_ui(terminal: &mut Terminal<CrosstermBackend<Stdout>>, app: &App) -> io::
             ]
         } else {
             vec![
-                Constraint::Length(12),
+                Constraint::Length(18),
                 Constraint::Length(18),
                 Constraint::Min(48),
                 Constraint::Length(6),
@@ -748,21 +1085,26 @@ fn draw_ui(terminal: &mut Terminal<CrosstermBackend<Stdout>>, app: &App) -> io::
         }
         frame.render_stateful_widget(table, chunks[1], &mut table_state);
 
-        let status = Paragraph::new(format!(
-            "{}  |  ↑↓ PgUp/PgDn Home/End  / search  f filters  s sort={}  Enter details  r refresh  e export(json)  E export(csv)  q quit",
-            app.status,
-            app.sort_mode.label(),
-        ))
+        let footer = Paragraph::new(vec![
+            Line::from(format!(
+                "↑↓ select  Tab/Shift+Tab page  Ctrl+F search  f filters  s sort={}  Enter details  r refresh  e export(json)  E export(csv)  q quit",
+                app.sort_mode.label(),
+            )),
+            Line::from(app.status.clone()),
+        ])
         .alignment(Alignment::Left)
         .style(Style::default().fg(Color::Yellow));
-        frame.render_widget(status, chunks[2]);
+        frame.render_widget(footer, chunks[2]);
 
         if app.filter_menu {
             let popup = centered_rect(58, 46, area);
             let fields = App::filter_fields();
             let mut lines: Vec<Line> = Vec::new();
             lines.push(Line::from(
-                "Filter panel (h/l change, j/k move, Enter/Esc close)",
+                "Filter panel (Left/Right change, Up/Down move, Enter/Esc close)",
+            ));
+            lines.push(Line::from(
+                "Use time=custom to set start/end dates (YYYY-MM-DD)",
             ));
             lines.push(Line::from(""));
             for (idx, field) in fields.iter().enumerate() {
@@ -785,6 +1127,47 @@ fn draw_ui(terminal: &mut Terminal<CrosstermBackend<Stdout>>, app: &App) -> io::
             frame.render_widget(content, popup);
         }
 
+        if app.time_popup_open {
+            let popup = centered_rect(58, 40, area);
+            let start_style = if app.time_popup_focus == 0 {
+                Style::default().fg(Color::Black).bg(Color::Cyan)
+            } else {
+                Style::default()
+            };
+            let end_style = if app.time_popup_focus == 1 {
+                Style::default().fg(Color::Black).bg(Color::Cyan)
+            } else {
+                Style::default()
+            };
+            let mut lines = vec![
+                Line::from(
+                    "Custom time range (YYYY-MM-DD, last 365 days, max 30 days inclusive)",
+                ),
+                Line::from("Tab/Up/Down move  Enter apply  Esc cancel"),
+                Line::from(""),
+                Line::from(vec![Span::styled(
+                    format!("start: {}", app.time_popup_start_input),
+                    start_style,
+                )]),
+                Line::from(vec![Span::styled(
+                    format!("end:   {}", app.time_popup_end_input),
+                    end_style,
+                )]),
+            ];
+            if !app.time_popup_error.is_empty() {
+                lines.push(Line::from(""));
+                lines.push(Line::from(vec![Span::styled(
+                    app.time_popup_error.clone(),
+                    Style::default().fg(Color::LightRed),
+                )]));
+            }
+            let panel = Paragraph::new(lines)
+                .block(Block::default().borders(Borders::ALL).title("Time Filter: Custom"))
+                .wrap(Wrap { trim: true });
+            frame.render_widget(Clear, popup);
+            frame.render_widget(panel, popup);
+        }
+
         if app.details_open {
             let popup = centered_rect(80, 65, area);
             if let Some(row) = app.view_rows.get(app.selected) {
@@ -798,7 +1181,7 @@ fn draw_ui(terminal: &mut Terminal<CrosstermBackend<Stdout>>, app: &App) -> io::
                 };
                 let details = vec![
                     Line::from(format!("run_id: {}", row.run_id)),
-                    Line::from(format!("ts: {}", row.ts)),
+                    Line::from(format!("time: {}", Local.timestamp_opt(row.ts, 0).single().map(|d| d.format("%m/%d/%y %H:%M:%S").to_string()).unwrap_or_else(|| row.ts.to_string()))),
                     Line::from(format!("actor: {}", App::actor_of(row))),
                     Line::from(format!("label: {}", row.label)),
                     Line::from(format!("tier: {}", row.evidence_tier)),
@@ -834,22 +1217,77 @@ fn handle_key(app: &mut App, key: KeyEvent) -> bool {
         return false;
     }
 
+    if app.time_popup_open {
+        match key.code {
+            KeyCode::Esc => {
+                app.time_popup_open = false;
+                app.time_popup_error.clear();
+            }
+            KeyCode::Enter => app.submit_custom_time_popup(),
+            KeyCode::Tab | KeyCode::Down => {
+                app.time_popup_focus = (app.time_popup_focus + 1) % 2;
+                app.time_popup_error.clear();
+            }
+            KeyCode::Up | KeyCode::BackTab => {
+                app.time_popup_focus = if app.time_popup_focus == 0 { 1 } else { 0 };
+                app.time_popup_error.clear();
+            }
+            KeyCode::Backspace => {
+                let active = if app.time_popup_focus == 0 {
+                    &mut app.time_popup_start_input
+                } else {
+                    &mut app.time_popup_end_input
+                };
+                active.pop();
+                app.time_popup_error.clear();
+            }
+            KeyCode::Char(c) => {
+                if key.modifiers.contains(KeyModifiers::CONTROL) {
+                    return false;
+                }
+                if !(c.is_ascii_digit() || c == '-') {
+                    return false;
+                }
+                let active = if app.time_popup_focus == 0 {
+                    &mut app.time_popup_start_input
+                } else {
+                    &mut app.time_popup_end_input
+                };
+                if active.chars().count() < 10 {
+                    active.push(c);
+                    app.time_popup_error.clear();
+                }
+            }
+            _ => {}
+        }
+        return false;
+    }
+
     if app.filter_menu {
         match key.code {
-            KeyCode::Esc | KeyCode::Enter => {
+            KeyCode::Esc => {
                 app.filter_menu = false;
             }
-            KeyCode::Char('j') | KeyCode::Down => {
+            KeyCode::Enter => {
+                if App::filter_fields()[app.filter_cursor] == "[Reset All]" {
+                    app.filters = Filters::default();
+                    app.semantic_dirty = !app.search.trim().is_empty();
+                    app.refresh_base();
+                    app.apply_view();
+                }
+                app.filter_menu = false;
+            }
+            KeyCode::Down => {
                 let max = App::filter_fields().len().saturating_sub(1);
                 app.filter_cursor = (app.filter_cursor + 1).min(max);
             }
-            KeyCode::Char('k') | KeyCode::Up => {
+            KeyCode::Up => {
                 if app.filter_cursor > 0 {
                     app.filter_cursor -= 1;
                 }
             }
-            KeyCode::Char('h') | KeyCode::Left => app.cycle_filter_value(-1),
-            KeyCode::Char('l') | KeyCode::Right => app.cycle_filter_value(1),
+            KeyCode::Left => app.cycle_filter_value(-1),
+            KeyCode::Right => app.cycle_filter_value(1),
             _ => {}
         }
         return false;
@@ -885,21 +1323,17 @@ fn handle_key(app: &mut App, key: KeyEvent) -> bool {
 
     match key.code {
         KeyCode::Char('q') => return true,
-        KeyCode::Char('/') => app.input_mode = true,
+        KeyCode::Char('f') if key.modifiers.contains(KeyModifiers::CONTROL) => {
+            app.input_mode = true
+        }
         KeyCode::Up => app.select_up(),
         KeyCode::Down => app.select_down(),
-        KeyCode::PageUp => app.select_by(-10),
-        KeyCode::PageDown => {
+        KeyCode::BackTab => app.select_by(-10),
+        KeyCode::Tab => {
             let prev = app.selected;
             app.select_by(10);
             if app.selected == prev && !app.base_rows.is_empty() {
                 app.load_older();
-            }
-        }
-        KeyCode::Home => app.selected = 0,
-        KeyCode::End => {
-            if !app.view_rows.is_empty() {
-                app.selected = app.view_rows.len() - 1;
             }
         }
         KeyCode::Enter => app.details_open = true,
@@ -910,11 +1344,11 @@ fn handle_key(app: &mut App, key: KeyEvent) -> bool {
         KeyCode::Char('r') => app.refresh_base(),
         KeyCode::Char('f') => app.filter_menu = true,
         KeyCode::Char('e') => {
-            let out = format!("provenance_export_{}.json", now_epoch_seconds());
+            let out = default_export_path("json");
             app.export_current("json", &out);
         }
         KeyCode::Char('E') => {
-            let out = format!("provenance_export_{}.csv", now_epoch_seconds());
+            let out = default_export_path("csv");
             app.export_current("csv", &out);
         }
         _ => {}
@@ -1008,8 +1442,13 @@ fn run_export_mode(client: &Client, args: &Args) -> Result<(), String> {
     } else {
         app.base_rows.clone()
     };
-    export_rows(&rows, &args.export, &args.out)?;
-    println!("exported {} rows to {}", rows.len(), args.out);
+    let out_path = if args.out.trim().is_empty() {
+        default_export_path(&args.export)
+    } else {
+        args.out.clone()
+    };
+    export_rows(&rows, &args.export, &out_path)?;
+    println!("exported {} rows to {}", rows.len(), out_path);
     Ok(())
 }
 
@@ -1078,5 +1517,84 @@ fn main() {
         cleanup_terminal();
         eprintln!("{}", err);
         std::process::exit(1);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn last_7d_since_ts_is_correct() {
+        let now_ts = 40 * SECONDS_PER_DAY;
+        let since_ts = time_filter_since_ts(TimeFilterMode::Last7d, None, now_ts);
+        assert_eq!(since_ts, 33 * SECONDS_PER_DAY);
+    }
+
+    #[test]
+    fn last_30d_since_ts_is_correct() {
+        let now_ts = 75 * SECONDS_PER_DAY;
+        let since_ts = time_filter_since_ts(TimeFilterMode::Last30d, None, now_ts);
+        assert_eq!(since_ts, 45 * SECONDS_PER_DAY);
+    }
+
+    #[test]
+    fn custom_range_parse_success() {
+        let today = NaiveDate::from_ymd_opt(2026, 3, 4).expect("valid fixed test date");
+        let (start, end) =
+            validate_custom_time_range("2026-02-10", "2026-02-20", today).expect("valid range");
+        assert_eq!(
+            start,
+            NaiveDate::from_ymd_opt(2026, 2, 10).expect("valid start")
+        );
+        assert_eq!(
+            end,
+            NaiveDate::from_ymd_opt(2026, 2, 20).expect("valid end")
+        );
+        assert!(local_date_midnight_ts(start).is_ok());
+    }
+
+    #[test]
+    fn custom_range_rejects_invalid_format() {
+        let today = NaiveDate::from_ymd_opt(2026, 3, 4).expect("valid fixed test date");
+        let out = validate_custom_time_range("2026/02/10", "2026-02-20", today);
+        assert!(out.is_err());
+    }
+
+    #[test]
+    fn custom_range_rejects_more_than_30_days() {
+        let today = NaiveDate::from_ymd_opt(2026, 3, 4).expect("valid fixed test date");
+        let out = validate_custom_time_range("2026-01-01", "2026-02-01", today);
+        assert!(out.is_err());
+    }
+
+    #[test]
+    fn custom_range_rejects_start_after_end() {
+        let today = NaiveDate::from_ymd_opt(2026, 3, 4).expect("valid fixed test date");
+        let out = validate_custom_time_range("2026-02-11", "2026-02-10", today);
+        assert!(out.is_err());
+    }
+
+    #[test]
+    fn custom_range_rejects_dates_older_than_365_days() {
+        let today = NaiveDate::from_ymd_opt(2026, 3, 4).expect("valid fixed test date");
+        let out = validate_custom_time_range("2025-03-03", "2025-03-04", today);
+        assert!(out.is_err());
+    }
+
+    #[test]
+    fn custom_range_rejects_future_dates() {
+        let today = NaiveDate::from_ymd_opt(2026, 3, 4).expect("valid fixed test date");
+        let out = validate_custom_time_range("2026-03-03", "2026-03-05", today);
+        assert!(out.is_err());
+    }
+
+    #[test]
+    fn row_time_bounds_use_since_and_before() {
+        assert!(ts_within_time_bounds(150, 100, Some(200)));
+        assert!(!ts_within_time_bounds(99, 100, Some(200)));
+        assert!(!ts_within_time_bounds(200, 100, Some(200)));
+        assert!(!ts_within_time_bounds(250, 100, Some(200)));
+        assert!(ts_within_time_bounds(100, 100, None));
     }
 }

@@ -247,6 +247,32 @@ def _file_sha256(path: str) -> str:
     return h.hexdigest()
 
 
+def _parse_semver_tuple(value: str) -> tuple[int, ...]:
+    clean = str(value or "").strip()
+    if not clean:
+        return ()
+    parts = clean.split(".")
+    out: list[int] = []
+    for part in parts:
+        token = "".join(ch for ch in part if ch.isdigit())
+        if token == "":
+            out.append(0)
+        else:
+            out.append(int(token))
+    return tuple(out)
+
+
+def _version_lt(left: str, right: str) -> bool:
+    a = list(_parse_semver_tuple(left))
+    b = list(_parse_semver_tuple(right))
+    max_len = max(len(a), len(b))
+    while len(a) < max_len:
+        a.append(0)
+    while len(b) < max_len:
+        b.append(0)
+    return tuple(a) < tuple(b)
+
+
 def _platform_tag() -> str:
     machine = (os.uname().machine if hasattr(os, "uname") else "").strip().lower()
     if sys.platform == "darwin" and machine in {"arm64", "aarch64"}:
@@ -338,7 +364,29 @@ def _fetch_provenance_tui_manifest() -> dict:
     payload = response.json()
     if not isinstance(payload, dict):
         raise RuntimeError("invalid_manifest_payload")
+    min_cli_version = str(payload.get("min_cli_version", "") or "").strip()
+    if min_cli_version and _version_lt(__version__, min_cli_version):
+        raise RuntimeError(
+            f"cli_too_old: current={__version__} required={min_cli_version}; "
+            "please update/reinstall aiterminal"
+        )
     return payload
+
+
+def _default_export_dir() -> str:
+    home = os.path.expanduser("~")
+    downloads = os.path.join(home, "Downloads")
+    if os.path.isdir(downloads):
+        return downloads
+    return home
+
+
+def _default_export_path(export_format: str) -> str:
+    clean = str(export_format or "").strip().lower() or "json"
+    if clean not in {"json", "csv"}:
+        clean = "json"
+    filename = f"provenance_export_{int(time.time())}.{clean}"
+    return os.path.join(_default_export_dir(), filename)
 
 
 def _resolve_provenance_tui_platform_entry(manifest: dict) -> dict:
@@ -2200,12 +2248,12 @@ def provenance(
 ):
     """Show command provenance attribution history."""
     export_format = str(export or "").strip().lower()
+    out_path = str(out or "").strip()
     if export_format and export_format not in {"json", "csv"}:
         console.print("[red]Invalid --export value. Use json or csv.[/red]")
         raise typer.Exit(code=2)
-    if export_format and not out:
-        console.print("[red]--out is required when using --export.[/red]")
-        raise typer.Exit(code=2)
+    if export_format and not out_path:
+        out_path = _default_export_path(export_format)
 
     if tui:
         try:
@@ -2219,11 +2267,11 @@ def provenance(
                 agent_name=agent_name,
                 provider=provider,
                 export_format=export_format,
-                out_path=out,
+                out_path=out_path,
             )
             if ok:
                 if export_format:
-                    console.print(f"[green]Exported provenance rows to:[/green] {out}")
+                    console.print(f"[green]Exported provenance rows to:[/green] {out_path}")
                 return
             console.print("[yellow]TUI exited with non-zero status, falling back.[/yellow]")
             if export_format:
@@ -2237,9 +2285,9 @@ def provenance(
                     agent_name=agent_name,
                     provider=provider,
                     export_format=export_format,
-                    out_path=out,
+                    out_path=out_path,
                 )
-                console.print(f"[green]Exported provenance rows to:[/green] {out}")
+                console.print(f"[green]Exported provenance rows to:[/green] {out_path}")
                 return
         except Exception as exc:
             console.print(f"[yellow]TUI unavailable, falling back:[/yellow] {exc}")
@@ -2255,9 +2303,9 @@ def provenance(
                         agent_name=agent_name,
                         provider=provider,
                         export_format=export_format,
-                        out_path=out,
+                        out_path=out_path,
                     )
-                    console.print(f"[green]Exported provenance rows to:[/green] {out}")
+                    console.print(f"[green]Exported provenance rows to:[/green] {out_path}")
                     return
                 except Exception as export_exc:
                     console.print(f"[red]Export failed:[/red] {export_exc}")

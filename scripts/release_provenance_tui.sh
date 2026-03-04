@@ -44,6 +44,7 @@ cat > "$MANIFEST_PATH" <<JSON
 {
   "name": "$BINARY_NAME",
   "version": "$VERSION",
+  "min_cli_version": "0.1.0",
   "generated_at": $(date +%s),
   "platforms": {
     "$PLATFORM_KEY": {
