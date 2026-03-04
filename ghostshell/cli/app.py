@@ -2233,7 +2233,7 @@ def auth_status(
 
 @app.command()
 def provenance(
-    limit: int = typer.Option(50, "--limit", min=1, max=500, help="Max rows to return"),
+    limit: int = typer.Option(500, "--limit", min=1, max=500, help="Max rows to return"),
     label: str = typer.Option("", "--label", help="Filter by attribution label"),
     contains: str = typer.Option("", "--contains", help="Filter commands by substring"),
     since_ts: int = typer.Option(0, "--since-ts", help="Only rows with ts >= value"),

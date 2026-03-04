@@ -918,6 +918,38 @@ class SQLiteStateStore:
             rows = conn.execute(sql, tuple(params)).fetchall()
         return [self._decode_command_run_row(row) for row in rows]
 
+    def count_command_runs(
+        self,
+        label: str = "",
+        command_contains: str = "",
+        since_ts: int = 0,
+        tier: str = "",
+        agent: str = "",
+        agent_name: str = "",
+        provider: str = "",
+    ) -> int:
+        where_clause, params = self._command_runs_filter_clause(
+            label=label,
+            command_contains=command_contains,
+            since_ts=since_ts,
+            tier=tier,
+            agent=agent,
+            agent_name=agent_name,
+            provider=provider,
+        )
+        sql = "\n".join(
+            [
+                "SELECT COUNT(*) AS total",
+                "FROM command_runs",
+                *where_clause,
+            ]
+        )
+        with self._lock, self._conn() as conn:
+            row = conn.execute(sql, tuple(params)).fetchone()
+        if row is None:
+            return 0
+        return int(row["total"] or 0)
+
     def list_latest_runs_for_commands(
         self,
         ranked_commands: List[str],

@@ -1727,6 +1727,38 @@ class SuggestionEngine:
             )
             return []
 
+    def count_command_runs(
+        self,
+        label: str = "",
+        command_contains: str = "",
+        since_ts: int = 0,
+        tier: str = "",
+        agent: str = "",
+        agent_name: str = "",
+        provider: str = "",
+    ) -> int:
+        if self.state_store is None:
+            return 0
+        try:
+            return int(
+                self.state_store.count_command_runs(
+                    label=label,
+                    command_contains=command_contains,
+                    since_ts=since_ts,
+                    tier=tier,
+                    agent=agent,
+                    agent_name=agent_name,
+                    provider=provider,
+                )
+                or 0
+            )
+        except Exception as exc:
+            logger.error(
+                "Failed to count command provenance rows: %s",
+                self.privacy_guard.sanitize_for_log(str(exc)),
+            )
+            return 0
+
     def semantic_command_runs(
         self,
         query: str,

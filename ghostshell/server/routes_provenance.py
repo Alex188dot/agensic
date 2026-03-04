@@ -42,10 +42,20 @@ def provenance_runs(
             agent_name=agent_name,
             provider=provider,
         )
+        total_matching = deps.engine.count_command_runs(
+            label=label,
+            command_contains=command_contains,
+            since_ts=since_ts,
+            tier=tier,
+            agent=agent,
+            agent_name=agent_name,
+            provider=provider,
+        )
         return {
             "status": "ok",
             "runs": runs,
             "total": len(runs),
+            "total_matching": int(total_matching or 0),
         }
     finally:
         deps.release_request_slot()
@@ -82,6 +92,7 @@ def provenance_runs_semantic(
             "status": "ok",
             "runs": runs,
             "total": len(runs),
+            "total_matching": len(runs),
         }
     finally:
         deps.release_request_slot()

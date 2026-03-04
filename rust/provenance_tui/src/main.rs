@@ -31,7 +31,7 @@ struct Args {
     #[arg(long, default_value = "")]
     auth_token: String,
 
-    #[arg(long, default_value_t = 50)]
+    #[arg(long, default_value_t = 500)]
     limit: usize,
 
     #[arg(long, default_value = "")]
@@ -93,7 +93,17 @@ struct RunEntry {
 
 #[derive(Debug, Deserialize)]
 struct RunsResponse {
+    #[serde(default)]
     runs: Vec<RunEntry>,
+    #[serde(default)]
+    total: usize,
+    #[serde(default)]
+    total_matching: usize,
+}
+
+struct RunsPage {
+    rows: Vec<RunEntry>,
+    total_matching: usize,
 }
 
 const SECONDS_PER_DAY: i64 = 24 * 60 * 60;
@@ -132,6 +142,7 @@ impl SortMode {
 enum TimeFilterMode {
     Last7d,
     Last30d,
+    Last365d,
     Custom,
 }
 
@@ -140,6 +151,7 @@ impl TimeFilterMode {
         match self {
             Self::Last7d => "last_7d",
             Self::Last30d => "last_30d",
+            Self::Last365d => "last_365d",
             Self::Custom => "custom",
         }
     }
@@ -148,6 +160,7 @@ impl TimeFilterMode {
         match value {
             "last_7d" => Some(Self::Last7d),
             "last_30d" => Some(Self::Last30d),
+            "last_365d" => Some(Self::Last365d),
             "custom" => Some(Self::Custom),
             _ => None,
         }
@@ -156,7 +169,7 @@ impl TimeFilterMode {
 
 impl Default for TimeFilterMode {
     fn default() -> Self {
-        Self::Last7d
+        Self::Last365d
     }
 }
 
@@ -182,7 +195,7 @@ impl Default for Filters {
             agent: String::new(),
             provider: String::new(),
             exit: String::new(),
-            time_mode: TimeFilterMode::Last7d,
+            time_mode: TimeFilterMode::Last365d,
             custom_start: String::new(),
             custom_end: String::new(),
             custom_since_ts: None,
@@ -204,6 +217,9 @@ struct App {
     filter_menu: bool,
     filter_cursor: usize,
     selected: usize,
+    page: usize,
+    has_more_rows: bool,
+    total_matching: usize,
     status: String,
     last_edit: Instant,
     semantic_dirty: bool,
@@ -214,6 +230,8 @@ struct App {
     time_popup_end_input: String,
     time_popup_focus: usize,
     time_popup_error: String,
+    time_popup_start_replace_on_type: bool,
+    time_popup_end_replace_on_type: bool,
 }
 
 impl App {
@@ -236,6 +254,9 @@ impl App {
             filter_menu: false,
             filter_cursor: 0,
             selected: 0,
+            page: 0,
+            has_more_rows: true,
+            total_matching: 0,
             status: "Ready".to_string(),
             last_edit: Instant::now(),
             semantic_dirty: false,
@@ -246,6 +267,8 @@ impl App {
             time_popup_end_input: String::new(),
             time_popup_focus: 0,
             time_popup_error: String::new(),
+            time_popup_start_replace_on_type: false,
+            time_popup_end_replace_on_type: false,
         }
     }
 
@@ -282,13 +305,7 @@ impl App {
             return true;
         }
         let q = query.to_lowercase();
-        if row.command.to_lowercase().contains(&q) {
-            return true;
-        }
-        if Self::actor_of(row).to_lowercase().contains(&q) {
-            return true;
-        }
-        row.label.to_lowercase().contains(&q)
+        row.command.to_lowercase().contains(&q)
     }
 
     fn effective_since_ts(&self, now_ts: i64) -> i64 {
@@ -332,13 +349,7 @@ impl App {
     }
 
     fn apply_view(&mut self) {
-        let source: Vec<RunEntry> = if self.search.trim().is_empty() {
-            self.base_rows.clone()
-        } else if let Some(rows) = &self.semantic_rows {
-            rows.clone()
-        } else {
-            self.base_rows.clone()
-        };
+        let source: Vec<RunEntry> = self.base_rows.clone();
 
         let query = self.search.trim().to_string();
         let now_ts = now_epoch_seconds();
@@ -370,47 +381,51 @@ impl App {
         });
 
         self.view_rows = out;
-        if self.view_rows.is_empty() {
+        let page_count = self.page_count_loaded();
+        if page_count == 0 {
+            self.page = 0;
             self.selected = 0;
-        } else if self.selected >= self.view_rows.len() {
-            self.selected = self.view_rows.len() - 1;
+            return;
+        }
+        if self.page >= page_count {
+            self.page = page_count - 1;
+        }
+        let page_len = self.current_page_len();
+        if page_len == 0 {
+            self.selected = 0;
+        } else if self.selected >= page_len {
+            self.selected = page_len - 1;
         }
     }
 
     fn set_search(&mut self, value: String) {
         self.search = value;
         self.last_edit = Instant::now();
-        self.semantic_dirty = !self.search.trim().is_empty();
+        self.semantic_dirty = true;
+        self.page = 0;
+        self.selected = 0;
         if self.search.trim().is_empty() {
             self.semantic_rows = None;
         }
         self.apply_view();
     }
 
-    fn fetch_runs_page(
-        &self,
-        before_ts: i64,
-        before_run_id: &str,
-    ) -> Result<Vec<RunEntry>, String> {
+    fn fetch_runs_page(&self, before_ts: i64, before_run_id: &str) -> Result<RunsPage, String> {
         let now_ts = now_epoch_seconds();
         let effective_since_ts = self.effective_since_ts(now_ts);
-        let mut effective_before_ts = if before_ts > 0 { Some(before_ts) } else { None };
-        let mut effective_before_run_id = before_run_id.trim().to_string();
-        if let Some(time_before_ts) = self.effective_before_ts() {
-            if let Some(existing_before_ts) = effective_before_ts {
-                if existing_before_ts > time_before_ts {
-                    effective_before_ts = Some(time_before_ts);
-                    effective_before_run_id.clear();
-                }
-            } else {
-                effective_before_ts = Some(time_before_ts);
-            }
-        }
+        let effective_before_ts = if before_ts > 0 { Some(before_ts) } else { None };
+        let effective_before_run_id = before_run_id.trim().to_string();
 
         let mut params: Vec<(String, String)> = vec![
             ("limit".to_string(), self.args.limit.to_string()),
             ("since_ts".to_string(), effective_since_ts.to_string()),
         ];
+        if !self.search.trim().is_empty() {
+            params.push((
+                "command_contains".to_string(),
+                self.search.trim().to_string(),
+            ));
+        }
         if let Some(value) = effective_before_ts {
             params.push(("before_ts".to_string(), value.to_string()));
         }
@@ -450,69 +465,84 @@ impl App {
         let payload: RunsResponse = response
             .json()
             .map_err(|e| format!("invalid /provenance/runs response: {}", e))?;
-        Ok(payload.runs)
-    }
-
-    fn fetch_semantic(&self, query: &str) -> Result<Vec<RunEntry>, String> {
-        let now_ts = now_epoch_seconds();
-        let effective_since_ts = self.effective_since_ts(now_ts);
-        let mut params: Vec<(String, String)> = vec![
-            ("query".to_string(), query.to_string()),
-            ("limit".to_string(), self.args.limit.to_string()),
-            ("since_ts".to_string(), effective_since_ts.to_string()),
-        ];
-        if !self.filters.label.is_empty() {
-            params.push(("label".to_string(), self.filters.label.clone()));
-        }
-        if !self.filters.tier.is_empty() {
-            params.push(("tier".to_string(), self.filters.tier.clone()));
-        }
-        if !self.filters.agent.is_empty() {
-            params.push(("agent".to_string(), self.filters.agent.clone()));
-        }
-        if !self.args.agent_name.trim().is_empty() {
-            params.push(("agent_name".to_string(), self.args.agent_name.clone()));
-        }
-        if !self.filters.provider.is_empty() {
-            params.push(("provider".to_string(), self.filters.provider.clone()));
-        }
-
-        let url = format!(
-            "{}/provenance/runs/semantic",
-            self.args.daemon_url.trim_end_matches('/')
-        );
-        let mut req = self.client.get(url).query(&params);
-        if !self.auth_token.trim().is_empty() {
-            req = req.header("Authorization", format!("Bearer {}", self.auth_token));
-        }
-        let response = req
-            .send()
-            .map_err(|e| format!("semantic request failed: {}", e))?;
-        if !response.status().is_success() {
-            let status = response.status();
-            let body = response.text().unwrap_or_default();
-            return Err(format!("semantic endpoint {}: {}", status, body));
-        }
-        let payload: RunsResponse = response
-            .json()
-            .map_err(|e| format!("invalid /provenance/runs/semantic response: {}", e))?;
-        Ok(payload.runs)
+        let total_matching = if payload.total_matching > 0 {
+            payload.total_matching
+        } else if payload.total > 0 {
+            payload.total
+        } else {
+            payload.runs.len()
+        };
+        Ok(RunsPage {
+            rows: payload.runs,
+            total_matching,
+        })
     }
 
     fn refresh_base(&mut self) {
         match self.fetch_runs_page(0, "") {
-            Ok(rows) => {
-                self.base_rows = rows;
+            Ok(page) => {
+                let page_rows_len = page.rows.len();
+                self.base_rows = page.rows;
+                self.total_matching = page.total_matching;
+                self.has_more_rows =
+                    page_rows_len >= self.args.limit || self.base_rows.len() < self.total_matching;
+                self.page = 0;
+                self.selected = 0;
                 if self.search.trim().is_empty() {
                     self.semantic_rows = None;
                 }
-                self.status = format!("Loaded {} rows", self.base_rows.len());
+                self.status = format!(
+                    "Loaded {} rows (showing {} total matches)",
+                    self.base_rows.len(),
+                    self.total_matching
+                );
             }
             Err(err) => {
                 self.status = format!("Load failed: {}", err);
+                self.total_matching = 0;
+                self.has_more_rows = false;
             }
         }
         self.apply_view();
+        self.hydrate_custom_range_if_empty();
+    }
+
+    fn hydrate_custom_range_if_empty(&mut self) {
+        if self.filters.time_mode != TimeFilterMode::Custom {
+            return;
+        }
+        if !self.view_rows.is_empty() {
+            return;
+        }
+        if self.base_rows.is_empty() {
+            return;
+        }
+
+        let since_ts = self.effective_since_ts(now_epoch_seconds());
+        let mut attempts = 0usize;
+        while self.view_rows.is_empty() && attempts < 12 {
+            let Some(last) = self.base_rows.last() else {
+                break;
+            };
+            if last.ts < since_ts {
+                break;
+            }
+            let before_len = self.base_rows.len();
+            self.load_older();
+            if self.base_rows.len() == before_len {
+                break;
+            }
+            attempts += 1;
+        }
+        if self.view_rows.is_empty()
+            && !self.filters.custom_start.is_empty()
+            && !self.filters.custom_end.is_empty()
+        {
+            self.status = format!(
+                "No rows in custom range {}..{}",
+                self.filters.custom_start, self.filters.custom_end
+            );
+        }
     }
 
     fn load_older(&mut self) {
@@ -520,15 +550,18 @@ impl App {
             return;
         };
         match self.fetch_runs_page(last.ts, &last.run_id) {
-            Ok(rows) => {
-                if rows.is_empty() {
+            Ok(page) => {
+                let page_rows_len = page.rows.len();
+                self.total_matching = page.total_matching;
+                if page.rows.is_empty() {
+                    self.has_more_rows = false;
                     self.status = "No older rows".to_string();
                     return;
                 }
                 let mut seen: BTreeSet<String> =
                     self.base_rows.iter().map(|r| r.run_id.clone()).collect();
                 let mut added = 0usize;
-                for row in rows {
+                for row in page.rows {
                     if seen.contains(&row.run_id) {
                         continue;
                     }
@@ -536,6 +569,8 @@ impl App {
                     self.base_rows.push(row);
                     added += 1;
                 }
+                self.has_more_rows =
+                    page_rows_len >= self.args.limit || self.base_rows.len() < self.total_matching;
                 self.status = format!("Loaded {} older rows", added);
             }
             Err(err) => {
@@ -546,24 +581,14 @@ impl App {
     }
 
     fn tick(&mut self) {
-        if self.search.trim().is_empty() || !self.semantic_dirty {
+        if !self.semantic_dirty {
             return;
         }
         if self.last_edit.elapsed() < Duration::from_millis(180) {
             return;
         }
-        let query = self.search.trim().to_string();
-        match self.fetch_semantic(&query) {
-            Ok(rows) => {
-                self.semantic_rows = Some(rows);
-                self.status = format!("Semantic results for '{}'", query);
-            }
-            Err(err) => {
-                self.status = format!("Semantic fallback to local filter: {}", err);
-            }
-        }
+        self.refresh_base();
         self.semantic_dirty = false;
-        self.apply_view();
     }
 
     fn export_current(&mut self, format: &str, out_path: &str) {
@@ -576,14 +601,15 @@ impl App {
     }
 
     fn select_down(&mut self) {
-        if self.view_rows.is_empty() {
+        let page_len = self.current_page_len();
+        if page_len == 0 {
             return;
         }
-        self.selected = (self.selected + 1).min(self.view_rows.len() - 1);
+        self.selected = (self.selected + 1).min(page_len - 1);
     }
 
     fn select_up(&mut self) {
-        if self.view_rows.is_empty() {
+        if self.current_page_len() == 0 {
             return;
         }
         if self.selected > 0 {
@@ -591,14 +617,74 @@ impl App {
         }
     }
 
-    fn select_by(&mut self, delta: isize) {
+    fn page_size(&self) -> usize {
+        self.args.limit.max(1)
+    }
+
+    fn page_count_loaded(&self) -> usize {
         if self.view_rows.is_empty() {
+            0
+        } else {
+            self.view_rows.len().div_ceil(self.page_size())
+        }
+    }
+
+    fn page_count_total(&self) -> usize {
+        if self.total_matching == 0 {
+            self.page_count_loaded().max(1)
+        } else {
+            self.total_matching.div_ceil(self.page_size()).max(1)
+        }
+    }
+
+    fn current_page_bounds(&self) -> (usize, usize) {
+        let start = self.page * self.page_size();
+        let end = (start + self.page_size()).min(self.view_rows.len());
+        (start, end)
+    }
+
+    fn current_page_len(&self) -> usize {
+        let (start, end) = self.current_page_bounds();
+        end.saturating_sub(start)
+    }
+
+    fn next_page(&mut self) {
+        let loaded_pages = self.page_count_loaded();
+        if loaded_pages > 0 && self.page + 1 < loaded_pages {
+            self.page += 1;
             self.selected = 0;
             return;
         }
-        let current = self.selected as isize;
-        let next = (current + delta).clamp(0, (self.view_rows.len() as isize) - 1);
-        self.selected = next as usize;
+        if self.has_more_rows {
+            let before_len = self.base_rows.len();
+            self.load_older();
+            if self.base_rows.len() > before_len {
+                let refreshed_pages = self.page_count_loaded();
+                if self.page + 1 < refreshed_pages {
+                    self.page += 1;
+                    self.selected = 0;
+                }
+            }
+            return;
+        }
+        self.status = "Already on last page".to_string();
+    }
+
+    fn previous_page(&mut self) {
+        if self.page == 0 {
+            self.status = "Already on first page".to_string();
+            return;
+        }
+        self.page -= 1;
+        self.selected = 0;
+    }
+
+    fn selected_global_index(&self) -> Option<usize> {
+        let (start, end) = self.current_page_bounds();
+        if start >= end {
+            return None;
+        }
+        Some((start + self.selected).min(end - 1))
     }
 
     fn filter_fields() -> [&'static str; 7] {
@@ -623,6 +709,7 @@ impl App {
             "time" => vec![
                 TimeFilterMode::Last7d.as_str().to_string(),
                 TimeFilterMode::Last30d.as_str().to_string(),
+                TimeFilterMode::Last365d.as_str().to_string(),
                 TimeFilterMode::Custom.as_str().to_string(),
             ],
             "[Reset All]" => vec!["<Press Left/Right/Enter to Reset>".to_string()],
@@ -634,6 +721,7 @@ impl App {
         match self.filters.time_mode {
             TimeFilterMode::Last7d => TimeFilterMode::Last7d.as_str().to_string(),
             TimeFilterMode::Last30d => TimeFilterMode::Last30d.as_str().to_string(),
+            TimeFilterMode::Last365d => TimeFilterMode::Last365d.as_str().to_string(),
             TimeFilterMode::Custom => {
                 if self.filters.custom_start.is_empty() || self.filters.custom_end.is_empty() {
                     TimeFilterMode::Custom.as_str().to_string()
@@ -674,6 +762,8 @@ impl App {
         self.filter_menu = false;
         self.time_popup_focus = 0;
         self.time_popup_error.clear();
+        self.time_popup_start_replace_on_type = true;
+        self.time_popup_end_replace_on_type = true;
         if !self.filters.custom_start.is_empty() && !self.filters.custom_end.is_empty() {
             self.time_popup_start_input = self.filters.custom_start.clone();
             self.time_popup_end_input = self.filters.custom_end.clone();
@@ -722,6 +812,8 @@ impl App {
                 self.filters.custom_before_ts = Some(before_ts);
                 self.time_popup_open = false;
                 self.time_popup_error.clear();
+                self.time_popup_start_replace_on_type = false;
+                self.time_popup_end_replace_on_type = false;
                 self.status = format!(
                     "Time filter set to custom {}..{}",
                     self.filters.custom_start, self.filters.custom_end
@@ -747,6 +839,7 @@ impl App {
             "time" => match TimeFilterMode::from_str(value.as_str()) {
                 Some(TimeFilterMode::Last7d) => self.apply_time_preset(TimeFilterMode::Last7d),
                 Some(TimeFilterMode::Last30d) => self.apply_time_preset(TimeFilterMode::Last30d),
+                Some(TimeFilterMode::Last365d) => self.apply_time_preset(TimeFilterMode::Last365d),
                 Some(TimeFilterMode::Custom) => {
                     should_refresh = false;
                     self.open_custom_time_popup();
@@ -811,6 +904,9 @@ fn time_filter_since_ts(mode: TimeFilterMode, custom_since_ts: Option<i64>, now_
     match mode {
         TimeFilterMode::Last7d => bounded_now_ts.saturating_sub(7 * SECONDS_PER_DAY),
         TimeFilterMode::Last30d => bounded_now_ts.saturating_sub(30 * SECONDS_PER_DAY),
+        TimeFilterMode::Last365d => {
+            bounded_now_ts.saturating_sub(PROVENANCE_MAX_LOOKBACK_DAYS * SECONDS_PER_DAY)
+        }
         TimeFilterMode::Custom => {
             custom_since_ts.unwrap_or_else(|| bounded_now_ts.saturating_sub(7 * SECONDS_PER_DAY))
         }
@@ -840,10 +936,12 @@ fn validate_custom_time_range(
 ) -> Result<(NaiveDate, NaiveDate), String> {
     let start_trimmed = start_input.trim();
     let end_trimmed = end_input.trim();
-    let start_date = NaiveDate::parse_from_str(start_trimmed, "%Y-%m-%d")
-        .map_err(|_| "Start date must be in YYYY-MM-DD format".to_string())?;
-    let end_date = NaiveDate::parse_from_str(end_trimmed, "%Y-%m-%d")
-        .map_err(|_| "End date must be in YYYY-MM-DD format".to_string())?;
+    let start_date = parse_custom_date(start_trimmed).ok_or_else(|| {
+        "Start date must be YYYY-MM-DD, YYYY/MM/DD, DD-MM-YYYY, or DD/MM/YYYY".to_string()
+    })?;
+    let end_date = parse_custom_date(end_trimmed).ok_or_else(|| {
+        "End date must be YYYY-MM-DD, YYYY/MM/DD, DD-MM-YYYY, or DD/MM/YYYY".to_string()
+    })?;
     if start_date > end_date {
         return Err("Start date must be before or equal to end date".to_string());
     }
@@ -867,6 +965,16 @@ fn validate_custom_time_range(
     Ok((start_date, end_date))
 }
 
+fn parse_custom_date(input: &str) -> Option<NaiveDate> {
+    let formats = ["%Y-%m-%d", "%Y/%m/%d", "%d-%m-%Y", "%d/%m/%Y"];
+    for format in formats {
+        if let Ok(value) = NaiveDate::parse_from_str(input, format) {
+            return Some(value);
+        }
+    }
+    None
+}
+
 fn ts_within_time_bounds(ts: i64, since_ts: i64, before_ts: Option<i64>) -> bool {
     if ts < since_ts {
         return false;
@@ -884,6 +992,17 @@ fn now_epoch_seconds() -> i64 {
         return 0;
     };
     duration.as_secs() as i64
+}
+
+fn blink_cursor() -> &'static str {
+    let Ok(duration) = SystemTime::now().duration_since(UNIX_EPOCH) else {
+        return "|";
+    };
+    if (duration.as_millis() / 500) % 2 == 0 {
+        "|"
+    } else {
+        " "
+    }
 }
 
 fn default_export_dir() -> String {
@@ -951,11 +1070,17 @@ fn draw_ui(terminal: &mut Terminal<CrosstermBackend<Stdout>>, app: &App) -> io::
 
         let mode = if app.search.trim().is_empty() {
             "LOCAL"
-        } else if app.semantic_rows.is_some() {
-            "SEMANTIC"
         } else {
-            "LOCAL->SEMANTIC"
+            "DB_FILTERED"
         };
+        let shown_rows = app.current_page_len();
+        let total_rows = app.total_matching.max(app.view_rows.len());
+        let current_page = if app.page_count_loaded() == 0 {
+            1
+        } else {
+            app.page + 1
+        };
+        let total_pages = app.page_count_total();
         let top = Paragraph::new(Line::from(vec![
             Span::styled(
                 "Search ",
@@ -963,15 +1088,17 @@ fn draw_ui(terminal: &mut Terminal<CrosstermBackend<Stdout>>, app: &App) -> io::
                     .fg(Color::Cyan)
                     .add_modifier(Modifier::BOLD),
             ),
-            Span::raw(if app.search.is_empty() {
-                "(type Ctrl+F)"
+            Span::raw(if app.input_mode {
+                format!("{}{}", app.search, blink_cursor())
+            } else if app.search.is_empty() {
+                "(type Ctrl+F)".to_string()
             } else {
-                app.search.as_str()
+                app.search.clone()
             }),
             Span::raw("    "),
             Span::styled(format!("mode={} ", mode), Style::default().fg(Color::Yellow)),
             Span::raw(format!(
-                "filters[label={}, tier={}, agent={}, provider={}, exit={}, time={}] rows={}",
+                "filters[label={}, tier={}, agent={}, provider={}, exit={}, time={}] rows={}/{} (page {}/{})",
                 if app.filters.label.is_empty() {
                     "*"
                 } else {
@@ -998,7 +1125,10 @@ fn draw_ui(terminal: &mut Terminal<CrosstermBackend<Stdout>>, app: &App) -> io::
                     app.filters.exit.as_str()
                 },
                 app.time_filter_display_value(),
-                app.view_rows.len(),
+                shown_rows,
+                total_rows,
+                current_page,
+                total_pages,
             )),
         ]))
         .block(Block::default().borders(Borders::ALL).title("GhostShell Provenance"));
@@ -1008,12 +1138,18 @@ fn draw_ui(terminal: &mut Terminal<CrosstermBackend<Stdout>>, app: &App) -> io::
         let header_style = Style::default()
             .fg(Color::Cyan)
             .add_modifier(Modifier::BOLD);
-        let rows: Vec<Row> = app
-            .view_rows
+        let (page_start, page_end) = app.current_page_bounds();
+        let page_rows = if page_start < page_end {
+            &app.view_rows[page_start..page_end]
+        } else {
+            &[]
+        };
+        let rows: Vec<Row> = page_rows
             .iter()
             .enumerate()
-            .map(|(idx, row)| {
-                let base_style = if idx % 2 == 0 {
+            .map(|(page_idx, row)| {
+                let global_idx = page_start + page_idx;
+                let base_style = if global_idx % 2 == 0 {
                     Style::default().fg(Color::DarkGray)
                 } else {
                     Style::default().fg(Color::White)
@@ -1023,14 +1159,16 @@ fn draw_ui(terminal: &mut Terminal<CrosstermBackend<Stdout>>, app: &App) -> io::
                     Some(date) => date.format("%m/%d/%y %H:%M:%S").to_string(),
                     None => row.ts.to_string(),
                 };
+                let command_text = if compact {
+                    truncate_cell(&row.command, 40)
+                } else {
+                    truncate_cell(&row.command, 80)
+                };
                 let mut cells = vec![
                     Cell::from(time_str),
                     Cell::from(truncate_cell(&App::actor_of(row), 18)),
-                    Cell::from(if compact {
-                        truncate_cell(&row.command, 40)
-                    } else {
-                        truncate_cell(&row.command, 80)
-                    }),
+                    Cell::from(command_text)
+                        .style(Style::default().fg(Color::Rgb(255, 165, 0))),
                     Cell::from(App::format_exit(row.exit_code)),
                     Cell::from(App::format_duration(row.duration_ms)),
                 ];
@@ -1080,14 +1218,14 @@ fn draw_ui(terminal: &mut Terminal<CrosstermBackend<Stdout>>, app: &App) -> io::
             .highlight_symbol(">> ");
 
         let mut table_state = TableState::default();
-        if !app.view_rows.is_empty() {
+        if !page_rows.is_empty() {
             table_state.select(Some(app.selected));
         }
         frame.render_stateful_widget(table, chunks[1], &mut table_state);
 
         let footer = Paragraph::new(vec![
             Line::from(format!(
-                "↑↓ select  Tab/Shift+Tab page  Ctrl+F search  f filters  s sort={}  Enter details  r refresh  e export(json)  E export(csv)  q quit",
+                "↑↓ select  Tab/Shift+Tab page  Ctrl+F search  f filters  s sort={}  Enter details  r refresh  e export(json)  E export(csv)  Esc quit",
                 app.sort_mode.label(),
             )),
             Line::from(app.status.clone()),
@@ -1144,6 +1282,7 @@ fn draw_ui(terminal: &mut Terminal<CrosstermBackend<Stdout>>, app: &App) -> io::
                     "Custom time range (YYYY-MM-DD, last 365 days, max 30 days inclusive)",
                 ),
                 Line::from("Tab/Up/Down move  Enter apply  Esc cancel"),
+                Line::from("Typing overwrites current field value"),
                 Line::from(""),
                 Line::from(vec![Span::styled(
                     format!("start: {}", app.time_popup_start_input),
@@ -1170,7 +1309,8 @@ fn draw_ui(terminal: &mut Terminal<CrosstermBackend<Stdout>>, app: &App) -> io::
 
         if app.details_open {
             let popup = centered_rect(80, 65, area);
-            if let Some(row) = app.view_rows.get(app.selected) {
+            if let Some(global_idx) = app.selected_global_index() {
+                if let Some(row) = app.view_rows.get(global_idx) {
                 let payload_summary = match &row.payload {
                     Value::Object(_) | Value::Array(_) => {
                         let text = serde_json::to_string_pretty(&row.payload)
@@ -1206,6 +1346,7 @@ fn draw_ui(terminal: &mut Terminal<CrosstermBackend<Stdout>>, app: &App) -> io::
                     .wrap(Wrap { trim: true });
                 frame.render_widget(Clear, popup);
                 frame.render_widget(panel, popup);
+                }
             }
         }
     })?;
@@ -1222,22 +1363,41 @@ fn handle_key(app: &mut App, key: KeyEvent) -> bool {
             KeyCode::Esc => {
                 app.time_popup_open = false;
                 app.time_popup_error.clear();
+                app.time_popup_start_replace_on_type = false;
+                app.time_popup_end_replace_on_type = false;
             }
             KeyCode::Enter => app.submit_custom_time_popup(),
             KeyCode::Tab | KeyCode::Down => {
                 app.time_popup_focus = (app.time_popup_focus + 1) % 2;
+                if app.time_popup_focus == 0 {
+                    app.time_popup_start_replace_on_type = true;
+                } else {
+                    app.time_popup_end_replace_on_type = true;
+                }
                 app.time_popup_error.clear();
             }
             KeyCode::Up | KeyCode::BackTab => {
                 app.time_popup_focus = if app.time_popup_focus == 0 { 1 } else { 0 };
+                if app.time_popup_focus == 0 {
+                    app.time_popup_start_replace_on_type = true;
+                } else {
+                    app.time_popup_end_replace_on_type = true;
+                }
                 app.time_popup_error.clear();
             }
             KeyCode::Backspace => {
-                let active = if app.time_popup_focus == 0 {
-                    &mut app.time_popup_start_input
+                let (active, replace_on_type) = if app.time_popup_focus == 0 {
+                    (
+                        &mut app.time_popup_start_input,
+                        &mut app.time_popup_start_replace_on_type,
+                    )
                 } else {
-                    &mut app.time_popup_end_input
+                    (
+                        &mut app.time_popup_end_input,
+                        &mut app.time_popup_end_replace_on_type,
+                    )
                 };
+                *replace_on_type = false;
                 active.pop();
                 app.time_popup_error.clear();
             }
@@ -1248,11 +1408,21 @@ fn handle_key(app: &mut App, key: KeyEvent) -> bool {
                 if !(c.is_ascii_digit() || c == '-') {
                     return false;
                 }
-                let active = if app.time_popup_focus == 0 {
-                    &mut app.time_popup_start_input
+                let (active, replace_on_type) = if app.time_popup_focus == 0 {
+                    (
+                        &mut app.time_popup_start_input,
+                        &mut app.time_popup_start_replace_on_type,
+                    )
                 } else {
-                    &mut app.time_popup_end_input
+                    (
+                        &mut app.time_popup_end_input,
+                        &mut app.time_popup_end_replace_on_type,
+                    )
                 };
+                if *replace_on_type {
+                    active.clear();
+                    *replace_on_type = false;
+                }
                 if active.chars().count() < 10 {
                     active.push(c);
                     app.time_popup_error.clear();
@@ -1322,21 +1492,19 @@ fn handle_key(app: &mut App, key: KeyEvent) -> bool {
     }
 
     match key.code {
-        KeyCode::Char('q') => return true,
+        KeyCode::Esc => return true,
         KeyCode::Char('f') if key.modifiers.contains(KeyModifiers::CONTROL) => {
             app.input_mode = true
         }
         KeyCode::Up => app.select_up(),
         KeyCode::Down => app.select_down(),
-        KeyCode::BackTab => app.select_by(-10),
-        KeyCode::Tab => {
-            let prev = app.selected;
-            app.select_by(10);
-            if app.selected == prev && !app.base_rows.is_empty() {
-                app.load_older();
+        KeyCode::BackTab => app.previous_page(),
+        KeyCode::Tab => app.next_page(),
+        KeyCode::Enter => {
+            if app.selected_global_index().is_some() {
+                app.details_open = true;
             }
         }
-        KeyCode::Enter => app.details_open = true,
         KeyCode::Char('s') => {
             app.sort_mode = app.sort_mode.next();
             app.apply_view();
@@ -1435,13 +1603,9 @@ fn export_rows(rows: &[RunEntry], export_format: &str, out_path: &str) -> Result
 
 fn run_export_mode(client: &Client, args: &Args) -> Result<(), String> {
     let mut app = App::new(client.clone(), args.clone());
-    app.search = args.contains.clone();
+    app.search = args.contains.trim().to_string();
     app.refresh_base();
-    let rows = if !args.contains.trim().is_empty() {
-        app.fetch_semantic(args.contains.trim())?
-    } else {
-        app.base_rows.clone()
-    };
+    let rows = app.view_rows.clone();
     let out_path = if args.out.trim().is_empty() {
         default_export_path(&args.export)
     } else {
@@ -1454,9 +1618,12 @@ fn run_export_mode(client: &Client, args: &Args) -> Result<(), String> {
 
 fn run_interactive(client: &Client, args: &Args) -> Result<(), String> {
     let mut app = App::new(client.clone(), args.clone());
-    app.refresh_base();
     if !args.contains.trim().is_empty() {
         app.set_search(args.contains.clone());
+        app.refresh_base();
+        app.semantic_dirty = false;
+    } else {
+        app.refresh_base();
     }
 
     enable_raw_mode().map_err(|e| format!("enable raw mode failed: {}", e))?;
@@ -1539,6 +1706,13 @@ mod tests {
     }
 
     #[test]
+    fn last_365d_since_ts_is_correct() {
+        let now_ts = 500 * SECONDS_PER_DAY;
+        let since_ts = time_filter_since_ts(TimeFilterMode::Last365d, None, now_ts);
+        assert_eq!(since_ts, 135 * SECONDS_PER_DAY);
+    }
+
+    #[test]
     fn custom_range_parse_success() {
         let today = NaiveDate::from_ymd_opt(2026, 3, 4).expect("valid fixed test date");
         let (start, end) =
@@ -1557,8 +1731,20 @@ mod tests {
     #[test]
     fn custom_range_rejects_invalid_format() {
         let today = NaiveDate::from_ymd_opt(2026, 3, 4).expect("valid fixed test date");
-        let out = validate_custom_time_range("2026/02/10", "2026-02-20", today);
+        let out = validate_custom_time_range("2026.02.10", "2026-02-20", today);
         assert!(out.is_err());
+    }
+
+    #[test]
+    fn custom_range_accepts_day_first_format() {
+        let today = NaiveDate::from_ymd_opt(2026, 3, 4).expect("valid fixed test date");
+        let (start, end) =
+            validate_custom_time_range("01-03-2026", "04-03-2026", today).expect("valid range");
+        assert_eq!(
+            start,
+            NaiveDate::from_ymd_opt(2026, 3, 1).expect("valid start")
+        );
+        assert_eq!(end, NaiveDate::from_ymd_opt(2026, 3, 4).expect("valid end"));
     }
 
     #[test]

@@ -235,6 +235,7 @@ class ProvenanceRunsResponse(BaseModel):
     status: str
     runs: list[ProvenanceRunEntry] = Field(default_factory=list)
     total: int = 0
+    total_matching: int = 0
 
 
 class ProvenanceRegistrySummaryResponse(BaseModel):
