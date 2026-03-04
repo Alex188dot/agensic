@@ -37,6 +37,7 @@ typeset -g GHOSTSHELL_TIMER_FD=""
 typeset -g GHOSTSHELL_TIMER_PID=""
 typeset -g GHOSTSHELL_LAST_BUFFER=""
 typeset -g GHOSTSHELL_LAST_EXECUTED_CMD=""
+typeset -g GHOSTSHELL_LAST_EXECUTED_STARTED_AT_MS=0
 typeset -g GHOSTSHELL_LINE_LAST_ACTION=""
 typeset -g GHOSTSHELL_LINE_ACCEPTED_ORIGIN=""
 typeset -g GHOSTSHELL_LINE_ACCEPTED_MODE=""
@@ -458,6 +459,31 @@ _ghostshell_now_epoch() {
         now="0"
     fi
     print -r -- "$now"
+}
+
+_ghostshell_disable_mouse_reporting() {
+    if [[ ! -t 1 ]]; then
+        return
+    fi
+    # Defensive reset for xterm mouse tracking modes to avoid leaked escape streams.
+    printf '\033[?1000l\033[?1002l\033[?1003l\033[?1006l\033[?1015l' > /dev/tty 2>/dev/null || true
+}
+
+_ghostshell_now_epoch_ms() {
+    if [[ -z "${EPOCHREALTIME:-}" ]]; then
+        zmodload zsh/datetime 2>/dev/null || true
+    fi
+    if [[ -n "${EPOCHREALTIME:-}" ]]; then
+        local now_ms="$(( EPOCHREALTIME * 1000 ))"
+        print -r -- "${now_ms%.*}"
+        return
+    fi
+    local now
+    now="$(_ghostshell_now_epoch)"
+    if [[ "$now" != <-> ]]; then
+        now="0"
+    fi
+    print -r -- "$(( now * 1000 ))"
 }
 
 _ghostshell_log_fetch_error() {
@@ -1690,6 +1716,7 @@ _ghostshell_log_command() {
     local command="$1"
     local exit_code="$2"
     local source="${3:-runtime}"
+    local duration_ms="${4:-}"
     local log_cwd="$PWD"
     local log_shell_pid="$$"
     local log_last_action="$GHOSTSHELL_PENDING_LAST_ACTION"
@@ -1718,6 +1745,7 @@ _ghostshell_log_command() {
     json_data="$(
         GHOSTSHELL_LOG_COMMAND="$command" \
         GHOSTSHELL_LOG_EXIT="$exit_code" \
+        GHOSTSHELL_LOG_DURATION_MS="$duration_ms" \
         GHOSTSHELL_LOG_SOURCE="$source" \
         GHOSTSHELL_LOG_CWD="$log_cwd" \
         GHOSTSHELL_LOG_SHELL_PID="$log_shell_pid" \
@@ -1754,6 +1782,7 @@ def as_int(value, default=None):
 
 command = str(os.environ.get("GHOSTSHELL_LOG_COMMAND", "") or "")
 exit_code = as_int(os.environ.get("GHOSTSHELL_LOG_EXIT", None), None)
+duration_ms = as_int(os.environ.get("GHOSTSHELL_LOG_DURATION_MS", None), None)
 manual_after_accept = str(
     os.environ.get("GHOSTSHELL_LOG_MANUAL_AFTER_ACCEPT", "0") or "0"
 ).strip() in {"1", "true", "True"}
@@ -1761,6 +1790,7 @@ manual_after_accept = str(
 payload = {
     "command": command,
     "exit_code": exit_code,
+    "duration_ms": duration_ms,
     "source": str(os.environ.get("GHOSTSHELL_LOG_SOURCE", "runtime") or "runtime"),
     "working_directory": str(os.environ.get("GHOSTSHELL_LOG_CWD", "") or ""),
     "shell_pid": as_int(os.environ.get("GHOSTSHELL_LOG_SHELL_PID", None), None),
@@ -1953,17 +1983,33 @@ _ghostshell_preexec_hook() {
         _ghostshell_snapshot_pending_execution
     fi
     GHOSTSHELL_LAST_EXECUTED_CMD="$1"
+    GHOSTSHELL_LAST_EXECUTED_STARTED_AT_MS="$(_ghostshell_now_epoch_ms)"
 }
 
 _ghostshell_precmd_hook() {
     local exit_code="$?"
+    _ghostshell_disable_mouse_reporting
     local cmd="$GHOSTSHELL_LAST_EXECUTED_CMD"
+    local started_at_ms="$GHOSTSHELL_LAST_EXECUTED_STARTED_AT_MS"
+    local finished_at_ms=""
+    local duration_ms=""
     GHOSTSHELL_LAST_EXECUTED_CMD=""
+    GHOSTSHELL_LAST_EXECUTED_STARTED_AT_MS=0
     _ghostshell_ensure_ai_session_timer
     _ghostshell_reload_disabled_patterns_if_needed
 
     if [[ -z "$cmd" ]]; then
         return
+    fi
+
+    if [[ "$started_at_ms" == <-> ]]; then
+        finished_at_ms="$(_ghostshell_now_epoch_ms)"
+        if [[ "$finished_at_ms" == <-> ]]; then
+            duration_ms=$(( finished_at_ms - started_at_ms ))
+            if (( duration_ms < 0 )); then
+                duration_ms=0
+            fi
+        fi
     fi
 
     if [[ "$exit_code" -ne 0 ]]; then
@@ -1983,7 +2029,7 @@ _ghostshell_precmd_hook() {
         return
     fi
 
-    _ghostshell_log_command "$cmd" "$exit_code" "runtime"
+    _ghostshell_log_command "$cmd" "$exit_code" "runtime" "$duration_ms"
     _ghostshell_clear_pending_execution
     _ghostshell_reset_provenance_line_state
 }
@@ -2601,6 +2647,7 @@ _ghostshell_capture_native_escape_binding vicmd
 _ghostshell_reload_disabled_patterns_if_needed
 _ghostshell_reload_auth_token_if_needed
 _ghostshell_ensure_ai_session_timer
+_ghostshell_disable_mouse_reporting
 
 # --- Core Controls ---
 _ghostshell_bind_widget '^@' _ghostshell_manual_trigger    # Ctrl+Space (manual trigger)

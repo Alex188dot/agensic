@@ -1,6 +1,9 @@
 use chrono::{Duration as ChronoDuration, Local, NaiveDate, TimeZone};
 use clap::Parser;
-use crossterm::event::{self, Event, KeyCode, KeyEvent, KeyEventKind, KeyModifiers};
+use crossterm::event::{
+    self, DisableMouseCapture, EnableMouseCapture, Event, KeyCode, KeyEvent, KeyEventKind,
+    KeyModifiers, MouseEvent, MouseEventKind,
+};
 use crossterm::execute;
 use crossterm::terminal::{
     disable_raw_mode, enable_raw_mode, EnterAlternateScreen, LeaveAlternateScreen,
@@ -18,6 +21,7 @@ use std::collections::BTreeSet;
 use std::env;
 use std::fs::{self, File};
 use std::io::{self, Stdout, Write};
+use std::panic;
 use std::path::Path;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
@@ -178,7 +182,7 @@ struct Filters {
     label: String,
     tier: String,
     agent: String,
-    provider: String,
+    model: String,
     exit: String,
     time_mode: TimeFilterMode,
     custom_start: String,
@@ -193,7 +197,7 @@ impl Default for Filters {
             label: String::new(),
             tier: String::new(),
             agent: String::new(),
-            provider: String::new(),
+            model: String::new(),
             exit: String::new(),
             time_mode: TimeFilterMode::Last365d,
             custom_start: String::new(),
@@ -240,7 +244,6 @@ impl App {
         filters.label = args.label.clone();
         filters.tier = args.tier.clone();
         filters.agent = args.agent.clone();
-        filters.provider = args.provider.clone();
         Self {
             client,
             auth_token: args.auth_token.clone(),
@@ -338,7 +341,7 @@ impl App {
         if !self.filters.agent.is_empty() && row.agent != self.filters.agent {
             return false;
         }
-        if !self.filters.provider.is_empty() && row.provider != self.filters.provider {
+        if !self.filters.model.is_empty() && row.model != self.filters.model {
             return false;
         }
         match self.filters.exit.as_str() {
@@ -443,9 +446,6 @@ impl App {
         }
         if !self.args.agent_name.trim().is_empty() {
             params.push(("agent_name".to_string(), self.args.agent_name.clone()));
-        }
-        if !self.filters.provider.is_empty() {
-            params.push(("provider".to_string(), self.filters.provider.clone()));
         }
 
         let url = format!(
@@ -601,19 +601,44 @@ impl App {
     }
 
     fn select_down(&mut self) {
+        if self.at_last_row() {
+            return;
+        }
         let page_len = self.current_page_len();
         if page_len == 0 {
             return;
         }
-        self.selected = (self.selected + 1).min(page_len - 1);
+        if self.selected + 1 < page_len {
+            self.selected += 1;
+            return;
+        }
+        let page_before = self.page;
+        self.next_page();
+        if self.page == page_before {
+            self.status = "Already on last row".to_string();
+        }
     }
 
     fn select_up(&mut self) {
-        if self.current_page_len() == 0 {
+        if self.at_first_row() {
+            return;
+        }
+        let page_len = self.current_page_len();
+        if page_len == 0 {
             return;
         }
         if self.selected > 0 {
             self.selected -= 1;
+            return;
+        }
+        if self.page == 0 {
+            self.status = "Already on first row".to_string();
+            return;
+        }
+        self.previous_page();
+        let prev_page_len = self.current_page_len();
+        if prev_page_len > 0 {
+            self.selected = prev_page_len - 1;
         }
     }
 
@@ -687,12 +712,27 @@ impl App {
         Some((start + self.selected).min(end - 1))
     }
 
+    fn at_first_row(&self) -> bool {
+        matches!(self.selected_global_index(), Some(0))
+    }
+
+    fn at_last_loaded_row(&self) -> bool {
+        matches!(
+            self.selected_global_index(),
+            Some(idx) if idx + 1 >= self.view_rows.len() && !self.view_rows.is_empty()
+        )
+    }
+
+    fn at_last_row(&self) -> bool {
+        self.at_last_loaded_row() && !self.has_more_rows
+    }
+
     fn filter_fields() -> [&'static str; 7] {
         [
             "label",
             "tier",
             "agent",
-            "provider",
+            "model",
             "exit",
             "time",
             "[Reset All]",
@@ -704,7 +744,7 @@ impl App {
             "label" => unique_values(self.base_rows.iter().map(|r| r.label.clone())),
             "tier" => unique_values(self.base_rows.iter().map(|r| r.evidence_tier.clone())),
             "agent" => unique_values(self.base_rows.iter().map(|r| r.agent.clone())),
-            "provider" => unique_values(self.base_rows.iter().map(|r| r.provider.clone())),
+            "model" => unique_values(self.base_rows.iter().map(|r| r.model.clone())),
             "exit" => vec!["".to_string(), "0".to_string(), "nonzero".to_string()],
             "time" => vec![
                 TimeFilterMode::Last7d.as_str().to_string(),
@@ -742,7 +782,7 @@ impl App {
             "label" => self.filters.label.clone(),
             "tier" => self.filters.tier.clone(),
             "agent" => self.filters.agent.clone(),
-            "provider" => self.filters.provider.clone(),
+            "model" => self.filters.model.clone(),
             "exit" => self.filters.exit.clone(),
             "time" => self.time_filter_display_value(),
             "[Reset All]" => "<Press Left/Right/Enter to Reset>".to_string(),
@@ -834,7 +874,7 @@ impl App {
             "label" => self.filters.label = value,
             "tier" => self.filters.tier = value,
             "agent" => self.filters.agent = value,
-            "provider" => self.filters.provider = value,
+            "model" => self.filters.model = value,
             "exit" => self.filters.exit = value,
             "time" => match TimeFilterMode::from_str(value.as_str()) {
                 Some(TimeFilterMode::Last7d) => self.apply_time_preset(TimeFilterMode::Last7d),
@@ -1098,7 +1138,7 @@ fn draw_ui(terminal: &mut Terminal<CrosstermBackend<Stdout>>, app: &App) -> io::
             Span::raw("    "),
             Span::styled(format!("mode={} ", mode), Style::default().fg(Color::Yellow)),
             Span::raw(format!(
-                "filters[label={}, tier={}, agent={}, provider={}, exit={}, time={}] rows={}/{} (page {}/{})",
+                "filters[label={}, tier={}, agent={}, model={}, exit={}, time={}] rows={}/{} (page {}/{})",
                 if app.filters.label.is_empty() {
                     "*"
                 } else {
@@ -1114,10 +1154,10 @@ fn draw_ui(terminal: &mut Terminal<CrosstermBackend<Stdout>>, app: &App) -> io::
                 } else {
                     app.filters.agent.as_str()
                 },
-                if app.filters.provider.is_empty() {
+                if app.filters.model.is_empty() {
                     "*"
                 } else {
-                    app.filters.provider.as_str()
+                    app.filters.model.as_str()
                 },
                 if app.filters.exit.is_empty() {
                     "*"
@@ -1165,6 +1205,7 @@ fn draw_ui(terminal: &mut Terminal<CrosstermBackend<Stdout>>, app: &App) -> io::
                     truncate_cell(&row.command, 80)
                 };
                 let mut cells = vec![
+                    Cell::from((global_idx + 1).to_string()),
                     Cell::from(time_str),
                     Cell::from(truncate_cell(&App::actor_of(row), 18)),
                     Cell::from(command_text)
@@ -1174,7 +1215,15 @@ fn draw_ui(terminal: &mut Terminal<CrosstermBackend<Stdout>>, app: &App) -> io::
                 ];
                 if !compact {
                     cells.push(Cell::from(truncate_cell(&row.label, 16)));
-                    cells.push(Cell::from(truncate_cell(&row.provider, 12)));
+                    cells.push(Cell::from(truncate_cell(&row.model, 20)));
+                    cells.push(Cell::from(truncate_cell(
+                        if row.agent_name.trim().is_empty() {
+                            "-"
+                        } else {
+                            row.agent_name.as_str()
+                        },
+                        18,
+                    )));
                 }
                 Row::new(cells).style(base_style)
             })
@@ -1182,6 +1231,7 @@ fn draw_ui(terminal: &mut Terminal<CrosstermBackend<Stdout>>, app: &App) -> io::
 
         let constraints = if compact {
             vec![
+                Constraint::Length(5),
                 Constraint::Length(18),
                 Constraint::Length(16),
                 Constraint::Min(30),
@@ -1190,20 +1240,32 @@ fn draw_ui(terminal: &mut Terminal<CrosstermBackend<Stdout>>, app: &App) -> io::
             ]
         } else {
             vec![
+                Constraint::Length(5),
                 Constraint::Length(18),
                 Constraint::Length(18),
                 Constraint::Min(48),
                 Constraint::Length(6),
                 Constraint::Length(10),
                 Constraint::Length(16),
-                Constraint::Length(12),
+                Constraint::Length(20),
+                Constraint::Length(18),
             ]
         };
 
         let header_cells = if compact {
-            vec!["time", "actor", "command", "exit", "duration"]
+            vec!["n.", "time", "actor", "command", "exit", "duration"]
         } else {
-            vec!["time", "actor", "command", "exit", "duration", "label", "provider"]
+            vec![
+                "n.",
+                "time",
+                "actor",
+                "command",
+                "exit",
+                "duration",
+                "label",
+                "model",
+                "agent_name",
+            ]
         };
 
         let table = Table::new(rows, constraints)
@@ -1323,9 +1385,16 @@ fn draw_ui(terminal: &mut Terminal<CrosstermBackend<Stdout>>, app: &App) -> io::
                     Line::from(format!("run_id: {}", row.run_id)),
                     Line::from(format!("time: {}", Local.timestamp_opt(row.ts, 0).single().map(|d| d.format("%m/%d/%y %H:%M:%S").to_string()).unwrap_or_else(|| row.ts.to_string()))),
                     Line::from(format!("actor: {}", App::actor_of(row))),
+                    Line::from(format!(
+                        "agent_name: {}",
+                        if row.agent_name.trim().is_empty() {
+                            "-"
+                        } else {
+                            row.agent_name.as_str()
+                        }
+                    )),
                     Line::from(format!("label: {}", row.label)),
                     Line::from(format!("tier: {}", row.evidence_tier)),
-                    Line::from(format!("provider: {}", row.provider)),
                     Line::from(format!("model: {}", row.model)),
                     Line::from(format!("exit: {}", App::format_exit(row.exit_code))),
                     Line::from(format!("duration: {}", App::format_duration(row.duration_ms))),
@@ -1354,7 +1423,7 @@ fn draw_ui(terminal: &mut Terminal<CrosstermBackend<Stdout>>, app: &App) -> io::
 }
 
 fn handle_key(app: &mut App, key: KeyEvent) -> bool {
-    if key.kind != KeyEventKind::Press {
+    if key.kind == KeyEventKind::Release {
         return false;
     }
 
@@ -1493,11 +1562,16 @@ fn handle_key(app: &mut App, key: KeyEvent) -> bool {
 
     match key.code {
         KeyCode::Esc => return true,
+        KeyCode::Char('c') if key.modifiers.contains(KeyModifiers::CONTROL) => return true,
         KeyCode::Char('f') if key.modifiers.contains(KeyModifiers::CONTROL) => {
             app.input_mode = true
         }
         KeyCode::Up => app.select_up(),
         KeyCode::Down => app.select_down(),
+        KeyCode::Char('k') => app.select_up(),
+        KeyCode::Char('j') => app.select_down(),
+        KeyCode::PageUp => app.previous_page(),
+        KeyCode::PageDown => app.next_page(),
         KeyCode::BackTab => app.previous_page(),
         KeyCode::Tab => app.next_page(),
         KeyCode::Enter => {
@@ -1522,6 +1596,17 @@ fn handle_key(app: &mut App, key: KeyEvent) -> bool {
         _ => {}
     }
     false
+}
+
+fn handle_mouse(app: &mut App, mouse: MouseEvent) {
+    if app.time_popup_open || app.filter_menu || app.details_open || app.input_mode {
+        return;
+    }
+    match mouse.kind {
+        MouseEventKind::ScrollDown => app.select_down(),
+        MouseEventKind::ScrollUp => app.select_up(),
+        _ => {}
+    }
 }
 
 fn export_rows(rows: &[RunEntry], export_format: &str, out_path: &str) -> Result<(), String> {
@@ -1617,6 +1702,9 @@ fn run_export_mode(client: &Client, args: &Args) -> Result<(), String> {
 }
 
 fn run_interactive(client: &Client, args: &Args) -> Result<(), String> {
+    // Reset terminal in case a previous run was interrupted and left capture modes enabled.
+    cleanup_terminal();
+
     let mut app = App::new(client.clone(), args.clone());
     if !args.contains.trim().is_empty() {
         app.set_search(args.contains.clone());
@@ -1628,7 +1716,7 @@ fn run_interactive(client: &Client, args: &Args) -> Result<(), String> {
 
     enable_raw_mode().map_err(|e| format!("enable raw mode failed: {}", e))?;
     let mut stdout = io::stdout();
-    execute!(stdout, EnterAlternateScreen)
+    execute!(stdout, EnterAlternateScreen, EnableMouseCapture)
         .map_err(|e| format!("enter alt screen failed: {}", e))?;
     let backend = CrosstermBackend::new(stdout);
     let mut terminal =
@@ -1640,8 +1728,12 @@ fn run_interactive(client: &Client, args: &Args) -> Result<(), String> {
 
         if event::poll(Duration::from_millis(50)).map_err(|e| format!("poll failed: {}", e))? {
             let ev = event::read().map_err(|e| format!("read event failed: {}", e))?;
-            if let Event::Key(key) = ev {
-                exit_requested = handle_key(&mut app, key);
+            match ev {
+                Event::Key(key) => {
+                    exit_requested = handle_key(&mut app, key);
+                }
+                Event::Mouse(mouse) => handle_mouse(&mut app, mouse),
+                _ => {}
             }
         }
 
@@ -1649,8 +1741,12 @@ fn run_interactive(client: &Client, args: &Args) -> Result<(), String> {
     }
 
     disable_raw_mode().map_err(|e| format!("disable raw mode failed: {}", e))?;
-    execute!(terminal.backend_mut(), LeaveAlternateScreen)
-        .map_err(|e| format!("leave alt screen failed: {}", e))?;
+    execute!(
+        terminal.backend_mut(),
+        LeaveAlternateScreen,
+        DisableMouseCapture
+    )
+    .map_err(|e| format!("leave alt screen failed: {}", e))?;
     terminal
         .show_cursor()
         .map_err(|e| format!("show cursor failed: {}", e))?;
@@ -1660,11 +1756,21 @@ fn run_interactive(client: &Client, args: &Args) -> Result<(), String> {
 fn cleanup_terminal() {
     let _ = disable_raw_mode();
     let mut stdout = io::stdout();
-    let _ = execute!(stdout, LeaveAlternateScreen);
+    let _ = execute!(stdout, LeaveAlternateScreen, DisableMouseCapture);
+    flush_stdin_input_buffer();
+}
+
+fn install_terminal_panic_hook() {
+    let default_hook = panic::take_hook();
+    panic::set_hook(Box::new(move |info| {
+        cleanup_terminal();
+        default_hook(info);
+    }));
 }
 
 fn main() {
     let args = Args::parse();
+    install_terminal_panic_hook();
 
     let client = match Client::builder().timeout(Duration::from_secs(8)).build() {
         Ok(c) => c,
@@ -1684,6 +1790,13 @@ fn main() {
         cleanup_terminal();
         eprintln!("{}", err);
         std::process::exit(1);
+    }
+}
+
+fn flush_stdin_input_buffer() {
+    #[cfg(unix)]
+    unsafe {
+        let _ = libc::tcflush(libc::STDIN_FILENO, libc::TCIFLUSH);
     }
 }
 

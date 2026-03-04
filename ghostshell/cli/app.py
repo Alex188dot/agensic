@@ -18,6 +18,10 @@ import shlex
 import uuid
 from typing import Any
 from pathlib import Path
+try:
+    import termios  # type: ignore
+except Exception:
+    termios = None
 from rich.console import Console
 from rich.panel import Panel
 from rich.table import Table
@@ -116,6 +120,7 @@ EVENTS_DIR = os.path.join(CONFIG_DIR, "events")
 SNAPSHOTS_DIR = os.path.join(CONFIG_DIR, "snapshots")
 BIN_DIR = os.path.join(CONFIG_DIR, "bin")
 PROVENANCE_TUI_BIN = os.path.join(BIN_DIR, "ghostshell-provenance-tui")
+MOUSE_REPORTING_RESET_SEQ = "\x1b[?1000l\x1b[?1002l\x1b[?1003l\x1b[?1006l\x1b[?1015l"
 DEFAULT_TUI_MANIFEST_URL = (
     "https://github.com/Alex188dot/ai-terminal/releases/latest/download/provenance_tui_manifest.json"
 )
@@ -472,6 +477,19 @@ def _ensure_provenance_tui_binary() -> str:
         ) from manifest_exc
 
 
+def _reset_terminal_mouse_reporting() -> None:
+    """Best-effort guard to avoid leaked mouse escape reporting in parent shell."""
+    try:
+        if not sys.stdout.isatty():
+            return
+        sys.stdout.write(MOUSE_REPORTING_RESET_SEQ)
+        sys.stdout.flush()
+        if termios is not None and sys.stdin.isatty():
+            termios.tcflush(sys.stdin.fileno(), termios.TCIFLUSH)
+    except Exception:
+        pass
+
+
 def _export_provenance_rows_to_file(payload: dict, export_format: str, out_path: str) -> None:
     runs = payload.get("runs", []) if isinstance(payload, dict) else []
     rows = runs if isinstance(runs, list) else []
@@ -594,8 +612,12 @@ def _run_provenance_tui(
     if export_format:
         cmd.extend(["--export", export_format, "--out", out_path])
 
-    result = subprocess.run(cmd, check=False)
-    return int(result.returncode or 0) == 0
+    _reset_terminal_mouse_reporting()
+    try:
+        result = subprocess.run(cmd, check=False)
+        return int(result.returncode or 0) == 0
+    finally:
+        _reset_terminal_mouse_reporting()
 
 
 def _rotate_auth_token_or_exit(context: str) -> None:

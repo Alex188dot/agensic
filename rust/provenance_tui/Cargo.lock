@@ -437,6 +437,7 @@ dependencies = [
  "clap",
  "crossterm",
  "csv",
+ "libc",
  "ratatui",
  "reqwest",
  "serde",
