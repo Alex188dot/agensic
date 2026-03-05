@@ -768,6 +768,101 @@ class SQLiteStateStore:
                     out[command] = int(row["total"] or 0)
         return out
 
+    def get_command_run_counts(
+        self,
+        commands: List[str],
+        since_ts: int = 0,
+        labels: Optional[List[str]] = None,
+    ) -> Dict[str, int]:
+        clean: List[str] = []
+        seen: set[str] = set()
+        for command in commands:
+            normalized = self._clean_command(command)
+            if not normalized or normalized in seen:
+                continue
+            seen.add(normalized)
+            clean.append(normalized)
+        if not clean:
+            return {}
+
+        label_filters = [str(label or "").strip() for label in (labels or []) if str(label or "").strip()]
+        min_ts = max(0, int(since_ts or 0))
+        out = {command: 0 for command in clean}
+
+        with self._lock, self._conn() as conn:
+            for chunk in self._chunk(clean):
+                command_placeholders = ",".join("?" for _ in chunk)
+                where_parts = [f"command IN ({command_placeholders})"]
+                params: List[object] = list(chunk)
+                if min_ts > 0:
+                    where_parts.append("ts >= ?")
+                    params.append(min_ts)
+                if label_filters:
+                    label_placeholders = ",".join("?" for _ in label_filters)
+                    where_parts.append(f"label IN ({label_placeholders})")
+                    params.extend(label_filters)
+                rows = conn.execute(
+                    """
+                    SELECT command, COUNT(*) AS total
+                    FROM command_runs
+                    WHERE {where_clause}
+                    GROUP BY command
+                    """.format(where_clause=" AND ".join(where_parts)),
+                    tuple(params),
+                ).fetchall()
+                for row in rows:
+                    command = self._clean_command(str(row["command"] or ""))
+                    if command:
+                        out[command] = int(row["total"] or 0)
+        return out
+
+    def get_last_command_run_ts(
+        self,
+        commands: List[str],
+        label: str = "",
+        since_ts: int = 0,
+    ) -> Dict[str, int]:
+        clean: List[str] = []
+        seen: set[str] = set()
+        for command in commands:
+            normalized = self._clean_command(command)
+            if not normalized or normalized in seen:
+                continue
+            seen.add(normalized)
+            clean.append(normalized)
+        if not clean:
+            return {}
+
+        label_filter = str(label or "").strip()
+        min_ts = max(0, int(since_ts or 0))
+        out = {command: 0 for command in clean}
+
+        with self._lock, self._conn() as conn:
+            for chunk in self._chunk(clean):
+                command_placeholders = ",".join("?" for _ in chunk)
+                where_parts = [f"command IN ({command_placeholders})"]
+                params: List[object] = list(chunk)
+                if label_filter:
+                    where_parts.append("label = ?")
+                    params.append(label_filter)
+                if min_ts > 0:
+                    where_parts.append("ts >= ?")
+                    params.append(min_ts)
+                rows = conn.execute(
+                    """
+                    SELECT command, MAX(ts) AS last_ts
+                    FROM command_runs
+                    WHERE {where_clause}
+                    GROUP BY command
+                    """.format(where_clause=" AND ".join(where_parts)),
+                    tuple(params),
+                ).fetchall()
+                for row in rows:
+                    command = self._clean_command(str(row["command"] or ""))
+                    if command:
+                        out[command] = int(row["last_ts"] or 0)
+        return out
+
     def list_all_commands(self, include_removed: bool = False) -> List[str]:
         with self._lock, self._conn() as conn:
             if include_removed:

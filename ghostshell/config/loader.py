@@ -74,6 +74,9 @@ def normalize_config_payload(payload: dict | None) -> dict:
         MIN_PROVENANCE_REGISTRY_REFRESH_HOURS,
         MAX_PROVENANCE_REGISTRY_REFRESH_HOURS,
     )
+    config["include_ai_executed_in_suggestions"] = bool(
+        config.get("include_ai_executed_in_suggestions", False)
+    )
     return config
 
 

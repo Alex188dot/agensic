@@ -16,6 +16,7 @@ from ghostshell.config.loader import (
     DEFAULT_TIMEOUT_SECONDS,
     MAX_TIMEOUT_SECONDS,
     MIN_TIMEOUT_SECONDS,
+    load_config_file,
 )
 from .provenance import (
     classify_command_run,
@@ -1624,6 +1625,72 @@ class SuggestionEngine:
             if vector_db.is_blocked_command(normalized_command):
                 logger.debug("Skipping blocked command from runtime logging")
                 return
+        except Exception as e:
+            logger.error(
+                "Failed to initialize vector DB for command logging: %s",
+                self.privacy_guard.sanitize_for_log(str(e)),
+            )
+            return
+
+        payload = dict(provenance_payload or {})
+        classification_label = "UNKNOWN"
+        classification: dict | None = None
+        try:
+            classification = classify_command_run(normalized_command, payload)
+            classification_label = str(classification.get("label", "UNKNOWN") or "UNKNOWN").strip().upper()
+        except Exception as e:
+            logger.error(
+                "Failed to classify command provenance: %s",
+                self.privacy_guard.sanitize_for_log(str(e)),
+            )
+            classification = {}
+
+        if self.state_store is not None:
+            try:
+                self.state_store.record_command_provenance(
+                    command=normalized_command,
+                    label=classification_label,
+                    confidence=float(classification.get("confidence", 0.0) or 0.0),
+                    agent=str(classification.get("agent", "") or ""),
+                    agent_name=str(classification.get("agent_name", "") or ""),
+                    provider=str(classification.get("provider", "") or ""),
+                    model=str(classification.get("model", "") or ""),
+                    raw_model=str(classification.get("raw_model", "") or ""),
+                    normalized_model=str(classification.get("normalized_model", "") or ""),
+                    model_fingerprint=str(classification.get("model_fingerprint", "") or ""),
+                    evidence_tier=str(classification.get("evidence_tier", "") or ""),
+                    agent_source=str(classification.get("agent_source", "") or ""),
+                    registry_version=str(classification.get("registry_version", "") or ""),
+                    registry_status=str(classification.get("registry_status", "") or ""),
+                    source=normalized_source,
+                    working_directory=str(working_directory or ""),
+                    exit_code=exit_code,
+                    duration_ms=(max(0, int(duration_ms)) if duration_ms is not None else None),
+                    shell_pid=(
+                        int(payload.get("shell_pid"))
+                        if payload.get("shell_pid", None) is not None
+                        else None
+                    ),
+                    evidence=[str(item) for item in classification.get("evidence", []) if str(item)],
+                    payload=payload,
+                )
+                self._maybe_prune_command_runs()
+            except Exception as e:
+                logger.error(
+                    "Failed to persist command provenance: %s",
+                    self.privacy_guard.sanitize_for_log(str(e)),
+                )
+
+        try:
+            cfg = load_config_file()
+        except Exception:
+            cfg = {}
+        include_ai_executed = bool(cfg.get("include_ai_executed_in_suggestions", False))
+        if classification_label == "AI_EXECUTED" and not include_ai_executed:
+            logger.debug("Skipping AI_EXECUTED command ingestion into suggestion store")
+            return
+
+        try:
             vector_db.insert_command(
                 normalized_command,
                 working_directory=working_directory,
@@ -1634,46 +1701,6 @@ class SuggestionEngine:
                 self.privacy_guard.sanitize_for_log(str(e)),
             )
             return
-
-        if self.state_store is None:
-            return
-
-        payload = dict(provenance_payload or {})
-        try:
-            classification = classify_command_run(normalized_command, payload)
-            self.state_store.record_command_provenance(
-                command=normalized_command,
-                label=str(classification.get("label", "UNKNOWN") or "UNKNOWN"),
-                confidence=float(classification.get("confidence", 0.0) or 0.0),
-                agent=str(classification.get("agent", "") or ""),
-                agent_name=str(classification.get("agent_name", "") or ""),
-                provider=str(classification.get("provider", "") or ""),
-                model=str(classification.get("model", "") or ""),
-                raw_model=str(classification.get("raw_model", "") or ""),
-                normalized_model=str(classification.get("normalized_model", "") or ""),
-                model_fingerprint=str(classification.get("model_fingerprint", "") or ""),
-                evidence_tier=str(classification.get("evidence_tier", "") or ""),
-                agent_source=str(classification.get("agent_source", "") or ""),
-                registry_version=str(classification.get("registry_version", "") or ""),
-                registry_status=str(classification.get("registry_status", "") or ""),
-                source=normalized_source,
-                working_directory=str(working_directory or ""),
-                exit_code=exit_code,
-                duration_ms=(max(0, int(duration_ms)) if duration_ms is not None else None),
-                shell_pid=(
-                    int(payload.get("shell_pid"))
-                    if payload.get("shell_pid", None) is not None
-                    else None
-                ),
-                evidence=[str(item) for item in classification.get("evidence", []) if str(item)],
-                payload=payload,
-            )
-            self._maybe_prune_command_runs()
-        except Exception as e:
-            logger.error(
-                "Failed to persist command provenance: %s",
-                self.privacy_guard.sanitize_for_log(str(e)),
-            )
 
     def _maybe_prune_command_runs(self) -> None:
         if self.state_store is None:

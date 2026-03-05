@@ -55,11 +55,17 @@ class CommandVectorDB:
     This implementation assumes a fresh v2 schema and does not run migrations.
     """
 
-    SCORE_ALPHA = 1.25
+    SCORE_BASE_RANK = 0.12
+    SCORE_ALPHA = 1.10
     SCORE_BETA = 0.35
-    SCORE_ACCEPT = 0.35
-    SCORE_EXECUTE = 0.20
-    SCORE_HISTORY = 0.10
+    SCORE_MANUAL = 0.55
+    SCORE_ASSIST = 0.18
+    SCORE_ACCEPT = 0.20
+    SCORE_HISTORY = 0.08
+    SCORE_MANUAL_RECENCY = 0.30
+    MANUAL_RECENCY_DECAY_HOURS = 48.0
+    HISTORY_COUNT_CAP = 200
+    MANUAL_SIGNAL_WINDOW_DAYS = 30
     ENABLE_REPO_CONFIDENCE_TIERS = True
     REPO_CONF_MEDIUM_MIN_ACCEPTS = 3
     REPO_CONF_MEDIUM_MIN_DISTINCT = 2
@@ -1057,19 +1063,37 @@ class CommandVectorDB:
         accept_count: int,
         execute_count: int = 0,
         history_count: int = 0,
+        manual_count: int = 0,
+        assist_count: int = 0,
+        hours_since_last_manual: Optional[float] = None,
+        base_weight: float = SCORE_BASE_RANK,
         alpha: float = SCORE_ALPHA,
         beta: float = SCORE_BETA,
+        manual_weight: float = SCORE_MANUAL,
+        assist_weight: float = SCORE_ASSIST,
         eta: float = SCORE_ACCEPT,
-        gamma: float = SCORE_EXECUTE,
         delta: float = SCORE_HISTORY,
+        manual_recency_weight: float = SCORE_MANUAL_RECENCY,
+        manual_recency_decay_hours: float = MANUAL_RECENCY_DECAY_HOURS,
+        history_cap: int = HISTORY_COUNT_CAP,
     ) -> float:
-        base = 1.0 / float(rank + 1)
-        return base + (alpha * math.log1p(max(repo_task_count, 0))) + (
+        # Kept for backward call compatibility; execute_count is intentionally unused.
+        _ = execute_count
+        safe_rank = max(int(rank), 0)
+        base = float(base_weight) / float(safe_rank + 1)
+        capped_history = min(max(int(history_count or 0), 0), max(int(history_cap or 0), 0))
+        score = base + (alpha * math.log1p(max(repo_task_count, 0))) + (
             beta * math.log1p(max(context_count, 0))
+        ) + (manual_weight * math.log1p(max(manual_count, 0))) + (
+            assist_weight * math.log1p(max(assist_count, 0))
         ) + (eta * math.log1p(max(accept_count, 0))) + (
-            gamma * math.log1p(max(execute_count, 0))
-        ) + (delta * math.log1p(max(history_count, 0))
+            delta * math.log1p(capped_history)
         )
+        if hours_since_last_manual is not None:
+            safe_hours = max(float(hours_since_last_manual), 0.0)
+            decay_hours = max(float(manual_recency_decay_hours), 1.0)
+            score += float(manual_recency_weight) * math.exp(-(safe_hours / decay_hours))
+        return score
 
     @staticmethod
     def rerank_suffixes_from_counts(
@@ -1079,15 +1103,26 @@ class CommandVectorDB:
         repo_task_counts: Optional[Dict[str, int]] = None,
         execute_counts: Optional[Dict[str, int]] = None,
         history_counts: Optional[Dict[str, int]] = None,
+        manual_counts: Optional[Dict[str, int]] = None,
+        assist_counts: Optional[Dict[str, int]] = None,
+        last_manual_hours: Optional[Dict[str, float]] = None,
+        base_weight: float = SCORE_BASE_RANK,
         alpha: float = SCORE_ALPHA,
         beta: float = SCORE_BETA,
+        manual_weight: float = SCORE_MANUAL,
+        assist_weight: float = SCORE_ASSIST,
         eta: float = SCORE_ACCEPT,
-        gamma: float = SCORE_EXECUTE,
         delta: float = SCORE_HISTORY,
+        manual_recency_weight: float = SCORE_MANUAL_RECENCY,
+        manual_recency_decay_hours: float = MANUAL_RECENCY_DECAY_HOURS,
+        history_cap: int = HISTORY_COUNT_CAP,
     ) -> List[str]:
         repo_task_counts = repo_task_counts or {}
         execute_counts = execute_counts or {}
         history_counts = history_counts or {}
+        manual_counts = manual_counts or {}
+        assist_counts = assist_counts or {}
+        last_manual_hours = last_manual_hours or {}
         scored = []
         for rank, suffix in enumerate(candidates):
             final_score = CommandVectorDB.blend_rank_score(
@@ -1097,11 +1132,19 @@ class CommandVectorDB:
                 accept_count=global_counts.get(suffix, 0),
                 execute_count=execute_counts.get(suffix, 0),
                 history_count=history_counts.get(suffix, 0),
+                manual_count=manual_counts.get(suffix, 0),
+                assist_count=assist_counts.get(suffix, 0),
+                hours_since_last_manual=last_manual_hours.get(suffix),
+                base_weight=base_weight,
                 alpha=alpha,
                 beta=beta,
+                manual_weight=manual_weight,
+                assist_weight=assist_weight,
                 eta=eta,
-                gamma=gamma,
                 delta=delta,
+                manual_recency_weight=manual_recency_weight,
+                manual_recency_decay_hours=manual_recency_decay_hours,
+                history_cap=history_cap,
             )
             scored.append((rank, suffix, final_score))
 
@@ -2530,23 +2573,63 @@ class CommandVectorDB:
         repo_task_counts: Dict[str, int] = {}
         execute_counts: Dict[str, int] = {}
         history_counts: Dict[str, int] = {}
+        manual_30d_counts: Dict[str, int] = {}
+        assist_30d_counts: Dict[str, int] = {}
+        hours_since_last_manual: Dict[str, float] = {}
         repo_key = ""
+        now_ts = int(time.time())
+        manual_window_since = now_ts - (self.MANUAL_SIGNAL_WINDOW_DAYS * 24 * 3600)
 
         try:
             if self.state_store is not None:
                 repo_key = self.resolve_repo_key(working_directory or "")
                 stats = self.state_store.get_command_stats(full_commands)
+                manual_counts_by_command: Dict[str, int] = {}
+                assist_counts_by_command: Dict[str, int] = {}
+                last_manual_ts_by_command: Dict[str, int] = {}
+                if hasattr(self.state_store, "get_command_run_counts"):
+                    raw_manual_counts = self.state_store.get_command_run_counts(
+                        full_commands,
+                        since_ts=manual_window_since,
+                        labels=["HUMAN_TYPED"],
+                    )
+                    if isinstance(raw_manual_counts, dict):
+                        manual_counts_by_command = raw_manual_counts
+                    raw_assist_counts = self.state_store.get_command_run_counts(
+                        full_commands,
+                        since_ts=manual_window_since,
+                        labels=["AI_SUGGESTED_HUMAN_RAN", "GS_SUGGESTED_HUMAN_RAN", "AI_EXECUTED"],
+                    )
+                    if isinstance(raw_assist_counts, dict):
+                        assist_counts_by_command = raw_assist_counts
+                if hasattr(self.state_store, "get_last_command_run_ts"):
+                    raw_last_manual_ts = self.state_store.get_last_command_run_ts(
+                        full_commands,
+                        label="HUMAN_TYPED",
+                    )
+                    if isinstance(raw_last_manual_ts, dict):
+                        last_manual_ts_by_command = raw_last_manual_ts
                 for suffix, full_command in filtered_pairs:
                     row = stats.get(full_command, {})
                     global_counts[suffix] = int(row.get("accept_count", 0) or 0)
                     execute_counts[suffix] = int(row.get("execute_count", 0) or 0)
                     history_counts[suffix] = int(row.get("history_count", 0) or 0)
+                    manual_30d_counts[suffix] = int(manual_counts_by_command.get(full_command, 0) or 0)
+                    assist_30d_counts[suffix] = int(assist_counts_by_command.get(full_command, 0) or 0)
+                    last_manual_ts = int(last_manual_ts_by_command.get(full_command, 0) or 0)
+                    if last_manual_ts > 0:
+                        hours_since_last_manual[suffix] = max(
+                            0.0,
+                            float(now_ts - last_manual_ts) / 3600.0,
+                        )
                 context_counts = self.state_store.get_feedback_counts(context_keys, candidates)
                 for suffix in candidates:
                     context_counts[suffix] = int(context_counts.get(suffix, 0) or 0)
                     repo_accept_counts[suffix] = 0
                     repo_execute_counts[suffix] = 0
                     repo_task_counts[suffix] = 0
+                    manual_30d_counts[suffix] = int(manual_30d_counts.get(suffix, 0) or 0)
+                    assist_30d_counts[suffix] = int(assist_30d_counts.get(suffix, 0) or 0)
                 if repo_key:
                     suffixes_by_task: Dict[str, List[str]] = defaultdict(list)
                     commands_by_task: Dict[str, List[str]] = defaultdict(list)
@@ -2587,6 +2670,8 @@ class CommandVectorDB:
                             global_counts[suffix] = int(doc.fields.get("accept_count", 0) or 0)
                             execute_counts[suffix] = int(doc.fields.get("execute_count", 0) or 0)
                             history_counts[suffix] = int(doc.fields.get("history_count", 0) or 0)
+                        manual_30d_counts[suffix] = 0
+                        assist_30d_counts[suffix] = 0
 
                     for suffix in candidates:
                         context_counts[suffix] = 0
@@ -2612,11 +2697,19 @@ class CommandVectorDB:
                     accept_count=global_counts.get(suffix, 0),
                     execute_count=execute_counts.get(suffix, 0),
                     history_count=history_counts.get(suffix, 0),
+                    manual_count=manual_30d_counts.get(suffix, 0),
+                    assist_count=assist_30d_counts.get(suffix, 0),
+                    hours_since_last_manual=hours_since_last_manual.get(suffix),
+                    base_weight=self.SCORE_BASE_RANK,
                     alpha=self.SCORE_ALPHA,
                     beta=self.SCORE_BETA,
+                    manual_weight=self.SCORE_MANUAL,
+                    assist_weight=self.SCORE_ASSIST,
                     eta=self.SCORE_ACCEPT,
-                    gamma=self.SCORE_EXECUTE,
                     delta=self.SCORE_HISTORY,
+                    manual_recency_weight=self.SCORE_MANUAL_RECENCY,
+                    manual_recency_decay_hours=self.MANUAL_RECENCY_DECAY_HOURS,
+                    history_cap=self.HISTORY_COUNT_CAP,
                 )
                 full_command = full_command_by_suffix.get(suffix, "")
                 if not help_intent and self._is_help_like_command(full_command):
@@ -2649,11 +2742,20 @@ class CommandVectorDB:
                 or any(global_counts.values())
                 or any(execute_counts.values())
                 or any(history_counts.values())
+                or any(manual_30d_counts.values())
+                or any(assist_30d_counts.values())
             ):
                 top3 = reranked[:3]
                 repo_top3 = sum(1 for suffix in top3 if suffix in repo_hit_suffixes)
                 preview = ", ".join(
-                    f"{suffix.strip() or '<empty>'}(repo={repo_task_counts.get(suffix, 0)},repo_acc={repo_accept_counts.get(suffix, 0)},repo_exec={repo_execute_counts.get(suffix, 0)},ctx={context_counts.get(suffix, 0)},acc={global_counts.get(suffix, 0)},exec={execute_counts.get(suffix, 0)},hist={history_counts.get(suffix, 0)})"
+                    (
+                        f"{suffix.strip() or '<empty>'}(repo={repo_task_counts.get(suffix, 0)},"
+                        f"repo_acc={repo_accept_counts.get(suffix, 0)},repo_exec={repo_execute_counts.get(suffix, 0)},"
+                        f"ctx={context_counts.get(suffix, 0)},acc={global_counts.get(suffix, 0)},"
+                        f"exec={execute_counts.get(suffix, 0)},hist={history_counts.get(suffix, 0)},"
+                        f"man30={manual_30d_counts.get(suffix, 0)},assist30={assist_30d_counts.get(suffix, 0)},"
+                        f"hmanual={('-' if hours_since_last_manual.get(suffix) is None else f'{hours_since_last_manual.get(suffix, 0.0):.1f}')})"
+                    )
                     for suffix in reranked[:3]
                 )
                 logger.debug(

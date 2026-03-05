@@ -2,7 +2,7 @@ import os
 import subprocess
 import tempfile
 import unittest
-from unittest.mock import Mock
+from unittest.mock import Mock, patch
 
 from ghostshell.vector_db.command_db import CommandVectorDB
 
@@ -28,6 +28,16 @@ class RepoContextGraphTests(unittest.TestCase):
         db.state_store.get_repo_execute_feedback_counts = Mock(
             side_effect=lambda repo_key, task_key, commands: {
                 cmd: int((repo_execute_map or {}).get(cmd, 0)) for cmd in commands
+            }
+        )
+        db.state_store.get_command_run_counts = Mock(
+            side_effect=lambda commands, since_ts=0, labels=None: {
+                cmd: 0 for cmd in commands
+            }
+        )
+        db.state_store.get_last_command_run_ts = Mock(
+            side_effect=lambda commands, label="", since_ts=0: {
+                cmd: 0 for cmd in commands
             }
         )
         return db
@@ -155,6 +165,57 @@ class RepoContextGraphTests(unittest.TestCase):
             working_directory="/tmp/repo",
         )
         self.assertEqual(reranked_capped, reranked_high)
+
+    def test_manual_signal_and_recency_boost_promote_recent_manual_command(self):
+        db = self._build_db_for_rerank(
+            command_stats={
+                "aiterminal setup": {"accept_count": 0, "execute_count": 0, "history_count": 200},
+                "aiterminal provenance --tui": {"accept_count": 0, "execute_count": 0, "history_count": 5},
+            },
+        )
+        now_ts = 2_000_000_000
+
+        def _command_run_counts(commands, since_ts=0, labels=None):
+            out = {cmd: 0 for cmd in commands}
+            label_set = {str(v or "").strip() for v in (labels or [])}
+            if "HUMAN_TYPED" in label_set:
+                out["aiterminal provenance --tui"] = 6
+            if label_set.intersection({"AI_SUGGESTED_HUMAN_RAN", "GS_SUGGESTED_HUMAN_RAN", "AI_EXECUTED"}):
+                out["aiterminal setup"] = 3
+            return out
+
+        db.state_store.get_command_run_counts = Mock(side_effect=_command_run_counts)
+        db.state_store.get_last_command_run_ts = Mock(
+            return_value={
+                "aiterminal setup": now_ts - (14 * 24 * 3600),
+                "aiterminal provenance --tui": now_ts - 3600,
+            }
+        )
+
+        with patch("ghostshell.vector_db.command_db.time.time", return_value=now_ts):
+            reranked = db.rerank_candidates(
+                "aiterminal",
+                [" setup", " provenance --tui"],
+                working_directory="/tmp/repo",
+            )
+        self.assertEqual(reranked[0], " provenance --tui")
+
+    def test_history_signal_is_capped(self):
+        score_200 = CommandVectorDB.blend_rank_score(
+            rank=0,
+            repo_task_count=0,
+            context_count=0,
+            accept_count=0,
+            history_count=200,
+        )
+        score_2000 = CommandVectorDB.blend_rank_score(
+            rank=0,
+            repo_task_count=0,
+            context_count=0,
+            accept_count=0,
+            history_count=2000,
+        )
+        self.assertEqual(score_200, score_2000)
 
 
 if __name__ == "__main__":
