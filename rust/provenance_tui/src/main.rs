@@ -110,6 +110,60 @@ struct RunsPage {
     total_matching: usize,
 }
 
+fn collect_all_runs_pages<F>(page_limit: usize, mut fetch_page: F) -> Result<RunsPage, String>
+where
+    F: FnMut(i64, &str) -> Result<RunsPage, String>,
+{
+    let limit = page_limit.max(1);
+    let mut rows: Vec<RunEntry> = Vec::new();
+    let mut seen: BTreeSet<String> = BTreeSet::new();
+    let mut total_matching = 0usize;
+    let mut before_ts = 0i64;
+    let mut before_run_id = String::new();
+
+    loop {
+        let page = fetch_page(before_ts, &before_run_id)?;
+        total_matching = total_matching.max(page.total_matching);
+        let page_len = page.rows.len();
+        if page_len == 0 {
+            break;
+        }
+
+        let next_cursor = page
+            .rows
+            .last()
+            .map(|row| (row.ts, row.run_id.clone()));
+
+        for row in page.rows {
+            if seen.insert(row.run_id.clone()) {
+                rows.push(row);
+            }
+        }
+
+        if total_matching > 0 && rows.len() >= total_matching {
+            break;
+        }
+        if page_len < limit {
+            break;
+        }
+
+        let Some((next_ts, next_run_id)) = next_cursor else {
+            break;
+        };
+        if next_ts == before_ts && next_run_id == before_run_id {
+            break;
+        }
+        before_ts = next_ts;
+        before_run_id = next_run_id;
+    }
+
+    if total_matching == 0 {
+        total_matching = rows.len();
+    }
+
+    Ok(RunsPage { rows, total_matching })
+}
+
 const SECONDS_PER_DAY: i64 = 24 * 60 * 60;
 const PROVENANCE_MAX_LOOKBACK_DAYS: i64 = 365;
 const CUSTOM_TIME_RANGE_MAX_DAYS: i64 = 30;
@@ -300,6 +354,14 @@ impl App {
         }
     }
 
+    fn format_time(ts: i64) -> String {
+        Local
+            .timestamp_opt(ts, 0)
+            .single()
+            .map(|d| d.format("%m/%d/%y %H:%M:%S").to_string())
+            .unwrap_or_else(|| ts.to_string())
+    }
+
     fn format_exit(code: Option<i64>) -> String {
         match code {
             Some(v) => v.to_string(),
@@ -312,7 +374,7 @@ impl App {
             "HUMAN_TYPED" => Style::default().fg(Color::Green),
             "AI_EXECUTED" => Style::default().fg(Color::Rgb(0, 191, 255)),
             "GS_SUGGESTED_HUMAN_RAN" => Style::default().fg(Color::Cyan),
-            "AI_SUGGESTED_HUMAN_RAN" => Style::default().fg(Color::Rgb(25, 25, 112)),
+            "AI_SUGGESTED_HUMAN_RAN" => Style::default().fg(Color::Rgb(125, 249, 255)),
             "UNKNOWN" => Style::default().fg(Color::Rgb(211, 211, 211)),
             _ => Style::default().fg(Color::Rgb(211, 211, 211)),
         }
@@ -382,6 +444,12 @@ impl App {
         if !self.filters.agent.is_empty() && row.agent != self.filters.agent {
             return false;
         }
+        if !self.args.agent_name.trim().is_empty() && row.agent_name != self.args.agent_name {
+            return false;
+        }
+        if !self.args.provider.trim().is_empty() && row.provider != self.args.provider {
+            return false;
+        }
         if !self.filters.model.is_empty() && row.model != self.filters.model {
             return false;
         }
@@ -392,13 +460,12 @@ impl App {
         }
     }
 
-    fn apply_view(&mut self) {
-        let source: Vec<RunEntry> = self.base_rows.clone();
-
+    fn build_view_rows(&self, source: &[RunEntry]) -> Vec<RunEntry> {
         let query = self.search.trim().to_string();
         let now_ts = now_epoch_seconds();
         let mut out: Vec<RunEntry> = source
-            .into_iter()
+            .iter()
+            .cloned()
             .filter(|row| Self::search_hit(row, &query))
             .filter(|row| self.row_passes_filters(row, now_ts))
             .collect();
@@ -423,6 +490,12 @@ impl App {
                 .cmp(&right.exit_code.unwrap_or(9_999))
                 .then_with(|| right.ts.cmp(&left.ts)),
         });
+
+        out
+    }
+
+    fn apply_view(&mut self) {
+        let out = self.build_view_rows(&self.base_rows);
 
         self.view_rows = out;
         let page_count = self.page_count_loaded();
@@ -488,6 +561,9 @@ impl App {
         if !self.args.agent_name.trim().is_empty() {
             params.push(("agent_name".to_string(), self.args.agent_name.clone()));
         }
+        if !self.args.provider.trim().is_empty() {
+            params.push(("provider".to_string(), self.args.provider.clone()));
+        }
 
         let url = format!(
             "{}/provenance/runs",
@@ -516,6 +592,12 @@ impl App {
         Ok(RunsPage {
             rows: payload.runs,
             total_matching,
+        })
+    }
+
+    fn fetch_all_runs(&self) -> Result<RunsPage, String> {
+        collect_all_runs_pages(self.args.limit, |before_ts, before_run_id| {
+            self.fetch_runs_page(before_ts, before_run_id)
         })
     }
 
@@ -632,10 +714,19 @@ impl App {
         self.semantic_dirty = false;
     }
 
+    fn export_dataset_rows(&self) -> Result<Vec<RunEntry>, String> {
+        let all_rows = self.fetch_all_runs()?;
+        Ok(self.build_view_rows(&all_rows.rows))
+    }
+
     fn export_current(&mut self, format: &str, out_path: &str) {
-        match export_rows(&self.view_rows, format, out_path) {
-            Ok(()) => {
-                self.status = format!("Exported {} rows to {}", self.view_rows.len(), out_path)
+        match self.export_dataset_rows().and_then(|rows| {
+            let count = rows.len();
+            export_rows(&rows, format, out_path)?;
+            Ok(count)
+        }) {
+            Ok(count) => {
+                self.status = format!("Exported {} matching rows to {}", count, out_path)
             }
             Err(err) => self.status = format!("Export failed: {}", err),
         }
@@ -1353,14 +1444,19 @@ fn draw_ui(terminal: &mut Terminal<CrosstermBackend<Stdout>>, app: &App) -> io::
         frame.render_stateful_widget(table, chunks[1], &mut table_state);
 
         let footer = Paragraph::new(vec![
-            Line::from(format!(
+            Line::from(Span::styled(
+                format!(
                 "↑↓ select  Tab/Shift+Tab page  Ctrl+F search  f filters  s sort={}  Enter details  r refresh  e export(json)  E export(csv)  Esc quit",
                 app.sort_mode.label(),
+                ),
+                App::key_hint_style(),
             )),
-            Line::from(app.status.clone()),
+            Line::from(Span::styled(
+                app.status.clone(),
+                Style::default().fg(Color::White),
+            )),
         ])
-        .alignment(Alignment::Left)
-        .style(Style::default().fg(Color::Yellow));
+        .alignment(Alignment::Left);
         frame.render_widget(footer, chunks[2]);
 
         if app.filter_menu {
@@ -1462,7 +1558,7 @@ fn draw_ui(terminal: &mut Terminal<CrosstermBackend<Stdout>>, app: &App) -> io::
                     };
                     let mut details: Vec<Line<'static>> = vec![
                         Line::from(format!("run_id: {}", row.run_id)),
-                        Line::from(format!("time: {}", Local.timestamp_opt(row.ts, 0).single().map(|d| d.format("%m/%d/%y %H:%M:%S").to_string()).unwrap_or_else(|| row.ts.to_string()))),
+                        Line::from(format!("time: {}", App::format_time(row.ts))),
                         Line::from(format!("actor: {}", App::actor_of(row))),
                         Line::from(format!(
                             "agent_name: {}",
@@ -1790,6 +1886,7 @@ fn export_rows(rows: &[RunEntry], export_format: &str, out_path: &str) -> Result
         .write_record([
             "run_id",
             "ts",
+            "time",
             "command",
             "label",
             "confidence",
@@ -1798,22 +1895,37 @@ fn export_rows(rows: &[RunEntry], export_format: &str, out_path: &str) -> Result
             "agent_name",
             "provider",
             "model",
+            "raw_model",
+            "normalized_model",
+            "model_fingerprint",
             "evidence_tier",
+            "agent_source",
+            "registry_version",
+            "registry_status",
             "source",
             "working_directory",
             "exit_code",
+            "exit",
             "duration_ms",
+            "duration",
             "shell_pid",
+            "evidence",
+            "payload",
             "stderr",
             "output_truncated",
         ])
         .map_err(|e| format!("write csv header failed: {}", e))?;
 
     for row in rows {
+        let evidence_json = serde_json::to_string(&row.evidence)
+            .map_err(|e| format!("serialize evidence failed: {}", e))?;
+        let payload_json =
+            serde_json::to_string(&row.payload).map_err(|e| format!("serialize payload failed: {}", e))?;
         writer
             .write_record([
                 row.run_id.clone(),
                 row.ts.to_string(),
+                App::format_time(row.ts),
                 row.command.clone(),
                 row.label.clone(),
                 format!("{:.2}", row.confidence),
@@ -1822,12 +1934,22 @@ fn export_rows(rows: &[RunEntry], export_format: &str, out_path: &str) -> Result
                 row.agent_name.clone(),
                 row.provider.clone(),
                 row.model.clone(),
+                row.raw_model.clone(),
+                row.normalized_model.clone(),
+                row.model_fingerprint.clone(),
                 row.evidence_tier.clone(),
+                row.agent_source.clone(),
+                row.registry_version.clone(),
+                row.registry_status.clone(),
                 row.source.clone(),
                 row.working_directory.clone(),
                 row.exit_code.map(|v| v.to_string()).unwrap_or_default(),
+                App::format_exit(row.exit_code),
                 row.duration_ms.map(|v| v.to_string()).unwrap_or_default(),
+                App::format_duration(row.duration_ms),
                 row.shell_pid.map(|v| v.to_string()).unwrap_or_default(),
+                evidence_json,
+                payload_json,
                 App::stderr_of(row).to_string(),
                 App::output_truncated(row).to_string(),
             ])
@@ -1843,6 +1965,13 @@ fn export_row_json_value(row: &RunEntry) -> Result<Value, String> {
     let mut value =
         serde_json::to_value(row).map_err(|e| format!("serialize export row failed: {}", e))?;
     if let Value::Object(map) = &mut value {
+        map.insert("time".to_string(), Value::String(App::format_time(row.ts)));
+        map.insert("actor".to_string(), Value::String(App::actor_of(row)));
+        map.insert("exit".to_string(), Value::String(App::format_exit(row.exit_code)));
+        map.insert(
+            "duration".to_string(),
+            Value::String(App::format_duration(row.duration_ms)),
+        );
         map.insert("stderr".to_string(), Value::String(App::stderr_of(row).to_string()));
         map.insert(
             "output_truncated".to_string(),
@@ -1855,8 +1984,7 @@ fn export_row_json_value(row: &RunEntry) -> Result<Value, String> {
 fn run_export_mode(client: &Client, args: &Args) -> Result<(), String> {
     let mut app = App::new(client.clone(), args.clone());
     app.search = args.contains.trim().to_string();
-    app.refresh_base();
-    let rows = app.view_rows.clone();
+    let rows = app.export_dataset_rows()?;
     let out_path = if args.out.trim().is_empty() {
         default_export_path(&args.export)
     } else {
@@ -2079,6 +2207,59 @@ mod tests {
         assert!(ts_within_time_bounds(100, 100, None));
     }
 
+    #[test]
+    fn collect_all_runs_pages_fetches_beyond_first_page() {
+        let mut call_count = 0usize;
+        let page = collect_all_runs_pages(2, |before_ts, before_run_id| {
+            call_count += 1;
+            match (before_ts, before_run_id) {
+                (0, "") => Ok(RunsPage {
+                    rows: vec![
+                        RunEntry {
+                            run_id: "run-3".to_string(),
+                            ts: 30,
+                            command: "third".to_string(),
+                            ..RunEntry::default()
+                        },
+                        RunEntry {
+                            run_id: "run-2".to_string(),
+                            ts: 20,
+                            command: "second".to_string(),
+                            ..RunEntry::default()
+                        },
+                    ],
+                    total_matching: 3,
+                }),
+                (20, "run-2") => Ok(RunsPage {
+                    rows: vec![
+                        RunEntry {
+                            run_id: "run-2".to_string(),
+                            ts: 20,
+                            command: "second".to_string(),
+                            ..RunEntry::default()
+                        },
+                        RunEntry {
+                            run_id: "run-1".to_string(),
+                            ts: 10,
+                            command: "first".to_string(),
+                            ..RunEntry::default()
+                        },
+                    ],
+                    total_matching: 3,
+                }),
+                other => panic!("unexpected cursor: {:?}", other),
+            }
+        })
+        .expect("collect paginated rows");
+
+        assert_eq!(call_count, 2);
+        assert_eq!(page.total_matching, 3);
+        assert_eq!(page.rows.len(), 3);
+        assert_eq!(page.rows[0].run_id, "run-3");
+        assert_eq!(page.rows[1].run_id, "run-2");
+        assert_eq!(page.rows[2].run_id, "run-1");
+    }
+
     fn sample_run_entry(stderr: &str, truncated: bool) -> RunEntry {
         RunEntry {
             run_id: "run-1".to_string(),
@@ -2088,22 +2269,23 @@ mod tests {
             confidence: 1.0,
             agent: "codex".to_string(),
             agent_name: "Codex".to_string(),
-            provider: String::new(),
+            provider: "openai".to_string(),
             model: "gpt-5".to_string(),
-            raw_model: String::new(),
-            normalized_model: String::new(),
-            model_fingerprint: String::new(),
+            raw_model: "gpt-5-raw".to_string(),
+            normalized_model: "gpt-5".to_string(),
+            model_fingerprint: "fp-123".to_string(),
             evidence_tier: "proof".to_string(),
-            agent_source: String::new(),
-            registry_version: String::new(),
-            registry_status: String::new(),
+            agent_source: "registry".to_string(),
+            registry_version: "2026.03".to_string(),
+            registry_status: "active".to_string(),
             source: "runtime".to_string(),
             working_directory: "/tmp".to_string(),
             exit_code: Some(1),
             duration_ms: Some(42),
             shell_pid: Some(123),
-            evidence: Vec::new(),
+            evidence: vec!["sig:ok".to_string(), "host:ok".to_string()],
             payload: json!({
+                "example": "value",
                 "captured_stderr_tail": stderr,
                 "captured_output_truncated": truncated
             }),
@@ -2127,8 +2309,15 @@ mod tests {
 
         let text = fs::read_to_string(&out).expect("read json export");
         let payload: Value = serde_json::from_str(&text).expect("parse json export");
+        assert_eq!(payload["runs"][0]["time"], App::format_time(1));
+        assert_eq!(payload["runs"][0]["actor"], "Codex");
+        assert_eq!(payload["runs"][0]["exit"], "1");
+        assert_eq!(payload["runs"][0]["duration"], "42ms");
         assert_eq!(payload["runs"][0]["stderr"], "fatal: bad revision\n");
         assert_eq!(payload["runs"][0]["output_truncated"], true);
+        assert_eq!(payload["runs"][0]["raw_model"], "gpt-5-raw");
+        assert_eq!(payload["runs"][0]["payload"]["example"], "value");
+        assert_eq!(payload["runs"][0]["evidence"][0], "sig:ok");
 
         let _ = fs::remove_file(out);
     }
@@ -2147,6 +2336,7 @@ mod tests {
             vec![
                 "run_id",
                 "ts",
+                "time",
                 "command",
                 "label",
                 "confidence",
@@ -2155,12 +2345,22 @@ mod tests {
                 "agent_name",
                 "provider",
                 "model",
+                "raw_model",
+                "normalized_model",
+                "model_fingerprint",
                 "evidence_tier",
+                "agent_source",
+                "registry_version",
+                "registry_status",
                 "source",
                 "working_directory",
                 "exit_code",
+                "exit",
                 "duration_ms",
+                "duration",
                 "shell_pid",
+                "evidence",
+                "payload",
                 "stderr",
                 "output_truncated",
             ]
@@ -2170,8 +2370,16 @@ mod tests {
             .next()
             .expect("csv row present")
             .expect("csv row valid");
-        assert_eq!(record.get(16), Some("fatal: bad revision\n"));
-        assert_eq!(record.get(17), Some("true"));
+        assert_eq!(record.get(2), Some(App::format_time(1).as_str()));
+        assert_eq!(record.get(11), Some("gpt-5-raw"));
+        assert_eq!(record.get(21), Some("1"));
+        assert_eq!(record.get(23), Some("42ms"));
+        let evidence: Value = serde_json::from_str(record.get(25).expect("evidence field")).expect("parse evidence");
+        let payload: Value = serde_json::from_str(record.get(26).expect("payload field")).expect("parse payload");
+        assert_eq!(evidence[0], "sig:ok");
+        assert_eq!(payload["example"], "value");
+        assert_eq!(record.get(27), Some("fatal: bad revision\n"));
+        assert_eq!(record.get(28), Some("true"));
 
         let _ = fs::remove_file(out);
     }
