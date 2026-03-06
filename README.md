@@ -2,6 +2,53 @@
 
 An intelligent terminal autocomplete powered by vector databases and AI.
 
+## For Humans
+
+GhostShell shows command suggestions as inline ghost text while you type in the terminal. It searches your command history semantically first, keeps a live suggestion pool as you continue typing, and only falls back to an LLM when local retrieval and typo recovery do not have a good answer.
+
+## For Agents
+
+This repo publishes an Agent Skills-compatible skill at `skills/terminal-commands` for tools like Codex, Claude Code, OpenClaw, Qwen Code, Cursor, Windsurf, and other clients that consume the `SKILL.md` format.
+
+Install from GitHub:
+
+```bash
+npx skills add Alex188dot/ai-terminal
+npx ctx7 skills install Alex188dot/ai-terminal
+```
+
+Repo: [github.com/Alex188dot/ai-terminal](https://github.com/Alex188dot/ai-terminal)
+
+When using the `terminal-commands` skill, shell commands must be signed through GhostShell so they are recorded as `AI_EXECUTED`.
+
+Preferred one-off flow:
+
+```bash
+aiterminal ai-exec --agent <agent_id> --model <model_id> --agent-name '<agent_name>' -- <command...>
+```
+
+Preferred multi-command flow:
+
+```bash
+ghostshell_session_start --agent <agent_id> --model <model_id> --agent-name '<agent_name>' --ttl-minutes 120
+# run commands normally while the session is active
+ghostshell_session_stop
+```
+
+If the skill is installed locally, agents can also use the bundled wrappers:
+
+```bash
+scripts/signed_exec.sh --agent <agent_id> --model <model_id> --agent-name '<agent_name>' -- <command...>
+scripts/signed_session.sh start --agent <agent_id> --model <model_id> --agent-name '<agent_name>' --ttl-minutes 120
+scripts/signed_session.sh stop
+```
+
+After important executions, verify provenance:
+
+```bash
+aiterminal provenance --contains "<token>" --limit 5
+```
+
 ## Features
 
 - 🎯 **Smart Suggestions**: Semantic search finds related commands
@@ -596,32 +643,11 @@ The vector DB batches inserts in groups of 100. If you see this error, your hist
 python3 -m unittest test_learning_migration.py
 ```
 
-### Project Structure
 
-```
-ai_terminal2/
-├── ghostshell.zsh       # Shell plugin
-├── server.py            # HTTP server
-├── engine.py            # Suggestion engine
-├── vector_db.py         # Vector DB + learning signals
-├── cli.py               # CLI tool
-├── requirements.txt     # Dependencies
-└── test_learning_migration.py  # Tests
-```
-
-## Contributing
-
-Contributions welcome! Areas for improvement:
-
-- [ ] Support for bash (currently zsh only)
-- [ ] Better history parsing (handle multiline commands)
-- [x] Configurable per-line LLM call budget
-- [ ] Vector DB compression/optimization
-- [ ] More AI providers
 
 ## License
 
-MIT
+Apache-2.0
 
 ## Credits
 
