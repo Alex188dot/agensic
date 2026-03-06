@@ -1616,10 +1616,6 @@ class SuggestionEngine:
         if not normalized_command:
             return
 
-        if normalized_source == "runtime" and exit_code != 0:
-            logger.debug("Skipping runtime command with non-zero exit code")
-            return
-
         try:
             vector_db = self._ensure_vector_db()
             if vector_db.is_blocked_command(normalized_command):
@@ -1686,6 +1682,9 @@ class SuggestionEngine:
         except Exception:
             cfg = {}
         include_ai_executed = bool(cfg.get("include_ai_executed_in_suggestions", False))
+        if normalized_source == "runtime" and exit_code != 0:
+            logger.debug("Skipping runtime command ingestion into suggestion store after provenance persistence")
+            return
         if classification_label == "AI_EXECUTED" and not include_ai_executed:
             logger.debug("Skipping AI_EXECUTED command ingestion into suggestion store")
             return

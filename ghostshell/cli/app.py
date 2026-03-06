@@ -15,6 +15,7 @@ import questionary
 import socket
 import signal
 import shlex
+import threading
 import uuid
 from typing import Any
 from pathlib import Path
@@ -126,8 +127,119 @@ DEFAULT_TUI_MANIFEST_URL = (
 )
 DEFAULT_SIGNING_AGENT = "unknown"
 DEFAULT_SIGNING_MODEL = "unknown-model"
+MAX_COMMAND_DURATION_MS = 86_400_000
+AI_EXEC_CAPTURE_LIMIT_BYTES = 16 * 1024
 DAEMON_BASE_URL = "http://127.0.0.1:22000"
 _DAEMON_AUTH_CACHE = AuthTokenCache()
+
+
+class _TailCaptureBuffer:
+    def __init__(self, limit_bytes: int) -> None:
+        self.limit_bytes = max(0, int(limit_bytes))
+        self._chunks: list[bytes] = []
+        self._size = 0
+        self.truncated = False
+
+    def append(self, chunk: bytes) -> None:
+        if not chunk:
+            return
+        if self.limit_bytes <= 0:
+            self.truncated = True
+            return
+        self._chunks.append(chunk)
+        self._size += len(chunk)
+        while self._size > self.limit_bytes and self._chunks:
+            overflow = self._size - self.limit_bytes
+            head = self._chunks[0]
+            if len(head) <= overflow:
+                self._chunks.pop(0)
+                self._size -= len(head)
+            else:
+                self._chunks[0] = head[overflow:]
+                self._size -= overflow
+            self.truncated = True
+
+    def text(self) -> str:
+        if not self._chunks:
+            return ""
+        return b"".join(self._chunks).decode("utf-8", errors="replace")
+
+
+def _write_stream_chunk(target: Any, chunk: bytes) -> None:
+    if not chunk:
+        return
+    buffer = getattr(target, "buffer", None)
+    if buffer is not None:
+        buffer.write(chunk)
+        buffer.flush()
+        return
+    target.write(chunk.decode("utf-8", errors="replace"))
+    target.flush()
+
+
+def _run_command_with_live_capture(
+    args: list[str],
+    capture_limit_bytes: int = AI_EXEC_CAPTURE_LIMIT_BYTES,
+) -> tuple[int, str, str, bool, bool]:
+    process = subprocess.Popen(
+        args,
+        stdin=None,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+    )
+    stdout_buffer = _TailCaptureBuffer(capture_limit_bytes)
+    stderr_buffer = _TailCaptureBuffer(capture_limit_bytes)
+
+    def pump(stream: Any, target: Any, tail: _TailCaptureBuffer) -> None:
+        if stream is None:
+            return
+        try:
+            while True:
+                chunk = stream.read(4096)
+                if not chunk:
+                    break
+                _write_stream_chunk(target, chunk)
+                tail.append(chunk)
+        finally:
+            stream.close()
+
+    stdout_thread = threading.Thread(
+        target=pump,
+        args=(process.stdout, sys.stdout, stdout_buffer),
+        daemon=True,
+    )
+    stderr_thread = threading.Thread(
+        target=pump,
+        args=(process.stderr, sys.stderr, stderr_buffer),
+        daemon=True,
+    )
+    stdout_thread.start()
+    stderr_thread.start()
+
+    try:
+        return_code = int(process.wait() or 0)
+    except KeyboardInterrupt:
+        try:
+            process.wait(timeout=0.2)
+        except subprocess.TimeoutExpired:
+            process.terminate()
+            try:
+                process.wait(timeout=1)
+            except subprocess.TimeoutExpired:
+                process.kill()
+                process.wait()
+        return_code = int(process.returncode or 130)
+    finally:
+        stdout_thread.join(timeout=1)
+        stderr_thread.join(timeout=1)
+
+    return (
+        return_code,
+        stdout_buffer.text(),
+        stderr_buffer.text(),
+        stdout_buffer.truncated,
+        stderr_buffer.truncated,
+    )
 
 class _BackSignal:
     pass
@@ -2547,13 +2659,22 @@ def ai_exec(
     command_text = shlex.join(args)
     started = time.perf_counter()
     duration_ms = None
+    captured_stdout_tail = ""
+    captured_stderr_tail = ""
+    captured_stdout_truncated = False
+    captured_stderr_truncated = False
     try:
-        result = subprocess.run(args, check=False)
-        exit_code = int(result.returncode or 0)
-        duration_ms = max(0, int((time.perf_counter() - started) * 1000.0))
+        (
+            exit_code,
+            captured_stdout_tail,
+            captured_stderr_tail,
+            captured_stdout_truncated,
+            captured_stderr_truncated,
+        ) = _run_command_with_live_capture(args)
+        duration_ms = min(MAX_COMMAND_DURATION_MS, max(0, int((time.perf_counter() - started) * 1000.0)))
     except KeyboardInterrupt:
         exit_code = 130
-        duration_ms = max(0, int((time.perf_counter() - started) * 1000.0))
+        duration_ms = min(MAX_COMMAND_DURATION_MS, max(0, int((time.perf_counter() - started) * 1000.0)))
     except Exception as exc:
         console.print(f"[red]Command execution failed:[/red] {exc}")
         raise typer.Exit(code=1)
@@ -2587,6 +2708,10 @@ def ai_exec(
         "proof_key_fingerprint": str(proof_metadata.get("proof_key_fingerprint", "") or ""),
         "proof_host_fingerprint": str(proof_metadata.get("proof_host_fingerprint", "") or ""),
     }
+    if exit_code != 0 and captured_stderr_tail:
+        payload["captured_stderr_tail"] = captured_stderr_tail
+    if exit_code != 0 and captured_stderr_truncated:
+        payload["captured_output_truncated"] = True
 
     try:
         response = _daemon_request(

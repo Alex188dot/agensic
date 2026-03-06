@@ -88,6 +88,72 @@ class CliAiExecTests(unittest.TestCase):
         self.assertEqual(payload["provenance_ai_model"], "gpt-5.3")
         self.assertGreaterEqual(int(payload.get("duration_ms", -1) or -1), 0)
 
+    def test_ai_exec_captures_output_for_nonzero_exit(self):
+        with patch("ghostshell.cli.app.sign_proof_payload", return_value="sig"), patch(
+            "ghostshell.cli.app.build_local_proof_metadata",
+            return_value={
+                "proof_signer_scope": "local-hmac",
+                "proof_key_fingerprint": "",
+                "proof_host_fingerprint": "",
+            },
+        ), patch(
+            "ghostshell.cli.app._daemon_auth_headers",
+            return_value={},
+        ), patch("ghostshell.cli.app.requests.request", return_value=_MockResponse()) as mock_request:
+            result = self.runner.invoke(
+                app,
+                [
+                    "ai-exec",
+                    "--agent",
+                    "codex",
+                    "--model",
+                    "gpt-5",
+                    "--",
+                    "python3",
+                    "-c",
+                    "import sys; print('out-line'); print('err-line', file=sys.stderr); sys.exit(9)",
+                ],
+            )
+
+        self.assertEqual(result.exit_code, 9)
+        payload = mock_request.call_args.kwargs["json"]
+        self.assertEqual(payload.get("captured_stderr_tail"), "err-line\n")
+        self.assertNotIn("captured_stdout_tail", payload)
+        self.assertNotIn("captured_output_truncated", payload)
+
+    def test_ai_exec_does_not_store_output_for_zero_exit(self):
+        with patch("ghostshell.cli.app.sign_proof_payload", return_value="sig"), patch(
+            "ghostshell.cli.app.build_local_proof_metadata",
+            return_value={
+                "proof_signer_scope": "local-hmac",
+                "proof_key_fingerprint": "",
+                "proof_host_fingerprint": "",
+            },
+        ), patch(
+            "ghostshell.cli.app._daemon_auth_headers",
+            return_value={},
+        ), patch("ghostshell.cli.app.requests.request", return_value=_MockResponse()) as mock_request:
+            result = self.runner.invoke(
+                app,
+                [
+                    "ai-exec",
+                    "--agent",
+                    "codex",
+                    "--model",
+                    "gpt-5",
+                    "--",
+                    "python3",
+                    "-c",
+                    "import sys; print('ok-out'); print('ok-err', file=sys.stderr); sys.exit(0)",
+                ],
+            )
+
+        self.assertEqual(result.exit_code, 0)
+        payload = mock_request.call_args.kwargs["json"]
+        self.assertNotIn("captured_stdout_tail", payload)
+        self.assertNotIn("captured_stderr_tail", payload)
+        self.assertNotIn("captured_output_truncated", payload)
+
 
 if __name__ == "__main__":
     unittest.main()

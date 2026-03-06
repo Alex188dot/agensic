@@ -28,6 +28,9 @@ class FeedbackSchemaTests(unittest.TestCase):
             exit_code=0,
             duration_ms=128,
             working_directory="/tmp/repo",
+            captured_stdout_tail="stdout tail",
+            captured_stderr_tail="stderr tail",
+            captured_output_truncated=True,
             shell_pid=123,
             provenance_last_action="human_typed",
             provenance_accept_origin="ai",
@@ -53,6 +56,7 @@ class FeedbackSchemaTests(unittest.TestCase):
         )
         self.assertEqual(payload.command, "git status")
         self.assertEqual(payload.duration_ms, 128)
+        self.assertEqual(payload.captured_stdout_tail, "stdout tail")
         self.assertEqual(payload.provenance_ai_agent, "codex")
         self.assertEqual(payload.proof_signer_scope, "local-hmac")
 

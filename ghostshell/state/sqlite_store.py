@@ -9,6 +9,14 @@ from typing import Dict, Iterable, List, Optional, Tuple
 from .journal import EventJournal
 from .snapshot import SnapshotManager
 
+MAX_COMMAND_DURATION_MS = 86_400_000
+
+
+def _clamp_duration_ms(value: object) -> Optional[int]:
+    if value is None:
+        return None
+    return min(MAX_COMMAND_DURATION_MS, max(0, int(value)))
+
 
 class SQLiteStateStore:
     def __init__(self, db_path: str, journal: Optional[EventJournal] = None):
@@ -398,7 +406,7 @@ class SQLiteStateStore:
                         source,
                         working_directory,
                         (int(exit_code) if exit_code is not None else None),
-                        (max(0, int(duration_ms)) if duration_ms is not None else None),
+                        _clamp_duration_ms(duration_ms),
                         (int(shell_pid) if shell_pid is not None else None),
                         evidence_json,
                         payload_json,
@@ -622,7 +630,7 @@ class SQLiteStateStore:
             "source": str(source or "unknown").strip().lower(),
             "working_directory": str(working_directory or "").strip(),
             "exit_code": (int(exit_code) if exit_code is not None else None),
-            "duration_ms": (max(0, int(duration_ms)) if duration_ms is not None else None),
+            "duration_ms": _clamp_duration_ms(duration_ms),
             "shell_pid": (int(shell_pid) if shell_pid is not None else None),
             "evidence": list(evidence or []),
             "payload": dict(payload or {}),

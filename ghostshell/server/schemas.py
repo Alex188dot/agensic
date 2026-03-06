@@ -138,6 +138,9 @@ class LogCommandPayload(BaseModel):
     duration_ms: int | None = None
     source: str = "unknown"
     working_directory: str | None = Field(default=None, max_length=2048)
+    captured_stdout_tail: str | None = Field(default=None, max_length=16384)
+    captured_stderr_tail: str | None = Field(default=None, max_length=16384)
+    captured_output_truncated: bool | None = None
     shell_pid: int | None = None
     provenance_last_action: str | None = None
     provenance_accept_origin: str | None = None

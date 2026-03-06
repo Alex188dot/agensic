@@ -316,6 +316,8 @@ class ServerContractTests(unittest.TestCase):
                     "source": "runtime",
                     "exit_code": 0,
                     "working_directory": "/tmp/repo-x",
+                    "captured_stderr_tail": "fatal: bad revision\n",
+                    "captured_output_truncated": True,
                     "provenance_agent_name": "Planner A",
                 },
             )
@@ -330,6 +332,8 @@ class ServerContractTests(unittest.TestCase):
             self.assertEqual(args[4], "/tmp/repo-x")
             self.assertIsInstance(args[5], dict)
             self.assertIn("provenance_last_action", args[5])
+            self.assertEqual(args[5].get("captured_stderr_tail"), "fatal: bad revision\n")
+            self.assertTrue(args[5].get("captured_output_truncated"))
             self.assertEqual(args[5].get("provenance_agent_name"), "Planner A")
 
     def test_provenance_runs_contract(self):

@@ -173,6 +173,94 @@ class GhostshellSessionShellTests(unittest.TestCase):
         self.assertIn("first\nsecond\n\n- bullet", result.stdout)
         self.assertNotIn("first\\nsecond", result.stdout)
 
+    def test_build_log_command_json_includes_captured_output_tails(self):
+        result = self._run_zsh(
+            """
+            stdout_path="$(mktemp "${HOME}/stdout.XXXXXX")"
+            stderr_path="$(mktemp "${HOME}/stderr.XXXXXX")"
+            print -rn -- "hello stdout" > "$stdout_path"
+            print -rn -- "hello stderr" > "$stderr_path"
+            json="$(_ghostshell_build_log_command_json 'echo hi' '7' 'runtime' '999999999' "$stdout_path" "$stderr_path")"
+            print -r -- "$json"
+            command rm -f -- "$stdout_path" "$stderr_path"
+            """
+        )
+        self.assertEqual(result.returncode, 0, msg=result.stderr)
+        self.assertIn('"captured_stderr_tail":"hello stderr"', result.stdout)
+        self.assertNotIn('"captured_stdout_tail"', result.stdout)
+        self.assertIn('"duration_ms":86400000', result.stdout)
+
+    def test_build_log_command_json_omits_output_for_zero_exit(self):
+        result = self._run_zsh(
+            """
+            stdout_path="$(mktemp "${HOME}/stdout.XXXXXX")"
+            stderr_path="$(mktemp "${HOME}/stderr.XXXXXX")"
+            print -rn -- "hello stdout" > "$stdout_path"
+            print -rn -- "hello stderr" > "$stderr_path"
+            json="$(_ghostshell_build_log_command_json 'echo hi' '0' 'runtime' '123' "$stdout_path" "$stderr_path")"
+            print -r -- "$json"
+            command rm -f -- "$stdout_path" "$stderr_path"
+            """
+        )
+        self.assertEqual(result.returncode, 0, msg=result.stderr)
+        self.assertNotIn('"captured_stdout_tail"', result.stdout)
+        self.assertNotIn('"captured_stderr_tail"', result.stdout)
+        self.assertNotIn('"captured_output_truncated"', result.stdout)
+
+    def test_runtime_capture_helpers_record_stdout_and_stderr(self):
+        result = self._run_zsh(
+            """
+            GHOSTSHELL_FORCE_RUNTIME_OUTPUT_CAPTURE=1
+            _ghostshell_begin_runtime_capture "echo hi"
+            print -r -- "stdout-line"
+            print -u2 -r -- "stderr-line"
+            stdout_path="$GHOSTSHELL_RUNTIME_CAPTURE_STDOUT_PATH"
+            stderr_path="$GHOSTSHELL_RUNTIME_CAPTURE_STDERR_PATH"
+            _ghostshell_end_runtime_capture
+            _ghostshell_wait_for_runtime_capture_flush "$stdout_path" "$stderr_path"
+            stdout_content="$(cat "$stdout_path")"
+            stderr_content="$(cat "$stderr_path")"
+            print -r -- "stdout_path=${stdout_path}"
+            print -r -- "stderr_path=${stderr_path}"
+            print -r -- "stdout_file=${stdout_content}"
+            print -r -- "stderr_file=${stderr_content}"
+            command rm -f -- "$stdout_path" "$stderr_path"
+            """
+        )
+        self.assertEqual(result.returncode, 0, msg=result.stderr)
+        lines = [line.strip() for line in result.stdout.splitlines() if line.strip()]
+        self.assertTrue(any(line.startswith("stdout_path=") for line in lines))
+        self.assertTrue(any(line.startswith("stderr_path=") for line in lines))
+        self.assertIn("stdout_file=stdout-line", lines)
+        self.assertIn("stderr_file=stderr-line", lines)
+
+    def test_runtime_capture_temporarily_forces_color_env_and_restores_it(self):
+        result = self._run_zsh(
+            """
+            export FORCE_COLOR=0
+            export CLICOLOR_FORCE=0
+            export PY_COLORS=0
+            export TTY_COMPATIBLE=0
+            export TTY_INTERACTIVE=0
+            export NO_COLOR=1
+            GHOSTSHELL_FORCE_RUNTIME_OUTPUT_CAPTURE=1
+            _ghostshell_begin_runtime_capture "echo hi"
+            during="${FORCE_COLOR}|${CLICOLOR_FORCE}|${PY_COLORS}|${TTY_COMPATIBLE}|${TTY_INTERACTIVE}|${NO_COLOR-__unset__}"
+            stdout_path="$GHOSTSHELL_RUNTIME_CAPTURE_STDOUT_PATH"
+            stderr_path="$GHOSTSHELL_RUNTIME_CAPTURE_STDERR_PATH"
+            _ghostshell_end_runtime_capture
+            _ghostshell_wait_for_runtime_capture_flush "$stdout_path" "$stderr_path"
+            after="${FORCE_COLOR}|${CLICOLOR_FORCE}|${PY_COLORS}|${TTY_COMPATIBLE}|${TTY_INTERACTIVE}|${NO_COLOR-__unset__}"
+            print -r -- "during=${during}"
+            print -r -- "after=${after}"
+            command rm -f -- "$stdout_path" "$stderr_path"
+            """
+        )
+        self.assertEqual(result.returncode, 0, msg=result.stderr)
+        lines = [line.strip() for line in result.stdout.splitlines() if line.strip()]
+        self.assertIn("during=1|1|1|1|1|__unset__", lines)
+        self.assertIn("after=0|0|0|0|0|1", lines)
+
     def test_runtime_blocked_command_guard_filters_destructive_commands(self):
         result = self._run_zsh(
             """

@@ -113,6 +113,7 @@ struct RunsPage {
 const SECONDS_PER_DAY: i64 = 24 * 60 * 60;
 const PROVENANCE_MAX_LOOKBACK_DAYS: i64 = 365;
 const CUSTOM_TIME_RANGE_MAX_DAYS: i64 = 30;
+const MAX_COMMAND_DURATION_MS: i64 = 86_400_000;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum SortMode {
@@ -218,6 +219,7 @@ struct App {
     search: String,
     input_mode: bool,
     details_open: bool,
+    details_scroll: u16,
     filter_menu: bool,
     filter_cursor: usize,
     selected: usize,
@@ -254,6 +256,7 @@ impl App {
             search: String::new(),
             input_mode: false,
             details_open: false,
+            details_scroll: 0,
             filter_menu: false,
             filter_cursor: 0,
             selected: 0,
@@ -290,6 +293,7 @@ impl App {
 
     fn format_duration(ms: Option<i64>) -> String {
         match ms {
+            Some(v) if v >= MAX_COMMAND_DURATION_MS => ">24h".to_string(),
             Some(v) if v >= 1000 => format!("{:.2}s", (v as f64) / 1000.0),
             Some(v) if v >= 0 => format!("{}ms", v),
             _ => "-".to_string(),
@@ -301,6 +305,43 @@ impl App {
             Some(v) => v.to_string(),
             None => "-".to_string(),
         }
+    }
+
+    fn label_style(label: &str) -> Style {
+        match label {
+            "HUMAN_TYPED" => Style::default().fg(Color::Green),
+            "AI_EXECUTED" => Style::default().fg(Color::Rgb(0, 191, 255)),
+            "GS_SUGGESTED_HUMAN_RAN" => Style::default().fg(Color::Cyan),
+            "AI_SUGGESTED_HUMAN_RAN" => Style::default().fg(Color::Rgb(25, 25, 112)),
+            "UNKNOWN" => Style::default().fg(Color::Rgb(211, 211, 211)),
+            _ => Style::default().fg(Color::Rgb(211, 211, 211)),
+        }
+    }
+
+    fn command_style() -> Style {
+        Style::default().fg(Color::Rgb(255, 165, 0))
+    }
+
+    fn key_hint_style() -> Style {
+        Style::default().fg(Color::Yellow)
+    }
+
+    fn header_style() -> Style {
+        Style::default().fg(Color::Cyan).add_modifier(Modifier::BOLD)
+    }
+
+    fn stderr_of<'a>(row: &'a RunEntry) -> &'a str {
+        row.payload
+            .get("captured_stderr_tail")
+            .and_then(Value::as_str)
+            .unwrap_or("")
+    }
+
+    fn output_truncated(row: &RunEntry) -> bool {
+        row.payload
+            .get("captured_output_truncated")
+            .and_then(Value::as_bool)
+            .unwrap_or(false)
     }
 
     fn search_hit(row: &RunEntry, query: &str) -> bool {
@@ -1096,6 +1137,37 @@ fn centered_rect(percent_x: u16, percent_y: u16, r: Rect) -> Rect {
         .split(popup_layout[1])[1]
 }
 
+fn push_text_block(lines: &mut Vec<Line<'static>>, text: &str) {
+    if text.is_empty() {
+        lines.push(Line::from("-"));
+        return;
+    }
+    for part in text.split('\n') {
+        lines.push(Line::from(part.to_string()));
+    }
+}
+
+fn rendered_line_height(line: &Line<'_>, width: usize) -> usize {
+    if width == 0 {
+        return 1;
+    }
+    let text = line
+        .spans
+        .iter()
+        .map(|span| span.content.as_ref())
+        .collect::<String>();
+    let len = text.chars().count();
+    if len == 0 {
+        1
+    } else {
+        ((len - 1) / width) + 1
+    }
+}
+
+fn rendered_content_height(lines: &[Line<'_>], width: usize) -> usize {
+    lines.iter().map(|line| rendered_line_height(line, width)).sum()
+}
+
 fn draw_ui(terminal: &mut Terminal<CrosstermBackend<Stdout>>, app: &App) -> io::Result<()> {
     terminal.draw(|frame| {
         let area = frame.area();
@@ -1175,9 +1247,7 @@ fn draw_ui(terminal: &mut Terminal<CrosstermBackend<Stdout>>, app: &App) -> io::
         frame.render_widget(top, chunks[0]);
 
         let compact = area.width < 120;
-        let header_style = Style::default()
-            .fg(Color::Cyan)
-            .add_modifier(Modifier::BOLD);
+        let header_style = App::header_style();
         let (page_start, page_end) = app.current_page_bounds();
         let page_rows = if page_start < page_end {
             &app.view_rows[page_start..page_end]
@@ -1189,11 +1259,6 @@ fn draw_ui(terminal: &mut Terminal<CrosstermBackend<Stdout>>, app: &App) -> io::
             .enumerate()
             .map(|(page_idx, row)| {
                 let global_idx = page_start + page_idx;
-                let base_style = if global_idx % 2 == 0 {
-                    Style::default().fg(Color::DarkGray)
-                } else {
-                    Style::default().fg(Color::White)
-                };
                 let dt = Local.timestamp_opt(row.ts, 0).single();
                 let time_str = match dt {
                     Some(date) => date.format("%m/%d/%y %H:%M:%S").to_string(),
@@ -1208,13 +1273,15 @@ fn draw_ui(terminal: &mut Terminal<CrosstermBackend<Stdout>>, app: &App) -> io::
                     Cell::from((global_idx + 1).to_string()),
                     Cell::from(time_str),
                     Cell::from(truncate_cell(&App::actor_of(row), 18)),
-                    Cell::from(command_text)
-                        .style(Style::default().fg(Color::Rgb(255, 165, 0))),
+                    Cell::from(command_text).style(App::command_style()),
                     Cell::from(App::format_exit(row.exit_code)),
                     Cell::from(App::format_duration(row.duration_ms)),
                 ];
                 if !compact {
-                    cells.push(Cell::from(truncate_cell(&row.label, 16)));
+                    cells.push(
+                        Cell::from(truncate_cell(&row.label, 16))
+                            .style(App::label_style(&row.label)),
+                    );
                     cells.push(Cell::from(truncate_cell(&row.model, 20)));
                     cells.push(Cell::from(truncate_cell(
                         if row.agent_name.trim().is_empty() {
@@ -1225,7 +1292,7 @@ fn draw_ui(terminal: &mut Terminal<CrosstermBackend<Stdout>>, app: &App) -> io::
                         18,
                     )));
                 }
-                Row::new(cells).style(base_style)
+                Row::new(cells)
             })
             .collect();
 
@@ -1370,51 +1437,97 @@ fn draw_ui(terminal: &mut Terminal<CrosstermBackend<Stdout>>, app: &App) -> io::
         }
 
         if app.details_open {
-            let popup = centered_rect(80, 65, area);
+            let popup = centered_rect(90, 80, area);
             if let Some(global_idx) = app.selected_global_index() {
                 if let Some(row) = app.view_rows.get(global_idx) {
-                let payload_summary = match &row.payload {
-                    Value::Object(_) | Value::Array(_) => {
-                        let text = serde_json::to_string_pretty(&row.payload)
-                            .unwrap_or_else(|_| "{}".to_string());
-                        truncate_cell(&text, 1200)
-                    }
-                    other => other.to_string(),
-                };
-                let details = vec![
-                    Line::from(format!("run_id: {}", row.run_id)),
-                    Line::from(format!("time: {}", Local.timestamp_opt(row.ts, 0).single().map(|d| d.format("%m/%d/%y %H:%M:%S").to_string()).unwrap_or_else(|| row.ts.to_string()))),
-                    Line::from(format!("actor: {}", App::actor_of(row))),
-                    Line::from(format!(
-                        "agent_name: {}",
-                        if row.agent_name.trim().is_empty() {
-                            "-"
-                        } else {
-                            row.agent_name.as_str()
+                    let stderr_tail = App::stderr_of(row);
+                    let captured_output_truncated = App::output_truncated(row);
+                    let payload_without_output = match &row.payload {
+                        Value::Object(map) => {
+                            let mut filtered = map.clone();
+                            filtered.remove("captured_stdout_tail");
+                            filtered.remove("captured_stderr_tail");
+                            filtered.remove("captured_output_truncated");
+                            Value::Object(filtered)
                         }
-                    )),
-                    Line::from(format!("label: {}", row.label)),
-                    Line::from(format!("tier: {}", row.evidence_tier)),
-                    Line::from(format!("model: {}", row.model)),
-                    Line::from(format!("exit: {}", App::format_exit(row.exit_code))),
-                    Line::from(format!("duration: {}", App::format_duration(row.duration_ms))),
-                    Line::from(format!("cwd: {}", row.working_directory)),
-                    Line::from(""),
-                    Line::from("command:"),
-                    Line::from(row.command.clone()),
-                    Line::from(""),
-                    Line::from("payload:"),
-                    Line::from(payload_summary),
-                ];
-                let panel = Paragraph::new(details)
-                    .block(
-                        Block::default()
-                            .borders(Borders::ALL)
-                            .title("Run details (Enter/Esc close)"),
-                    )
-                    .wrap(Wrap { trim: true });
-                frame.render_widget(Clear, popup);
-                frame.render_widget(panel, popup);
+                        other => other.clone(),
+                    };
+                    let payload_summary = match &payload_without_output {
+                        Value::Object(_) | Value::Array(_) => {
+                            let text = serde_json::to_string_pretty(&payload_without_output)
+                                .unwrap_or_else(|_| "{}".to_string());
+                            truncate_cell(&text, 1200)
+                        }
+                        other => other.to_string(),
+                    };
+                    let mut details: Vec<Line<'static>> = vec![
+                        Line::from(format!("run_id: {}", row.run_id)),
+                        Line::from(format!("time: {}", Local.timestamp_opt(row.ts, 0).single().map(|d| d.format("%m/%d/%y %H:%M:%S").to_string()).unwrap_or_else(|| row.ts.to_string()))),
+                        Line::from(format!("actor: {}", App::actor_of(row))),
+                        Line::from(format!(
+                            "agent_name: {}",
+                            if row.agent_name.trim().is_empty() {
+                                "-"
+                            } else {
+                                row.agent_name.as_str()
+                            }
+                        )),
+                        Line::from(vec![
+                            Span::raw("label: "),
+                            Span::styled(row.label.clone(), App::label_style(&row.label)),
+                        ]),
+                        Line::from(format!("tier: {}", row.evidence_tier)),
+                        Line::from(format!("model: {}", row.model)),
+                        Line::from(format!("exit: {}", App::format_exit(row.exit_code))),
+                        Line::from(format!("duration: {}", App::format_duration(row.duration_ms))),
+                        Line::from(format!("cwd: {}", row.working_directory)),
+                        Line::from(""),
+                        Line::from("command:"),
+                        Line::from(Span::styled(row.command.clone(), App::command_style())),
+                    ];
+                    let show_stderr = row.exit_code.unwrap_or(0) != 0 && !stderr_tail.is_empty();
+                    if show_stderr {
+                        details.push(Line::from(""));
+                        if captured_output_truncated {
+                            details.push(Line::from("captured output: tail only (truncated)"));
+                        }
+                        if show_stderr {
+                            details.push(Line::from("stderr:"));
+                            push_text_block(&mut details, stderr_tail);
+                        }
+                    }
+                    details.push(Line::from(""));
+                    details.push(Line::from("payload:"));
+                    push_text_block(&mut details, &payload_summary);
+                    let content_width = popup.width.saturating_sub(2) as usize;
+                    let content_height = popup.height.saturating_sub(2) as usize;
+                    let total_height = rendered_content_height(&details, content_width);
+                    let has_overflow = total_height > content_height;
+                    let max_scroll =
+                        total_height.saturating_sub(content_height).min(u16::MAX as usize) as u16;
+                    let scroll_offset = if has_overflow {
+                        app.details_scroll.min(max_scroll)
+                    } else {
+                        0
+                    };
+                    let mut title_spans = vec![
+                        Span::styled("Run details ", App::header_style()),
+                        Span::styled("(Enter/Esc close)", App::key_hint_style()),
+                    ];
+                    if has_overflow {
+                        title_spans.push(Span::raw("  "));
+                        title_spans.push(Span::styled("↑↓ scroll", App::key_hint_style()));
+                    }
+                    let panel = Paragraph::new(details)
+                        .block(
+                            Block::default()
+                                .borders(Borders::ALL)
+                                .title(Line::from(title_spans)),
+                        )
+                        .scroll((scroll_offset, 0))
+                        .wrap(Wrap { trim: true });
+                    frame.render_widget(Clear, popup);
+                    frame.render_widget(panel, popup);
                 }
             }
         }
@@ -1534,7 +1647,23 @@ fn handle_key(app: &mut App, key: KeyEvent) -> bool {
 
     if app.details_open {
         match key.code {
-            KeyCode::Esc | KeyCode::Enter => app.details_open = false,
+            KeyCode::Esc | KeyCode::Enter => {
+                app.details_open = false;
+                app.details_scroll = 0;
+            }
+            KeyCode::Up | KeyCode::Char('k') => {
+                app.details_scroll = app.details_scroll.saturating_sub(1);
+            }
+            KeyCode::Down | KeyCode::Char('j') => {
+                app.details_scroll = app.details_scroll.saturating_add(1);
+            }
+            KeyCode::PageUp => {
+                app.details_scroll = app.details_scroll.saturating_sub(10);
+            }
+            KeyCode::PageDown => {
+                app.details_scroll = app.details_scroll.saturating_add(10);
+            }
+            KeyCode::Home => app.details_scroll = 0,
             _ => {}
         }
         return false;
@@ -1584,6 +1713,7 @@ fn handle_key(app: &mut App, key: KeyEvent) -> bool {
         KeyCode::Enter => {
             if app.selected_global_index().is_some() {
                 app.details_open = true;
+                app.details_scroll = 0;
             }
         }
         KeyCode::Char('s') => {
@@ -1641,7 +1771,11 @@ fn export_rows(rows: &[RunEntry], export_format: &str, out_path: &str) -> Result
     }
 
     if format == "json" {
-        let payload = json!({"runs": rows, "total": rows.len()});
+        let export_rows: Vec<Value> = rows
+            .iter()
+            .map(export_row_json_value)
+            .collect::<Result<Vec<_>, _>>()?;
+        let payload = json!({"runs": export_rows, "total": rows.len()});
         let mut file = File::create(output).map_err(|e| format!("create output failed: {}", e))?;
         serde_json::to_writer_pretty(&mut file, &payload)
             .map_err(|e| format!("write json failed: {}", e))?;
@@ -1670,6 +1804,8 @@ fn export_rows(rows: &[RunEntry], export_format: &str, out_path: &str) -> Result
             "exit_code",
             "duration_ms",
             "shell_pid",
+            "stderr",
+            "output_truncated",
         ])
         .map_err(|e| format!("write csv header failed: {}", e))?;
 
@@ -1692,6 +1828,8 @@ fn export_rows(rows: &[RunEntry], export_format: &str, out_path: &str) -> Result
                 row.exit_code.map(|v| v.to_string()).unwrap_or_default(),
                 row.duration_ms.map(|v| v.to_string()).unwrap_or_default(),
                 row.shell_pid.map(|v| v.to_string()).unwrap_or_default(),
+                App::stderr_of(row).to_string(),
+                App::output_truncated(row).to_string(),
             ])
             .map_err(|e| format!("write csv row failed: {}", e))?;
     }
@@ -1699,6 +1837,19 @@ fn export_rows(rows: &[RunEntry], export_format: &str, out_path: &str) -> Result
         .flush()
         .map_err(|e| format!("flush csv failed: {}", e))?;
     Ok(())
+}
+
+fn export_row_json_value(row: &RunEntry) -> Result<Value, String> {
+    let mut value =
+        serde_json::to_value(row).map_err(|e| format!("serialize export row failed: {}", e))?;
+    if let Value::Object(map) = &mut value {
+        map.insert("stderr".to_string(), Value::String(App::stderr_of(row).to_string()));
+        map.insert(
+            "output_truncated".to_string(),
+            Value::Bool(App::output_truncated(row)),
+        );
+    }
+    Ok(value)
 }
 
 fn run_export_mode(client: &Client, args: &Args) -> Result<(), String> {
@@ -1833,6 +1984,7 @@ fn flush_stdin_input_buffer() {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::fs;
 
     #[test]
     fn last_7d_since_ts_is_correct() {
@@ -1925,5 +2077,102 @@ mod tests {
         assert!(!ts_within_time_bounds(200, 100, Some(200)));
         assert!(!ts_within_time_bounds(250, 100, Some(200)));
         assert!(ts_within_time_bounds(100, 100, None));
+    }
+
+    fn sample_run_entry(stderr: &str, truncated: bool) -> RunEntry {
+        RunEntry {
+            run_id: "run-1".to_string(),
+            ts: 1,
+            command: "git status".to_string(),
+            label: "AI_EXECUTED".to_string(),
+            confidence: 1.0,
+            agent: "codex".to_string(),
+            agent_name: "Codex".to_string(),
+            provider: String::new(),
+            model: "gpt-5".to_string(),
+            raw_model: String::new(),
+            normalized_model: String::new(),
+            model_fingerprint: String::new(),
+            evidence_tier: "proof".to_string(),
+            agent_source: String::new(),
+            registry_version: String::new(),
+            registry_status: String::new(),
+            source: "runtime".to_string(),
+            working_directory: "/tmp".to_string(),
+            exit_code: Some(1),
+            duration_ms: Some(42),
+            shell_pid: Some(123),
+            evidence: Vec::new(),
+            payload: json!({
+                "captured_stderr_tail": stderr,
+                "captured_output_truncated": truncated
+            }),
+        }
+    }
+
+    fn temp_export_path(ext: &str) -> std::path::PathBuf {
+        let unique = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .expect("time should be monotonic")
+            .as_nanos();
+        std::env::temp_dir().join(format!("ghostshell-provenance-export-{}.{}", unique, ext))
+    }
+
+    #[test]
+    fn export_json_includes_stderr_and_truncation_fields() {
+        let out = temp_export_path("json");
+        let rows = vec![sample_run_entry("fatal: bad revision\n", true)];
+
+        export_rows(&rows, "json", out.to_str().expect("valid temp path")).expect("json export");
+
+        let text = fs::read_to_string(&out).expect("read json export");
+        let payload: Value = serde_json::from_str(&text).expect("parse json export");
+        assert_eq!(payload["runs"][0]["stderr"], "fatal: bad revision\n");
+        assert_eq!(payload["runs"][0]["output_truncated"], true);
+
+        let _ = fs::remove_file(out);
+    }
+
+    #[test]
+    fn export_csv_includes_stderr_and_truncation_columns() {
+        let out = temp_export_path("csv");
+        let rows = vec![sample_run_entry("fatal: bad revision\n", true)];
+
+        export_rows(&rows, "csv", out.to_str().expect("valid temp path")).expect("csv export");
+
+        let mut reader = csv::Reader::from_path(&out).expect("open csv export");
+        let headers = reader.headers().expect("csv headers").clone();
+        assert_eq!(
+            headers.iter().collect::<Vec<_>>(),
+            vec![
+                "run_id",
+                "ts",
+                "command",
+                "label",
+                "confidence",
+                "actor",
+                "agent",
+                "agent_name",
+                "provider",
+                "model",
+                "evidence_tier",
+                "source",
+                "working_directory",
+                "exit_code",
+                "duration_ms",
+                "shell_pid",
+                "stderr",
+                "output_truncated",
+            ]
+        );
+        let record = reader
+            .records()
+            .next()
+            .expect("csv row present")
+            .expect("csv row valid");
+        assert_eq!(record.get(16), Some("fatal: bad revision\n"));
+        assert_eq!(record.get(17), Some("true"));
+
+        let _ = fs::remove_file(out);
     }
 }

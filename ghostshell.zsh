@@ -38,6 +38,24 @@ typeset -g GHOSTSHELL_TIMER_PID=""
 typeset -g GHOSTSHELL_LAST_BUFFER=""
 typeset -g GHOSTSHELL_LAST_EXECUTED_CMD=""
 typeset -g GHOSTSHELL_LAST_EXECUTED_STARTED_AT_MS=0
+typeset -g GHOSTSHELL_RUNTIME_CAPTURE_STDOUT_PATH=""
+typeset -g GHOSTSHELL_RUNTIME_CAPTURE_STDERR_PATH=""
+typeset -g GHOSTSHELL_RUNTIME_CAPTURE_ORIG_STDOUT_FD=""
+typeset -g GHOSTSHELL_RUNTIME_CAPTURE_ORIG_STDERR_FD=""
+typeset -g GHOSTSHELL_FORCE_RUNTIME_OUTPUT_CAPTURE=0
+typeset -g GHOSTSHELL_RUNTIME_CAPTURE_ENV_ACTIVE=0
+typeset -g GHOSTSHELL_RUNTIME_CAPTURE_SAVED_FORCE_COLOR=""
+typeset -g GHOSTSHELL_RUNTIME_CAPTURE_SAVED_FORCE_COLOR_SET=0
+typeset -g GHOSTSHELL_RUNTIME_CAPTURE_SAVED_CLICOLOR_FORCE=""
+typeset -g GHOSTSHELL_RUNTIME_CAPTURE_SAVED_CLICOLOR_FORCE_SET=0
+typeset -g GHOSTSHELL_RUNTIME_CAPTURE_SAVED_PY_COLORS=""
+typeset -g GHOSTSHELL_RUNTIME_CAPTURE_SAVED_PY_COLORS_SET=0
+typeset -g GHOSTSHELL_RUNTIME_CAPTURE_SAVED_TTY_COMPATIBLE=""
+typeset -g GHOSTSHELL_RUNTIME_CAPTURE_SAVED_TTY_COMPATIBLE_SET=0
+typeset -g GHOSTSHELL_RUNTIME_CAPTURE_SAVED_TTY_INTERACTIVE=""
+typeset -g GHOSTSHELL_RUNTIME_CAPTURE_SAVED_TTY_INTERACTIVE_SET=0
+typeset -g GHOSTSHELL_RUNTIME_CAPTURE_SAVED_NO_COLOR=""
+typeset -g GHOSTSHELL_RUNTIME_CAPTURE_SAVED_NO_COLOR_SET=0
 typeset -g GHOSTSHELL_LINE_LAST_ACTION=""
 typeset -g GHOSTSHELL_LINE_ACCEPTED_ORIGIN=""
 typeset -g GHOSTSHELL_LINE_ACCEPTED_MODE=""
@@ -133,6 +151,8 @@ GHOSTSHELL_BLOCKED_EXECUTABLES=(
 )
 typeset -g -a GHOSTSHELL_BLOCKED_EXECUTABLE_PREFIXES
 GHOSTSHELL_BLOCKED_EXECUTABLE_PREFIXES=(mkfs. mkfs_ newfs)
+typeset -g -a GHOSTSHELL_TTY_SENSITIVE_EXECUTABLES
+GHOSTSHELL_TTY_SENSITIVE_EXECUTABLES=(less more man top htop watch vi vim nvim nano emacs fzf tig ssh sftp scp ftp telnet tmux screen)
 
 _ghostshell_value_in_array() {
     local needle="$1"
@@ -1712,11 +1732,259 @@ _ghostshell_send_feedback() {
     ) &!
 }
 
-_ghostshell_log_command() {
+_ghostshell_cleanup_runtime_capture_paths() {
+    local path
+    for path in "$@"; do
+        if [[ -n "$path" ]]; then
+            command rm -f -- "$path" >/dev/null 2>&1
+        fi
+    done
+}
+
+_ghostshell_should_capture_runtime_output() {
+    local command="$1"
+    if [[ "$GHOSTSHELL_FORCE_RUNTIME_OUTPUT_CAPTURE" != "1" ]]; then
+        if [[ ! -t 1 || ! -t 2 ]]; then
+            return 1
+        fi
+    fi
+
+    local -a tokens
+    local token=""
+    local exe=""
+    local i=1
+    tokens=(${(z)command})
+    while (( i <= ${#tokens[@]} )); do
+        token="${tokens[$i]}"
+        if [[ -z "$token" ]]; then
+            (( i++ ))
+            continue
+        fi
+        case "$token" in
+            sudo|command)
+                (( i++ ))
+                continue
+                ;;
+            env|/usr/bin/env)
+                (( i++ ))
+                while (( i <= ${#tokens[@]} )); do
+                    token="${tokens[$i]}"
+                    if [[ -z "$token" || "$token" == -* || "$token" == *=* ]]; then
+                        (( i++ ))
+                        continue
+                    fi
+                    break
+                done
+                continue
+                ;;
+            -*|*=*)
+                (( i++ ))
+                continue
+                ;;
+            *)
+                exe="${(L)${token:t}}"
+                break
+                ;;
+        esac
+    done
+
+    if [[ -z "$exe" ]]; then
+        return 0
+    fi
+    if _ghostshell_value_in_array "$exe" "${GHOSTSHELL_TTY_SENSITIVE_EXECUTABLES[@]}"; then
+        return 1
+    fi
+    return 0
+}
+
+_ghostshell_apply_runtime_capture_env() {
+    if [[ ${+FORCE_COLOR} -eq 1 ]]; then
+        GHOSTSHELL_RUNTIME_CAPTURE_SAVED_FORCE_COLOR_SET=1
+        GHOSTSHELL_RUNTIME_CAPTURE_SAVED_FORCE_COLOR="$FORCE_COLOR"
+    else
+        GHOSTSHELL_RUNTIME_CAPTURE_SAVED_FORCE_COLOR_SET=0
+        GHOSTSHELL_RUNTIME_CAPTURE_SAVED_FORCE_COLOR=""
+    fi
+    if [[ ${+CLICOLOR_FORCE} -eq 1 ]]; then
+        GHOSTSHELL_RUNTIME_CAPTURE_SAVED_CLICOLOR_FORCE_SET=1
+        GHOSTSHELL_RUNTIME_CAPTURE_SAVED_CLICOLOR_FORCE="$CLICOLOR_FORCE"
+    else
+        GHOSTSHELL_RUNTIME_CAPTURE_SAVED_CLICOLOR_FORCE_SET=0
+        GHOSTSHELL_RUNTIME_CAPTURE_SAVED_CLICOLOR_FORCE=""
+    fi
+    if [[ ${+PY_COLORS} -eq 1 ]]; then
+        GHOSTSHELL_RUNTIME_CAPTURE_SAVED_PY_COLORS_SET=1
+        GHOSTSHELL_RUNTIME_CAPTURE_SAVED_PY_COLORS="$PY_COLORS"
+    else
+        GHOSTSHELL_RUNTIME_CAPTURE_SAVED_PY_COLORS_SET=0
+        GHOSTSHELL_RUNTIME_CAPTURE_SAVED_PY_COLORS=""
+    fi
+    if [[ ${+TTY_COMPATIBLE} -eq 1 ]]; then
+        GHOSTSHELL_RUNTIME_CAPTURE_SAVED_TTY_COMPATIBLE_SET=1
+        GHOSTSHELL_RUNTIME_CAPTURE_SAVED_TTY_COMPATIBLE="$TTY_COMPATIBLE"
+    else
+        GHOSTSHELL_RUNTIME_CAPTURE_SAVED_TTY_COMPATIBLE_SET=0
+        GHOSTSHELL_RUNTIME_CAPTURE_SAVED_TTY_COMPATIBLE=""
+    fi
+    if [[ ${+TTY_INTERACTIVE} -eq 1 ]]; then
+        GHOSTSHELL_RUNTIME_CAPTURE_SAVED_TTY_INTERACTIVE_SET=1
+        GHOSTSHELL_RUNTIME_CAPTURE_SAVED_TTY_INTERACTIVE="$TTY_INTERACTIVE"
+    else
+        GHOSTSHELL_RUNTIME_CAPTURE_SAVED_TTY_INTERACTIVE_SET=0
+        GHOSTSHELL_RUNTIME_CAPTURE_SAVED_TTY_INTERACTIVE=""
+    fi
+    if [[ ${+NO_COLOR} -eq 1 ]]; then
+        GHOSTSHELL_RUNTIME_CAPTURE_SAVED_NO_COLOR_SET=1
+        GHOSTSHELL_RUNTIME_CAPTURE_SAVED_NO_COLOR="$NO_COLOR"
+    else
+        GHOSTSHELL_RUNTIME_CAPTURE_SAVED_NO_COLOR_SET=0
+        GHOSTSHELL_RUNTIME_CAPTURE_SAVED_NO_COLOR=""
+    fi
+
+    export FORCE_COLOR=1
+    export CLICOLOR_FORCE=1
+    export PY_COLORS=1
+    export TTY_COMPATIBLE=1
+    export TTY_INTERACTIVE=1
+    unset NO_COLOR
+    GHOSTSHELL_RUNTIME_CAPTURE_ENV_ACTIVE=1
+}
+
+_ghostshell_restore_runtime_capture_env() {
+    if [[ "$GHOSTSHELL_RUNTIME_CAPTURE_ENV_ACTIVE" != "1" ]]; then
+        return
+    fi
+
+    if [[ "$GHOSTSHELL_RUNTIME_CAPTURE_SAVED_FORCE_COLOR_SET" == "1" ]]; then
+        export FORCE_COLOR="$GHOSTSHELL_RUNTIME_CAPTURE_SAVED_FORCE_COLOR"
+    else
+        unset FORCE_COLOR
+    fi
+    if [[ "$GHOSTSHELL_RUNTIME_CAPTURE_SAVED_CLICOLOR_FORCE_SET" == "1" ]]; then
+        export CLICOLOR_FORCE="$GHOSTSHELL_RUNTIME_CAPTURE_SAVED_CLICOLOR_FORCE"
+    else
+        unset CLICOLOR_FORCE
+    fi
+    if [[ "$GHOSTSHELL_RUNTIME_CAPTURE_SAVED_PY_COLORS_SET" == "1" ]]; then
+        export PY_COLORS="$GHOSTSHELL_RUNTIME_CAPTURE_SAVED_PY_COLORS"
+    else
+        unset PY_COLORS
+    fi
+    if [[ "$GHOSTSHELL_RUNTIME_CAPTURE_SAVED_TTY_COMPATIBLE_SET" == "1" ]]; then
+        export TTY_COMPATIBLE="$GHOSTSHELL_RUNTIME_CAPTURE_SAVED_TTY_COMPATIBLE"
+    else
+        unset TTY_COMPATIBLE
+    fi
+    if [[ "$GHOSTSHELL_RUNTIME_CAPTURE_SAVED_TTY_INTERACTIVE_SET" == "1" ]]; then
+        export TTY_INTERACTIVE="$GHOSTSHELL_RUNTIME_CAPTURE_SAVED_TTY_INTERACTIVE"
+    else
+        unset TTY_INTERACTIVE
+    fi
+    if [[ "$GHOSTSHELL_RUNTIME_CAPTURE_SAVED_NO_COLOR_SET" == "1" ]]; then
+        export NO_COLOR="$GHOSTSHELL_RUNTIME_CAPTURE_SAVED_NO_COLOR"
+    else
+        unset NO_COLOR
+    fi
+
+    GHOSTSHELL_RUNTIME_CAPTURE_ENV_ACTIVE=0
+}
+
+_ghostshell_end_runtime_capture() {
+    local stdout_fd="$GHOSTSHELL_RUNTIME_CAPTURE_ORIG_STDOUT_FD"
+    local stderr_fd="$GHOSTSHELL_RUNTIME_CAPTURE_ORIG_STDERR_FD"
+    if [[ -n "$stdout_fd" ]]; then
+        exec 1>&$stdout_fd
+        exec {stdout_fd}>&-
+    fi
+    if [[ -n "$stderr_fd" ]]; then
+        exec 2>&$stderr_fd
+        exec {stderr_fd}>&-
+    fi
+    GHOSTSHELL_RUNTIME_CAPTURE_ORIG_STDOUT_FD=""
+    GHOSTSHELL_RUNTIME_CAPTURE_ORIG_STDERR_FD=""
+    _ghostshell_restore_runtime_capture_env
+}
+
+_ghostshell_wait_for_runtime_capture_flush() {
+    local stdout_path="${1:-}"
+    local stderr_path="${2:-}"
+    python3 - "$stdout_path" "$stderr_path" <<'PY' 2>/dev/null
+import os
+import sys
+import time
+
+paths = [path for path in sys.argv[1:] if str(path or "").strip()]
+if not paths:
+    raise SystemExit(0)
+
+prev = None
+stable = 0
+for _ in range(10):
+    sizes = tuple(os.path.getsize(path) if os.path.exists(path) else -1 for path in paths)
+    if sizes == prev:
+        stable += 1
+        if stable >= 1:
+            break
+    else:
+        stable = 0
+    prev = sizes
+    time.sleep(0.01)
+PY
+}
+
+_ghostshell_begin_runtime_capture() {
+    local command="$1"
+    local stdout_path=""
+    local stderr_path=""
+    local stdout_fd=""
+    local stderr_fd=""
+    local capture_dir="${GHOSTSHELL_HOME}/runtime_capture"
+
+    _ghostshell_end_runtime_capture
+    _ghostshell_cleanup_runtime_capture_paths \
+        "$GHOSTSHELL_RUNTIME_CAPTURE_STDOUT_PATH" \
+        "$GHOSTSHELL_RUNTIME_CAPTURE_STDERR_PATH"
+    GHOSTSHELL_RUNTIME_CAPTURE_STDOUT_PATH=""
+    GHOSTSHELL_RUNTIME_CAPTURE_STDERR_PATH=""
+
+    if ! _ghostshell_should_capture_runtime_output "$command"; then
+        return 1
+    fi
+
+    command mkdir -p "$capture_dir" >/dev/null 2>&1 || return 1
+    stdout_path="$(mktemp "$capture_dir/stdout.XXXXXX" 2>/dev/null)" || return 1
+    stderr_path="$(mktemp "$capture_dir/stderr.XXXXXX" 2>/dev/null)" || {
+        _ghostshell_cleanup_runtime_capture_paths "$stdout_path"
+        return 1
+    }
+
+    exec {stdout_fd}>&1 || {
+        _ghostshell_cleanup_runtime_capture_paths "$stdout_path" "$stderr_path"
+        return 1
+    }
+    exec {stderr_fd}>&2 || {
+        exec {stdout_fd}>&-
+        _ghostshell_cleanup_runtime_capture_paths "$stdout_path" "$stderr_path"
+        return 1
+    }
+
+    _ghostshell_apply_runtime_capture_env
+    exec > >(command tee -a -- "$stdout_path" >&$stdout_fd) 2> >(command tee -a -- "$stderr_path" >&$stderr_fd)
+
+    GHOSTSHELL_RUNTIME_CAPTURE_STDOUT_PATH="$stdout_path"
+    GHOSTSHELL_RUNTIME_CAPTURE_STDERR_PATH="$stderr_path"
+    GHOSTSHELL_RUNTIME_CAPTURE_ORIG_STDOUT_FD="$stdout_fd"
+    GHOSTSHELL_RUNTIME_CAPTURE_ORIG_STDERR_FD="$stderr_fd"
+    return 0
+}
+
+_ghostshell_build_log_command_json() {
     local command="$1"
     local exit_code="$2"
     local source="${3:-runtime}"
     local duration_ms="${4:-}"
+    local stdout_capture_path="${5:-}"
+    local stderr_capture_path="${6:-}"
     local log_cwd="$PWD"
     local log_shell_pid="$$"
     local log_last_action="$GHOSTSHELL_PENDING_LAST_ACTION"
@@ -1741,38 +2009,41 @@ _ghostshell_log_command() {
     local log_proof_key_fingerprint="$GHOSTSHELL_PENDING_PROOF_KEY_FINGERPRINT"
     local log_proof_host_fingerprint="$GHOSTSHELL_PENDING_PROOF_HOST_FINGERPRINT"
 
-    local json_data
-    json_data="$(
-        GHOSTSHELL_LOG_COMMAND="$command" \
-        GHOSTSHELL_LOG_EXIT="$exit_code" \
-        GHOSTSHELL_LOG_DURATION_MS="$duration_ms" \
-        GHOSTSHELL_LOG_SOURCE="$source" \
-        GHOSTSHELL_LOG_CWD="$log_cwd" \
-        GHOSTSHELL_LOG_SHELL_PID="$log_shell_pid" \
-        GHOSTSHELL_LOG_LAST_ACTION="$log_last_action" \
-        GHOSTSHELL_LOG_ACCEPT_ORIGIN="$log_accept_origin" \
-        GHOSTSHELL_LOG_ACCEPT_MODE="$log_accept_mode" \
-        GHOSTSHELL_LOG_SUGGESTION_KIND="$log_suggestion_kind" \
-        GHOSTSHELL_LOG_MANUAL_AFTER_ACCEPT="$log_manual_after_accept" \
-        GHOSTSHELL_LOG_AI_AGENT="$log_ai_agent" \
-        GHOSTSHELL_LOG_AI_PROVIDER="$log_ai_provider" \
-        GHOSTSHELL_LOG_AI_MODEL="$log_ai_model" \
-        GHOSTSHELL_LOG_AGENT_NAME="$log_agent_name" \
-        GHOSTSHELL_LOG_AGENT_HINT="$log_agent_hint" \
-        GHOSTSHELL_LOG_MODEL_RAW="$log_model_raw" \
-        GHOSTSHELL_LOG_WRAPPER_ID="$log_wrapper_id" \
-        GHOSTSHELL_LOG_PROOF_LABEL="$log_proof_label" \
-        GHOSTSHELL_LOG_PROOF_AGENT="$log_proof_agent" \
-        GHOSTSHELL_LOG_PROOF_MODEL="$log_proof_model" \
-        GHOSTSHELL_LOG_PROOF_TRACE="$log_proof_trace" \
-        GHOSTSHELL_LOG_PROOF_TIMESTAMP="$log_proof_timestamp" \
-        GHOSTSHELL_LOG_PROOF_SIGNATURE="$log_proof_signature" \
-        GHOSTSHELL_LOG_PROOF_SIGNER_SCOPE="$log_proof_signer_scope" \
-        GHOSTSHELL_LOG_PROOF_KEY_FINGERPRINT="$log_proof_key_fingerprint" \
-        GHOSTSHELL_LOG_PROOF_HOST_FINGERPRINT="$log_proof_host_fingerprint" \
-        python3 - <<'PY' 2>/dev/null
+    GHOSTSHELL_LOG_COMMAND="$command" \
+    GHOSTSHELL_LOG_EXIT="$exit_code" \
+    GHOSTSHELL_LOG_DURATION_MS="$duration_ms" \
+    GHOSTSHELL_LOG_SOURCE="$source" \
+    GHOSTSHELL_LOG_CWD="$log_cwd" \
+    GHOSTSHELL_LOG_SHELL_PID="$log_shell_pid" \
+    GHOSTSHELL_LOG_LAST_ACTION="$log_last_action" \
+    GHOSTSHELL_LOG_ACCEPT_ORIGIN="$log_accept_origin" \
+    GHOSTSHELL_LOG_ACCEPT_MODE="$log_accept_mode" \
+    GHOSTSHELL_LOG_SUGGESTION_KIND="$log_suggestion_kind" \
+    GHOSTSHELL_LOG_MANUAL_AFTER_ACCEPT="$log_manual_after_accept" \
+    GHOSTSHELL_LOG_AI_AGENT="$log_ai_agent" \
+    GHOSTSHELL_LOG_AI_PROVIDER="$log_ai_provider" \
+    GHOSTSHELL_LOG_AI_MODEL="$log_ai_model" \
+    GHOSTSHELL_LOG_AGENT_NAME="$log_agent_name" \
+    GHOSTSHELL_LOG_AGENT_HINT="$log_agent_hint" \
+    GHOSTSHELL_LOG_MODEL_RAW="$log_model_raw" \
+    GHOSTSHELL_LOG_WRAPPER_ID="$log_wrapper_id" \
+    GHOSTSHELL_LOG_PROOF_LABEL="$log_proof_label" \
+    GHOSTSHELL_LOG_PROOF_AGENT="$log_proof_agent" \
+    GHOSTSHELL_LOG_PROOF_MODEL="$log_proof_model" \
+    GHOSTSHELL_LOG_PROOF_TRACE="$log_proof_trace" \
+    GHOSTSHELL_LOG_PROOF_TIMESTAMP="$log_proof_timestamp" \
+    GHOSTSHELL_LOG_PROOF_SIGNATURE="$log_proof_signature" \
+    GHOSTSHELL_LOG_PROOF_SIGNER_SCOPE="$log_proof_signer_scope" \
+    GHOSTSHELL_LOG_PROOF_KEY_FINGERPRINT="$log_proof_key_fingerprint" \
+    GHOSTSHELL_LOG_PROOF_HOST_FINGERPRINT="$log_proof_host_fingerprint" \
+    GHOSTSHELL_LOG_STDOUT_CAPTURE_PATH="$stdout_capture_path" \
+    GHOSTSHELL_LOG_STDERR_CAPTURE_PATH="$stderr_capture_path" \
+    GHOSTSHELL_LOG_CAPTURE_LIMIT_BYTES="16384" \
+    python3 - <<'PY' 2>/dev/null
 import json
 import os
+
+MAX_COMMAND_DURATION_MS = 86400000
 
 def as_int(value, default=None):
     try:
@@ -1780,12 +2051,38 @@ def as_int(value, default=None):
     except (TypeError, ValueError):
         return default
 
+def read_tail(path, limit):
+    clean = str(path or "").strip()
+    if not clean or limit <= 0:
+        return ("", False)
+    try:
+        with open(clean, "rb") as handle:
+            handle.seek(0, os.SEEK_END)
+            size = handle.tell()
+            start = max(0, size - limit)
+            handle.seek(start, os.SEEK_SET)
+            data = handle.read()
+        return (data.decode("utf-8", errors="replace"), size > limit)
+    except OSError:
+        return ("", False)
+
 command = str(os.environ.get("GHOSTSHELL_LOG_COMMAND", "") or "")
 exit_code = as_int(os.environ.get("GHOSTSHELL_LOG_EXIT", None), None)
 duration_ms = as_int(os.environ.get("GHOSTSHELL_LOG_DURATION_MS", None), None)
+if duration_ms is not None:
+    duration_ms = min(MAX_COMMAND_DURATION_MS, max(0, duration_ms))
 manual_after_accept = str(
     os.environ.get("GHOSTSHELL_LOG_MANUAL_AFTER_ACCEPT", "0") or "0"
 ).strip() in {"1", "true", "True"}
+capture_limit = as_int(os.environ.get("GHOSTSHELL_LOG_CAPTURE_LIMIT_BYTES", None), 16384) or 16384
+stdout_tail, stdout_truncated = read_tail(
+    os.environ.get("GHOSTSHELL_LOG_STDOUT_CAPTURE_PATH", ""),
+    capture_limit,
+)
+stderr_tail, stderr_truncated = read_tail(
+    os.environ.get("GHOSTSHELL_LOG_STDERR_CAPTURE_PATH", ""),
+    capture_limit,
+)
 
 payload = {
     "command": command,
@@ -1816,9 +2113,25 @@ payload = {
     "proof_key_fingerprint": str(os.environ.get("GHOSTSHELL_LOG_PROOF_KEY_FINGERPRINT", "") or ""),
     "proof_host_fingerprint": str(os.environ.get("GHOSTSHELL_LOG_PROOF_HOST_FINGERPRINT", "") or ""),
 }
+if exit_code != 0:
+    if stderr_tail:
+        payload["captured_stderr_tail"] = stderr_tail
+    if stderr_truncated:
+        payload["captured_output_truncated"] = True
 print(json.dumps(payload, separators=(",", ":")))
 PY
-    )"
+}
+
+_ghostshell_log_command() {
+    local command="$1"
+    local exit_code="$2"
+    local source="${3:-runtime}"
+    local duration_ms="${4:-}"
+    local stdout_capture_path="${5:-}"
+    local stderr_capture_path="${6:-}"
+
+    local json_data
+    json_data="$(_ghostshell_build_log_command_json "$command" "$exit_code" "$source" "$duration_ms" "$stdout_capture_path" "$stderr_capture_path")"
     if [[ -z "$json_data" ]]; then
         return
     fi
@@ -1984,6 +2297,7 @@ _ghostshell_preexec_hook() {
     fi
     GHOSTSHELL_LAST_EXECUTED_CMD="$1"
     GHOSTSHELL_LAST_EXECUTED_STARTED_AT_MS="$(_ghostshell_now_epoch_ms)"
+    _ghostshell_begin_runtime_capture "$1"
 }
 
 _ghostshell_precmd_hook() {
@@ -1991,14 +2305,21 @@ _ghostshell_precmd_hook() {
     _ghostshell_disable_mouse_reporting
     local cmd="$GHOSTSHELL_LAST_EXECUTED_CMD"
     local started_at_ms="$GHOSTSHELL_LAST_EXECUTED_STARTED_AT_MS"
+    local stdout_capture_path="$GHOSTSHELL_RUNTIME_CAPTURE_STDOUT_PATH"
+    local stderr_capture_path="$GHOSTSHELL_RUNTIME_CAPTURE_STDERR_PATH"
     local finished_at_ms=""
     local duration_ms=""
     GHOSTSHELL_LAST_EXECUTED_CMD=""
     GHOSTSHELL_LAST_EXECUTED_STARTED_AT_MS=0
+    GHOSTSHELL_RUNTIME_CAPTURE_STDOUT_PATH=""
+    GHOSTSHELL_RUNTIME_CAPTURE_STDERR_PATH=""
+    _ghostshell_end_runtime_capture
+    _ghostshell_wait_for_runtime_capture_flush "$stdout_capture_path" "$stderr_capture_path"
     _ghostshell_ensure_ai_session_timer
     _ghostshell_reload_disabled_patterns_if_needed
 
     if [[ -z "$cmd" ]]; then
+        _ghostshell_cleanup_runtime_capture_paths "$stdout_capture_path" "$stderr_capture_path"
         return
     fi
 
@@ -2008,28 +2329,27 @@ _ghostshell_precmd_hook() {
             duration_ms=$(( finished_at_ms - started_at_ms ))
             if (( duration_ms < 0 )); then
                 duration_ms=0
+            elif (( duration_ms > 86400000 )); then
+                duration_ms=86400000
             fi
         fi
     fi
 
-    if [[ "$exit_code" -ne 0 ]]; then
-        _ghostshell_clear_pending_execution
-        _ghostshell_reset_provenance_line_state
-        return
-    fi
-
     if _ghostshell_is_blocked_runtime_command "$cmd"; then
+        _ghostshell_cleanup_runtime_capture_paths "$stdout_capture_path" "$stderr_capture_path"
         _ghostshell_clear_pending_execution
         _ghostshell_reset_provenance_line_state
         return
     fi
     if _ghostshell_matches_disabled_pattern "$cmd"; then
+        _ghostshell_cleanup_runtime_capture_paths "$stdout_capture_path" "$stderr_capture_path"
         _ghostshell_clear_pending_execution
         _ghostshell_reset_provenance_line_state
         return
     fi
 
-    _ghostshell_log_command "$cmd" "$exit_code" "runtime" "$duration_ms"
+    _ghostshell_log_command "$cmd" "$exit_code" "runtime" "$duration_ms" "$stdout_capture_path" "$stderr_capture_path"
+    _ghostshell_cleanup_runtime_capture_paths "$stdout_capture_path" "$stderr_capture_path"
     _ghostshell_clear_pending_execution
     _ghostshell_reset_provenance_line_state
 }

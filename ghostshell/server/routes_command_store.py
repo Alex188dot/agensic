@@ -12,6 +12,7 @@ from ghostshell.server.schemas import (
 )
 
 router = APIRouter()
+MAX_COMMAND_DURATION_MS = 86_400_000
 
 
 @router.post("/log_command", response_model=LogCommandResponse, response_model_exclude_unset=True)
@@ -33,7 +34,7 @@ def log_command(data: LogCommandPayload, background_tasks: BackgroundTasks) -> L
         duration_ms = None
         if raw_duration_ms is not None:
             try:
-                duration_ms = max(0, int(raw_duration_ms))
+                duration_ms = min(MAX_COMMAND_DURATION_MS, max(0, int(raw_duration_ms)))
             except (TypeError, ValueError):
                 return {"status": "ignored", "reason": "invalid_duration_ms"}
 
@@ -48,6 +49,9 @@ def log_command(data: LogCommandPayload, background_tasks: BackgroundTasks) -> L
             return {"status": "ignored", "reason": "disabled_pattern"}
 
         provenance_payload = {
+            "captured_stdout_tail": data.captured_stdout_tail,
+            "captured_stderr_tail": data.captured_stderr_tail,
+            "captured_output_truncated": data.captured_output_truncated,
             "shell_pid": data.shell_pid,
             "provenance_last_action": data.provenance_last_action,
             "provenance_accept_origin": data.provenance_accept_origin,

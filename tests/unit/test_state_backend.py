@@ -131,6 +131,23 @@ class StateBackendTests(unittest.TestCase):
             self.assertEqual(removed, 1)
             self.assertEqual(restored.list_command_runs(limit=5), [])
 
+    def test_command_run_duration_is_capped_at_24h(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            db_path = os.path.join(tmp, "state.sqlite")
+            store = SQLiteStateStore(db_path, journal=None)
+            store.record_command_provenance(
+                command="sleep 999999",
+                label="UNKNOWN",
+                confidence=0.1,
+                duration_ms=999_999_999,
+                ts=1700000000,
+                run_id="run-cap",
+            )
+
+            runs = store.list_command_runs(limit=5)
+            self.assertEqual(len(runs), 1)
+            self.assertEqual(runs[0]["duration_ms"], 86_400_000)
+
     def test_list_command_runs_keyset_pagination(self):
         with tempfile.TemporaryDirectory() as tmp:
             db_path = os.path.join(tmp, "state.sqlite")
