@@ -3,7 +3,8 @@ import unittest
 from pathlib import Path
 
 
-SCRIPT_PATH = Path("/Users/alessioleodori/HelloWorld/ai_terminal2/scripts/enforce_signed_batch.sh")
+REPO_ROOT = Path(__file__).resolve().parents[2]
+SCRIPT_PATH = REPO_ROOT / "scripts" / "enforce_signed_batch.sh"
 
 
 @unittest.skipUnless(SCRIPT_PATH.exists(), "enforce_signed_batch.sh not available in this environment")

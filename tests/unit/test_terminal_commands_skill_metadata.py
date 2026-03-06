@@ -1,9 +1,11 @@
+import os
 import re
 import unittest
 from pathlib import Path
 
 
-SKILL_ROOT = Path("/Users/alessioleodori/.codex/skills/ghostshell-signed-exec")
+CODEX_HOME = Path(os.environ.get("CODEX_HOME", Path.home() / ".codex")).expanduser()
+SKILL_ROOT = CODEX_HOME / "skills" / "ghostshell-signed-exec"
 SKILL_MD = SKILL_ROOT / "SKILL.md"
 OPENAI_YAML = SKILL_ROOT / "agents" / "openai.yaml"
 

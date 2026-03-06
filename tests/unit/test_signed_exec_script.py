@@ -6,7 +6,8 @@ import unittest
 from pathlib import Path
 
 
-SCRIPT_PATH = Path("/Users/alessioleodori/.codex/skills/ghostshell-signed-exec/scripts/signed_exec.sh")
+REPO_ROOT = Path(__file__).resolve().parents[2]
+SCRIPT_PATH = REPO_ROOT / "scripts" / "signed_exec.sh"
 
 
 @unittest.skipUnless(SCRIPT_PATH.exists(), "signed_exec.sh not available in this environment")
