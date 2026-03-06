@@ -11,6 +11,7 @@ from pathlib import Path
 from typing import Any
 
 from .agent_registry import AgentRegistry, build_model_fingerprint
+from ghostshell.utils import ensure_private_dir
 from .registry_updater import (
     DEFAULT_REGISTRY_URL,
     DEFAULT_REMOTE_META_PATH,
@@ -96,7 +97,7 @@ def _proof_message(
 
 def ensure_provenance_secret(path: str = DEFAULT_SECRET_PATH) -> bytes:
     target = os.path.expanduser(path)
-    os.makedirs(os.path.dirname(target), exist_ok=True)
+    ensure_private_dir(os.path.dirname(target))
     if not os.path.exists(target):
         with open(target, "wb") as f:
             f.write(secrets.token_bytes(32))

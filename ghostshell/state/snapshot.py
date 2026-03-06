@@ -6,13 +6,14 @@ import time
 from pathlib import Path
 from typing import Dict, List, Optional, Tuple
 from .journal import EventJournal
+from ghostshell.utils import atomic_write_json_private, enforce_private_file, ensure_private_dir
 
 
 class SnapshotManager:
     def __init__(self, sqlite_path: str, snapshots_dir: str):
         self.sqlite_path = os.path.expanduser(sqlite_path)
         self.snapshots_dir = os.path.expanduser(snapshots_dir)
-        os.makedirs(self.snapshots_dir, exist_ok=True)
+        ensure_private_dir(self.snapshots_dir)
 
     def _snapshot_name(self, ts: int) -> str:
         return time.strftime("state-%Y%m%d%H%M%S.sqlite", time.localtime(int(ts)))
@@ -30,6 +31,7 @@ class SnapshotManager:
 
         src = sqlite3.connect(self.sqlite_path, timeout=5)
         dst = sqlite3.connect(tmp_path, timeout=5)
+        enforce_private_file(tmp_path)
         try:
             src.backup(dst)
         finally:
@@ -37,6 +39,7 @@ class SnapshotManager:
             src.close()
 
         os.replace(tmp_path, target_path)
+        enforce_private_file(target_path)
         payload = {
             "snapshot_ts": ts,
             "sqlite_path": self.sqlite_path,
@@ -45,8 +48,7 @@ class SnapshotManager:
         }
         if metadata:
             payload.update(dict(metadata))
-        with open(self._meta_path(target_path), "w", encoding="utf-8") as f:
-            json.dump(payload, f, indent=2)
+        atomic_write_json_private(self._meta_path(target_path), payload, indent=2)
         return payload
 
     def list_snapshots(self) -> List[Dict[str, object]]:
@@ -92,12 +94,14 @@ class SnapshotManager:
         try:
             src = sqlite3.connect(path, timeout=5)
             dst = sqlite3.connect(tmp_path, timeout=5)
+            enforce_private_file(tmp_path)
             try:
                 src.backup(dst)
             finally:
                 dst.close()
                 src.close()
             os.replace(tmp_path, self.sqlite_path)
+            enforce_private_file(self.sqlite_path)
             return (True, row, "")
         except Exception as exc:
             return (False, row, str(exc))
@@ -201,4 +205,3 @@ class SnapshotScheduler:
                     pass
                 self._last_hour = hour_key
             self._stop.wait(self.interval_seconds)
-

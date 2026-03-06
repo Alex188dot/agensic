@@ -6,6 +6,7 @@ import time
 from pathlib import Path
 
 from .loader import CONFIG_DIR
+from ghostshell.utils import ensure_private_dir, enforce_private_file
 
 
 AUTH_FILE = os.path.join(CONFIG_DIR, "auth.json")
@@ -48,6 +49,8 @@ def generate_auth_token() -> str:
 
 def load_auth_payload(path: str | None = None) -> dict | None:
     target = Path(path or AUTH_FILE).expanduser()
+    ensure_private_dir(target.parent)
+    enforce_private_file(target)
     if not target.exists() or not target.is_file():
         return None
     try:
@@ -71,7 +74,7 @@ def save_auth_token(token: str, path: str | None = None) -> dict:
         raise ValueError("auth token must not be empty")
 
     target = Path(path or AUTH_FILE).expanduser()
-    target.parent.mkdir(parents=True, exist_ok=True)
+    ensure_private_dir(target.parent)
     payload = _auth_payload_for_token(clean_token)
 
     fd, tmp_path = tempfile.mkstemp(prefix=".auth.", suffix=".json", dir=str(target.parent))

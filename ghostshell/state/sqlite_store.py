@@ -8,6 +8,7 @@ from contextlib import contextmanager
 from typing import Dict, Iterable, List, Optional, Tuple
 from .journal import EventJournal
 from .snapshot import SnapshotManager
+from ghostshell.utils import enforce_private_file, ensure_private_dir
 
 MAX_COMMAND_DURATION_MS = 86_400_000
 
@@ -23,8 +24,13 @@ class SQLiteStateStore:
         self.db_path = os.path.expanduser(db_path)
         self.journal = journal
         self._lock = threading.RLock()
-        os.makedirs(os.path.dirname(self.db_path), exist_ok=True)
+        ensure_private_dir(os.path.dirname(self.db_path))
         self.init_schema()
+
+    def _harden_sqlite_artifacts(self) -> None:
+        enforce_private_file(self.db_path)
+        enforce_private_file(f"{self.db_path}-wal")
+        enforce_private_file(f"{self.db_path}-shm")
 
     @contextmanager
     def _conn(self):
@@ -35,8 +41,10 @@ class SQLiteStateStore:
             conn.execute("PRAGMA synchronous=NORMAL;")
             conn.execute("PRAGMA busy_timeout=5000;")
             conn.execute("PRAGMA foreign_keys=ON;")
+            self._harden_sqlite_artifacts()
             yield conn
         finally:
+            self._harden_sqlite_artifacts()
             conn.close()
 
     def init_schema(self) -> None:
@@ -136,6 +144,7 @@ class SQLiteStateStore:
             )
             self._ensure_command_runs_columns(conn)
             conn.commit()
+            self._harden_sqlite_artifacts()
 
     @staticmethod
     def _table_columns(conn: sqlite3.Connection, table_name: str) -> set[str]:

@@ -17,6 +17,7 @@ import zvec
 from rapidfuzz import fuzz
 from rapidfuzz.distance import Levenshtein
 from sentence_transformers import SentenceTransformer
+from ghostshell.utils import atomic_write_json_private, ensure_private_dir, harden_private_tree
 
 # Tell HuggingFace to avoid implicit network checks by default.
 os.environ["HF_HUB_OFFLINE"] = "1"
@@ -166,6 +167,7 @@ class CommandVectorDB:
         self.removed_commands: set[str] = self._load_removed_commands()
         self.inserted_commands = self._load_existing_commands(limit=1024)
         self._register_commands(self.inserted_commands)
+        self._harden_storage_permissions()
 
     def _set_init_phase(self, phase: str):
         with self._status_lock:
@@ -217,15 +219,16 @@ class CommandVectorDB:
             logger.warning(f"Could not read removed commands file: {exc}")
             return set()
 
+    def _harden_storage_permissions(self) -> None:
+        harden_private_tree(os.path.dirname(self.db_path))
+
     def _save_removed_commands(self):
         if self.state_store is not None:
             return
         try:
-            os.makedirs(os.path.dirname(self.removed_commands_path), exist_ok=True)
-            tmp_path = f"{self.removed_commands_path}.tmp"
-            with open(tmp_path, "w", encoding="utf-8") as f:
-                json.dump(sorted(self.removed_commands), f, indent=2)
-            os.replace(tmp_path, self.removed_commands_path)
+            ensure_private_dir(os.path.dirname(self.removed_commands_path))
+            atomic_write_json_private(self.removed_commands_path, sorted(self.removed_commands), indent=2)
+            self._harden_storage_permissions()
         except Exception as exc:
             logger.warning(f"Could not save removed commands file: {exc}")
 
@@ -1261,7 +1264,7 @@ class CommandVectorDB:
 
     def _create_command_collection(self, path: str) -> zvec.Collection:
         logger.info(f"Creating command database at {path}")
-        os.makedirs(os.path.dirname(path), exist_ok=True)
+        ensure_private_dir(os.path.dirname(path))
 
         schema = zvec.CollectionSchema(
             name="shell_commands",
@@ -1279,7 +1282,7 @@ class CommandVectorDB:
 
     def _create_feedback_collection(self, path: str) -> zvec.Collection:
         logger.info(f"Creating feedback stats database at {path}")
-        os.makedirs(os.path.dirname(path), exist_ok=True)
+        ensure_private_dir(os.path.dirname(path))
 
         schema = zvec.CollectionSchema(
             name="shell_feedback_stats",
@@ -1426,10 +1429,9 @@ class CommandVectorDB:
             return {}
 
     def _save_index_state(self, state: dict):
-        tmp_path = f"{self.state_file}.tmp"
-        with open(tmp_path, "w") as f:
-            json.dump(state, f)
-        os.replace(tmp_path, self.state_file)
+        ensure_private_dir(os.path.dirname(self.state_file))
+        atomic_write_json_private(self.state_file, state)
+        self._harden_storage_permissions()
 
     def _parse_history_line(self, line: str) -> str:
         line = line.strip()

@@ -28,6 +28,7 @@ from .provenance import (
     verify_cached_agent_registry,
 )
 from ghostshell.privacy.guard import PrivacyGuard, PrivacyGuardError
+from ghostshell.utils import ensure_private_dir, harden_private_tree
 from .context import RequestContext, Settings, SystemInventory
 
 logger = logging.getLogger("ghostshell.engine")
@@ -113,6 +114,7 @@ class SuggestionEngine:
 
     def _init_state_runtime(self) -> None:
         home = os.path.expanduser("~/.ghostshell")
+        ensure_private_dir(home)
         sqlite_path = os.path.join(home, "state.sqlite")
         events_dir = os.path.join(home, "events")
         snapshots_dir = os.path.join(home, "snapshots")
@@ -168,6 +170,7 @@ class SuggestionEngine:
 
             if self.snapshot_scheduler is not None:
                 self.snapshot_scheduler.start()
+            harden_private_tree(home)
         except Exception as exc:
             sanitized = self.privacy_guard.sanitize_for_log(str(exc))
             self.state_store = None

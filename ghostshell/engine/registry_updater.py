@@ -8,6 +8,8 @@ import urllib.request
 from pathlib import Path
 from typing import Any
 
+from ghostshell.utils import atomic_write_json_private, enforce_private_file, ensure_private_dir
+
 
 DEFAULT_REGISTRY_URL = "https://registry.ghostshell.ai/v1/agents.json"
 DEFAULT_REMOTE_CACHE_PATH = os.path.expanduser("~/.ghostshell/agent_registry.remote.json")
@@ -40,6 +42,8 @@ def verify_registry_signature(payload: dict[str, Any], signature: str, public_ke
 
 def _read_json(path: str) -> dict[str, Any]:
     target = Path(path).expanduser()
+    ensure_private_dir(target.parent)
+    enforce_private_file(target)
     if not target.exists() or not target.is_file():
         return {}
     try:
@@ -52,9 +56,8 @@ def _read_json(path: str) -> dict[str, Any]:
 
 def _write_json(path: str, payload: dict[str, Any]) -> None:
     target = Path(path).expanduser()
-    target.parent.mkdir(parents=True, exist_ok=True)
-    with open(target, "w", encoding="utf-8") as f:
-        json.dump(payload, f, indent=2, sort_keys=True)
+    ensure_private_dir(target.parent)
+    atomic_write_json_private(target, payload, indent=2, sort_keys=True)
 
 
 def parse_registry_response(raw: dict[str, Any]) -> tuple[dict[str, Any], str]:

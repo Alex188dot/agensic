@@ -5,11 +5,13 @@ import uuid
 from pathlib import Path
 from typing import Dict, Iterable, List, Tuple
 
+from ghostshell.utils import enforce_private_file, ensure_private_dir
+
 
 class EventJournal:
     def __init__(self, events_dir: str):
         self.events_dir = os.path.expanduser(events_dir)
-        os.makedirs(self.events_dir, exist_ok=True)
+        ensure_private_dir(self.events_dir)
 
     @staticmethod
     def _hour_segment(ts: int) -> str:
@@ -27,6 +29,7 @@ class EventJournal:
         path = self._segment_path(now_ts)
         with open(path, "a", encoding="utf-8") as f:
             f.write(json.dumps(payload, separators=(",", ":")) + "\n")
+        enforce_private_file(path)
         return payload
 
     def latest_event_ts(self) -> int:
@@ -120,4 +123,3 @@ class EventJournal:
                     continue
 
         return {"removed_files": removed, "removed_bytes": removed_bytes}
-

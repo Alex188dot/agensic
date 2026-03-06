@@ -53,6 +53,13 @@ from ghostshell.config.auth import (
     rotate_auth_token,
 )
 from ghostshell.engine.provenance import build_local_proof_metadata, sign_proof_payload
+from ghostshell.utils import (
+    atomic_write_json_private,
+    atomic_write_text_private,
+    enforce_private_file,
+    ensure_private_dir,
+    harden_private_tree,
+)
 
 class GhostShellRootGroup(TyperGroup):
     _AUTH_HELP_ALIASES = ("auth rotate", "auth status")
@@ -321,7 +328,8 @@ def _is_back(value: Any) -> bool:
     return value is BACK_SIGNAL
 
 def ensure_config_dir():
-    if not os.path.exists(CONFIG_DIR): os.makedirs(CONFIG_DIR)
+    ensure_private_dir(CONFIG_DIR)
+    harden_private_tree(CONFIG_DIR)
 
 def _load_config() -> dict:
     return load_config_file(CONFIG_FILE)
@@ -525,7 +533,7 @@ def _install_provenance_tui_binary(entry: dict) -> str:
     if not artifact_url:
         raise RuntimeError("manifest_missing_artifact_url")
 
-    os.makedirs(BIN_DIR, exist_ok=True)
+    ensure_private_dir(BIN_DIR)
     if os.path.exists(PROVENANCE_TUI_BIN) and binary_sha:
         if _file_sha256(PROVENANCE_TUI_BIN).lower() == binary_sha:
             return PROVENANCE_TUI_BIN
@@ -562,7 +570,7 @@ def _install_provenance_tui_binary(entry: dict) -> str:
             with source as src, open(PROVENANCE_TUI_BIN, "wb") as out:
                 shutil.copyfileobj(src, out)
 
-    os.chmod(PROVENANCE_TUI_BIN, 0o755)
+    enforce_private_file(PROVENANCE_TUI_BIN, executable=True)
     if binary_sha:
         got_bin = _file_sha256(PROVENANCE_TUI_BIN).lower()
         if got_bin != binary_sha:
@@ -748,7 +756,7 @@ def _repair_cli_enabled() -> bool:
 
 def _append_repair_log(event: str, details: dict | None = None) -> None:
     try:
-        os.makedirs(REPAIR_DIR, exist_ok=True)
+        ensure_private_dir(REPAIR_DIR)
         payload = {
             "ts": int(time.time()),
             "event": str(event or "unknown"),
@@ -756,6 +764,7 @@ def _append_repair_log(event: str, details: dict | None = None) -> None:
         }
         with open(REPAIR_LOG_FILE, "a", encoding="utf-8") as f:
             f.write(json.dumps(payload, separators=(",", ":")) + "\n")
+        enforce_private_file(REPAIR_LOG_FILE)
     except Exception:
         pass
 
@@ -823,7 +832,7 @@ def _remove_path(path: str) -> tuple[bool, str]:
 
 
 def _acquire_fix_lock() -> tuple[int | None, str]:
-    os.makedirs(LOCKS_DIR, exist_ok=True)
+    ensure_private_dir(LOCKS_DIR)
     flags = os.O_CREAT | os.O_EXCL | os.O_WRONLY
     try:
         fd = os.open(FIX_LOCK_FILE, flags, 0o600)
@@ -895,11 +904,10 @@ def _repair_import_snapshot(snapshot: dict) -> tuple[dict | None, str]:
 
 
 def _write_snapshot_artifact(snapshot: dict) -> str:
-    os.makedirs(REPAIR_DIR, exist_ok=True)
+    ensure_private_dir(REPAIR_DIR)
     stamp = int(time.time())
     out_path = os.path.join(REPAIR_DIR, f"snapshot-{stamp}.json")
-    with open(out_path, "w", encoding="utf-8") as f:
-        json.dump(snapshot, f, indent=2)
+    atomic_write_json_private(out_path, snapshot, indent=2)
     return out_path
 
 def _normalize_command_pattern(raw: str) -> str:
@@ -2050,16 +2058,17 @@ def start():
         stop()
 
     console.print("[cyan]Starting GhostShell Daemon...[/cyan]")
-    with open(os.path.join(CONFIG_DIR, "server.log"), "w") as out:
+    log_path = os.path.join(CONFIG_DIR, "server.log")
+    with open(log_path, "w") as out:
         process = subprocess.Popen(
             [sys.executable, SERVER_SCRIPT],
             stdout=out,
             stderr=out,
             start_new_session=True
         )
+    enforce_private_file(log_path)
     
-    with open(PID_FILE, "w") as f:
-        f.write(str(process.pid))
+    atomic_write_text_private(PID_FILE, str(process.pid))
     
     console.print(f"[green]✔ Started (PID: {process.pid})[/green]")
     console.print(f"[dim]Log file: {CONFIG_DIR}/server.log[/dim]")

@@ -531,6 +531,7 @@ _ghostshell_log_fetch_error() {
     GHOSTSHELL_FETCH_LOG_LAST_TS="$now"
 
     mkdir -p "$GHOSTSHELL_HOME" 2>/dev/null
+    chmod 700 "$GHOSTSHELL_HOME" 2>/dev/null
     {
         printf "%s error=%s trigger=%s buffer_len=%s\n" \
             "$(date '+%Y-%m-%d %H:%M:%S' 2>/dev/null)" \
@@ -538,6 +539,7 @@ _ghostshell_log_fetch_error() {
             "$trigger_source" \
             "$buffer_len"
     } >> "$GHOSTSHELL_PLUGIN_LOG" 2>/dev/null
+    chmod 600 "$GHOSTSHELL_PLUGIN_LOG" 2>/dev/null
 }
 
 _ghostshell_fetch_suggestions() {
@@ -1591,6 +1593,7 @@ ts = int(os.environ.get("GHOSTSHELL_PROOF_TS", "0") or "0")
 
 secret_path = Path.home() / ".ghostshell" / "provenance_secret"
 secret_path.parent.mkdir(parents=True, exist_ok=True)
+secret_path.parent.chmod(0o700)
 if not secret_path.exists():
     secret_path.write_bytes(secrets.token_bytes(32))
     secret_path.chmod(0o600)
@@ -1667,6 +1670,7 @@ ts = int(os.environ.get("GHOSTSHELL_PROOF_TS", "0") or "0")
 
 secret_path = Path.home() / ".ghostshell" / "provenance_secret"
 secret_path.parent.mkdir(parents=True, exist_ok=True)
+secret_path.parent.chmod(0o700)
 if not secret_path.exists():
     secret_path.write_bytes(secrets.token_bytes(32))
     secret_path.chmod(0o600)

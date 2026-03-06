@@ -107,6 +107,10 @@ print(f"✅ Downloaded provenance TUI sidecar to {dest_bin}")
 PY
 fi
 
+# 2c. Lock down install permissions for all GhostShell files.
+# Executable payloads keep owner-only execute bits; everything else becomes 0600.
+chmod -R u=rwX,go= "$INSTALL_DIR"
+
 # 3. Install Python Dependencies
 echo "📦 Installing Python dependencies..."
 pip3 install -r "$INSTALL_DIR/requirements.txt"

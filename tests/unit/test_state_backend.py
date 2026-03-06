@@ -1,4 +1,5 @@
 import os
+import stat
 import tempfile
 import unittest
 
@@ -105,6 +106,34 @@ class StateBackendTests(unittest.TestCase):
 
             stats = restored_store.get_command_stats(["python app.py"])
             self.assertEqual(stats["python app.py"]["execute_count"], 2)
+
+    def test_state_backend_artifacts_are_owner_only(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = os.path.join(tmp, "ghostshell")
+            db_path = os.path.join(root, "state.sqlite")
+            events_dir = os.path.join(root, "events")
+            snapshots_dir = os.path.join(root, "snapshots")
+
+            journal = EventJournal(events_dir)
+            store = SQLiteStateStore(db_path, journal=journal)
+            store.record_execute("echo secure")
+
+            manager = SnapshotManager(db_path, snapshots_dir)
+            snapshot = manager.create_snapshot()
+
+            self.assertEqual(stat.S_IMODE(os.stat(root).st_mode), 0o700)
+            self.assertEqual(stat.S_IMODE(os.stat(db_path).st_mode), 0o600)
+            self.assertEqual(stat.S_IMODE(os.stat(events_dir).st_mode), 0o700)
+            self.assertEqual(stat.S_IMODE(os.stat(snapshots_dir).st_mode), 0o700)
+
+            event_files = [os.path.join(events_dir, name) for name in os.listdir(events_dir)]
+            self.assertTrue(event_files)
+            self.assertEqual(stat.S_IMODE(os.stat(event_files[0]).st_mode), 0o600)
+            self.assertEqual(stat.S_IMODE(os.stat(snapshot["snapshot_path"]).st_mode), 0o600)
+            self.assertEqual(
+                stat.S_IMODE(os.stat(f"{snapshot['snapshot_path']}.json").st_mode),
+                0o600,
+            )
 
     def test_command_runs_export_import_and_prune(self):
         with tempfile.TemporaryDirectory() as tmp:

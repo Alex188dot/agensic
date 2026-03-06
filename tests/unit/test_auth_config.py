@@ -3,6 +3,7 @@ import stat
 import tempfile
 import unittest
 
+from ghostshell.config.loader import save_config_file
 from ghostshell.config.auth import (
     AuthTokenCache,
     ensure_auth_token,
@@ -34,6 +35,16 @@ class AuthConfigTests(unittest.TestCase):
         save_auth_token("token-123", path=self.auth_path)
         mode = stat.S_IMODE(os.stat(self.auth_path).st_mode)
         self.assertEqual(mode, 0o600)
+        parent_mode = stat.S_IMODE(os.stat(os.path.dirname(self.auth_path)).st_mode)
+        self.assertEqual(parent_mode, 0o700)
+
+    def test_save_config_file_permissions_are_owner_only(self):
+        config_path = os.path.join(self.tmpdir.name, "ghostshell", "config.json")
+        save_config_file({"provider": "openai", "api_key": "secret"}, path=config_path)
+        mode = stat.S_IMODE(os.stat(config_path).st_mode)
+        self.assertEqual(mode, 0o600)
+        parent_mode = stat.S_IMODE(os.stat(os.path.dirname(config_path)).st_mode)
+        self.assertEqual(parent_mode, 0o700)
 
     def test_rotate_replaces_existing_token(self):
         save_auth_token("old-token", path=self.auth_path)

@@ -2,6 +2,8 @@ import json
 import os
 from pathlib import Path
 
+from ghostshell.utils import atomic_write_json_private, enforce_private_file, ensure_private_dir
+
 
 CONFIG_DIR = os.path.expanduser("~/.ghostshell")
 CONFIG_FILE = os.path.join(CONFIG_DIR, "config.json")
@@ -82,6 +84,8 @@ def normalize_config_payload(payload: dict | None) -> dict:
 
 def load_config_file(path: str | None = None) -> dict:
     target = Path(path or CONFIG_FILE).expanduser()
+    ensure_private_dir(target.parent)
+    enforce_private_file(target)
     if not target.exists() or not target.is_file():
         return normalize_config_payload({})
     try:
@@ -96,7 +100,6 @@ def load_config_file(path: str | None = None) -> dict:
 
 def save_config_file(config: dict, path: str | None = None) -> None:
     target = Path(path or CONFIG_FILE).expanduser()
-    target.parent.mkdir(parents=True, exist_ok=True)
+    ensure_private_dir(target.parent)
     normalized = normalize_config_payload(config)
-    with open(target, "w", encoding="utf-8") as f:
-        json.dump(normalized, f, indent=4)
+    atomic_write_json_private(target, normalized, indent=4)
