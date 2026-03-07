@@ -9,7 +9,7 @@ if [[ -z "$TAG" ]]; then
   TAG="$(git -C "$ROOT_DIR" describe --tags --always --dirty 2>/dev/null || date +%Y%m%d%H%M%S)"
 fi
 
-ARTIFACT_NAME="ghostshell-provenance-tui-darwin-arm64.tar.gz"
+ARTIFACT_NAME="agensic-provenance-tui-darwin-arm64.tar.gz"
 OUT_DIR="$ROOT_DIR/dist/provenance_tui/$TAG"
 ARTIFACT_PATH="$OUT_DIR/$ARTIFACT_NAME"
 MANIFEST_PATH="$OUT_DIR/provenance_tui_manifest.json"

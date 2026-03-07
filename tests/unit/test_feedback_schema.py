@@ -1,6 +1,6 @@
 import unittest
 
-from ghostshell.server.schemas import Feedback, LogCommandPayload
+from agensic.server.schemas import Feedback, LogCommandPayload
 
 
 class FeedbackSchemaTests(unittest.TestCase):
@@ -43,7 +43,7 @@ class FeedbackSchemaTests(unittest.TestCase):
             provenance_agent_name="Planner A",
             provenance_agent_hint="codex",
             provenance_model_raw="gpt-5.3",
-            provenance_wrapper_id="aiterminal_ai_exec:trace-1",
+            provenance_wrapper_id="agensic_ai_exec:trace-1",
             proof_label="AI_EXECUTED",
             proof_agent="codex",
             proof_model="gpt-5.3",

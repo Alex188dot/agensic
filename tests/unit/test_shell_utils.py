@@ -1,6 +1,6 @@
 import unittest
 
-from ghostshell.utils.shell import (
+from agensic.utils.shell import (
     command_matches_pattern,
     extract_executable_token,
     normalize_command_pattern,

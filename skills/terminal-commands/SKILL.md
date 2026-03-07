@@ -10,13 +10,13 @@ metadata:
 # Terminal Commands
 
 ## Overview
-Use GhostShell signing whenever terminal commands need deterministic provenance.
+Use Agensic signing whenever terminal commands need deterministic provenance.
 Prefer session signing for multi-command work.
 
 ## Mandatory Wrapper Policy
 1. Always attempt signed execution before running any shell command.
-2. Preferred path for multi-command work: `scripts/signed_session.sh` or native `ghostshell_session_*`.
-3. Preferred path for one-off work: `scripts/signed_exec.sh` or `aiterminal ai-exec`.
+2. Preferred path for multi-command work: `scripts/signed_session.sh` or native `agensic_session_*`.
+3. Preferred path for one-off work: `scripts/signed_exec.sh` or `agensic ai-exec`.
 4. Never claim a command was signed unless signing actually succeeded.
 5. For command batches, run `./scripts/enforce_signed_batch.sh --mode strict` before execution to reject raw commands outside wrapper/session flow.
 
@@ -32,20 +32,20 @@ Prefer session signing for multi-command work.
 1. Start a signed session in the active shell:
 
 ```bash
-ghostshell_session_start --agent <agent_id_lower_or_unknown> --model <model_raw_or_unknown-model> --agent-name '<optional name>' --ttl-minutes 120
+agensic_session_start --agent <agent_id_lower_or_unknown> --model <model_raw_or_unknown-model> --agent-name '<optional name>' --ttl-minutes 120
 ```
 
 2. Run commands normally while the session is active.
 3. Stop the session when done:
 
 ```bash
-ghostshell_session_stop
+agensic_session_stop
 ```
 
 4. Check current state when needed:
 
 ```bash
-ghostshell_session_status
+agensic_session_status
 ```
 
 Session expiry is actively enforced by a timer signal, so stale sessions are cleared even if no command is executed after timeout.
@@ -61,22 +61,22 @@ For convenience wrappers, use:
 Export-based session flow remains available for compatibility, but is deprecated:
 
 ```bash
-eval "$(aiterminal ai-session start --agent <agent_id_lower_or_unknown> --model <model_raw_or_unknown-model> --agent-name '<optional name>')"
+eval "$(agensic ai-session start --agent <agent_id_lower_or_unknown> --model <model_raw_or_unknown-model> --agent-name '<optional name>')"
 # run commands
-eval "$(aiterminal ai-session stop)"
+eval "$(agensic ai-session stop)"
 ```
 
 ## Fallback Flow (One-Off Command)
 For single commands, use `ai-exec` directly:
 
 ```bash
-aiterminal ai-exec --agent <agent_id_lower_or_unknown> --model <model_raw_or_unknown-model> --agent-name '<optional name>' -- <argv...>
+agensic ai-exec --agent <agent_id_lower_or_unknown> --model <model_raw_or_unknown-model> --agent-name '<optional name>' -- <argv...>
 ```
 
 For operator-heavy commands (pipes, redirects, `&&`, `||`, subshells), keep command string mode explicit:
 
 ```bash
-aiterminal ai-exec --agent <agent_id_lower_or_unknown> --model <model_raw_or_unknown-model> --agent-name '<optional name>' -- zsh -lc '<original command string>'
+agensic ai-exec --agent <agent_id_lower_or_unknown> --model <model_raw_or_unknown-model> --agent-name '<optional name>' -- zsh -lc '<original command string>'
 ```
 
 Or use:
@@ -94,13 +94,13 @@ Use `--verify-mode strict` to fail hard when a run cannot be verified as `AI_EXE
 After important executions:
 
 ```bash
-aiterminal provenance --limit 5
+agensic provenance --limit 5
 ```
 
 Or narrow by command token:
 
 ```bash
-aiterminal provenance --contains "<token>" --limit 5
+agensic provenance --contains "<token>" --limit 5
 ```
 
 Signed runs should appear as `AI_EXECUTED`.

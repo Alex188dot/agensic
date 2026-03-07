@@ -4,9 +4,9 @@ from unittest.mock import patch
 
 from fastapi.testclient import TestClient
 
-from ghostshell.engine.suggestion_engine import SuggestionEngine
-from ghostshell.server import deps
-from ghostshell.server.app import app as fastapi_app
+from agensic.engine.suggestion_engine import SuggestionEngine
+from agensic.server import deps
+from agensic.server.app import app as fastapi_app
 
 
 class ShutdownLifespanTests(unittest.TestCase):
@@ -70,7 +70,7 @@ class SuggestionEngineCloseTests(unittest.TestCase):
         engine._vector_db_ready = threading.Event()
         engine.snapshot_scheduler = None
 
-        with patch("ghostshell.engine.suggestion_engine.logger.warning") as warning_mock:
+        with patch("agensic.engine.suggestion_engine.logger.warning") as warning_mock:
             engine.close(join_timeout_seconds=0.7, shutdown_reason="sigterm")
 
         self.assertEqual(thread.join_timeout, 0.7)

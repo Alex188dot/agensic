@@ -3,8 +3,8 @@ import stat
 import tempfile
 import unittest
 
-from ghostshell.config.loader import save_config_file
-from ghostshell.config.auth import (
+from agensic.config.loader import save_config_file
+from agensic.config.auth import (
     AuthTokenCache,
     ensure_auth_token,
     load_auth_payload,
@@ -39,7 +39,7 @@ class AuthConfigTests(unittest.TestCase):
         self.assertEqual(parent_mode, 0o700)
 
     def test_save_config_file_permissions_are_owner_only(self):
-        config_path = os.path.join(self.tmpdir.name, "ghostshell", "config.json")
+        config_path = os.path.join(self.tmpdir.name, "agensic", "config.json")
         save_config_file({"provider": "openai", "api_key": "secret"}, path=config_path)
         mode = stat.S_IMODE(os.stat(config_path).st_mode)
         self.assertEqual(mode, 0o600)

@@ -7,8 +7,8 @@ agent_name=""
 command_string=""
 defaulted_identity=0
 verify_enabled=1
-verify_mode="${GHOSTSHELL_SIGNED_VERIFY_MODE:-warn}"
-verify_max_wait_ms="${GHOSTSHELL_SIGNED_VERIFY_MAX_WAIT_MS:-150}"
+verify_mode="${AGENSIC_SIGNED_VERIFY_MODE:-warn}"
+verify_max_wait_ms="${AGENSIC_SIGNED_VERIFY_MAX_WAIT_MS:-150}"
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 
 usage() {
@@ -95,23 +95,23 @@ _find_repo_cli() {
 }
 
 _resolve_cli() {
-  if command -v aiterminal >/dev/null 2>&1; then
-    CLI=(aiterminal)
+  if command -v agensic >/dev/null 2>&1; then
+    CLI=(agensic)
     return 0
   fi
 
-  if python3 -c 'import ghostshell.cli.app' >/dev/null 2>&1; then
-    CLI=(python3 -c 'from ghostshell.cli.app import app; app()')
+  if python3 -c 'import agensic.cli.app' >/dev/null 2>&1; then
+    CLI=(python3 -c 'from agensic.cli.app import app; app()')
     return 0
   fi
 
-  if [[ -n "${GHOSTSHELL_CLI_PY:-}" ]]; then
-    if [[ -f "$GHOSTSHELL_CLI_PY" ]]; then
-      CLI=(python3 "$GHOSTSHELL_CLI_PY")
+  if [[ -n "${AGENSIC_CLI_PY:-}" ]]; then
+    if [[ -f "$AGENSIC_CLI_PY" ]]; then
+      CLI=(python3 "$AGENSIC_CLI_PY")
       return 0
     fi
     _emit_enforcement_message "ERROR" "configured_cli_missing"
-    echo "Configured GHOSTSHELL_CLI_PY does not exist: $GHOSTSHELL_CLI_PY" >&2
+    echo "Configured AGENSIC_CLI_PY does not exist: $AGENSIC_CLI_PY" >&2
     return 1
   fi
 
@@ -122,8 +122,8 @@ _resolve_cli() {
   fi
 
   _emit_enforcement_message "ERROR" "wrapper_cli_unavailable"
-  echo "Neither 'aiterminal' nor a discoverable 'cli.py' is available." >&2
-  echo "Install GhostShell, set GHOSTSHELL_CLI_PY, or place this skill under a repo tree that contains cli.py." >&2
+  echo "Neither 'agensic' nor a discoverable 'cli.py' is available." >&2
+  echo "Install Agensic, set AGENSIC_CLI_PY, or place this skill under a repo tree that contains cli.py." >&2
   return 1
 }
 
@@ -131,7 +131,7 @@ _verify_ai_executed_for_command() {
   local expected_command="$1"
   local start_ts="$2"
   local max_wait_ms="$3"
-  local db_path="${GHOSTSHELL_STATE_DB_PATH:-$HOME/.ghostshell/state.sqlite}"
+  local db_path="${AGENSIC_STATE_DB_PATH:-$HOME/.agensic/state.sqlite}"
 
   python3 - "$db_path" "$expected_command" "$start_ts" "$max_wait_ms" <<'PY'
 import os

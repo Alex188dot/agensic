@@ -1,7 +1,7 @@
 import unittest
 from unittest.mock import patch
 
-from ghostshell.engine.provenance import inspect_process_lineage
+from agensic.engine.provenance import inspect_process_lineage
 
 
 class ProvenanceLineageTests(unittest.TestCase):
@@ -15,7 +15,7 @@ class ProvenanceLineageTests(unittest.TestCase):
         def _fake_row(pid: int):
             return fake_rows.get(pid)
 
-        with patch("ghostshell.engine.provenance._ps_row_for_pid", side_effect=_fake_row):
+        with patch("agensic.engine.provenance._ps_row_for_pid", side_effect=_fake_row):
             out = inspect_process_lineage(100, max_depth=10)
         self.assertEqual(len(out["lineage"]), 3)
         self.assertIn("cursor", out["hints"])
@@ -28,7 +28,7 @@ class ProvenanceLineageTests(unittest.TestCase):
         }
 
         with patch(
-            "ghostshell.engine.provenance._ps_row_for_pid",
+            "agensic.engine.provenance._ps_row_for_pid",
             side_effect=lambda pid: fake_rows.get(pid),
         ):
             out = inspect_process_lineage(50, max_depth=10)
@@ -40,7 +40,7 @@ class ProvenanceLineageTests(unittest.TestCase):
             1: {"pid": 1, "ppid": 0, "comm": "launchd", "command": "/sbin/launchd"},
         }
         with patch(
-            "ghostshell.engine.provenance._ps_row_for_pid",
+            "agensic.engine.provenance._ps_row_for_pid",
             side_effect=lambda pid: fake_rows.get(pid),
         ):
             out = inspect_process_lineage(200, max_depth=5)

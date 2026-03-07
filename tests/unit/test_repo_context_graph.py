@@ -4,7 +4,7 @@ import tempfile
 import unittest
 from unittest.mock import Mock, patch
 
-from ghostshell.vector_db.command_db import CommandVectorDB
+from agensic.vector_db.command_db import CommandVectorDB
 
 
 class RepoContextGraphTests(unittest.TestCase):
@@ -67,7 +67,7 @@ class RepoContextGraphTests(unittest.TestCase):
             os.makedirs(repo, exist_ok=True)
             subprocess.run(["git", "init"], cwd=repo, check=True, capture_output=True)
             subprocess.run(
-                ["git", "remote", "add", "origin", "git@github.com:acme/ghostshell.git"],
+                ["git", "remote", "add", "origin", "git@github.com:acme/agensic.git"],
                 cwd=repo,
                 check=True,
                 capture_output=True,
@@ -169,8 +169,8 @@ class RepoContextGraphTests(unittest.TestCase):
     def test_manual_signal_and_recency_boost_promote_recent_manual_command(self):
         db = self._build_db_for_rerank(
             command_stats={
-                "aiterminal setup": {"accept_count": 0, "execute_count": 0, "history_count": 200},
-                "aiterminal provenance --tui": {"accept_count": 0, "execute_count": 0, "history_count": 5},
+                "agensic setup": {"accept_count": 0, "execute_count": 0, "history_count": 200},
+                "agensic provenance --tui": {"accept_count": 0, "execute_count": 0, "history_count": 5},
             },
         )
         now_ts = 2_000_000_000
@@ -179,22 +179,22 @@ class RepoContextGraphTests(unittest.TestCase):
             out = {cmd: 0 for cmd in commands}
             label_set = {str(v or "").strip() for v in (labels or [])}
             if "HUMAN_TYPED" in label_set:
-                out["aiterminal provenance --tui"] = 6
+                out["agensic provenance --tui"] = 6
             if label_set.intersection({"AI_SUGGESTED_HUMAN_RAN", "GS_SUGGESTED_HUMAN_RAN", "AI_EXECUTED"}):
-                out["aiterminal setup"] = 3
+                out["agensic setup"] = 3
             return out
 
         db.state_store.get_command_run_counts = Mock(side_effect=_command_run_counts)
         db.state_store.get_last_command_run_ts = Mock(
             return_value={
-                "aiterminal setup": now_ts - (14 * 24 * 3600),
-                "aiterminal provenance --tui": now_ts - 3600,
+                "agensic setup": now_ts - (14 * 24 * 3600),
+                "agensic provenance --tui": now_ts - 3600,
             }
         )
 
-        with patch("ghostshell.vector_db.command_db.time.time", return_value=now_ts):
+        with patch("agensic.vector_db.command_db.time.time", return_value=now_ts):
             reranked = db.rerank_candidates(
-                "aiterminal",
+                "agensic",
                 [" setup", " provenance --tui"],
                 working_directory="/tmp/repo",
             )

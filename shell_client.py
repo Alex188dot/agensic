@@ -8,12 +8,12 @@ import urllib.error
 import urllib.request
 from typing import Any
 
-from ghostshell.config.auth import AuthTokenCache, build_auth_headers
+from agensic.config.auth import AuthTokenCache, build_auth_headers
 
 PREDICT_URL = "http://127.0.0.1:22000/predict"
 INTENT_URL = "http://127.0.0.1:22000/intent"
 ASSIST_URL = "http://127.0.0.1:22000/assist"
-SHELL_LINES_VERSION = "ghostshell_shell_lines_v1"
+SHELL_LINES_VERSION = "agensic_shell_lines_v1"
 _AUTH_CACHE = AuthTokenCache()
 
 
@@ -380,7 +380,7 @@ def main() -> None:
 
     auth_token = str(args.auth_token or "").strip()
     if not auth_token:
-        auth_token = str(os.environ.get("GHOSTSHELL_AUTH_TOKEN", "") or "").strip()
+        auth_token = str(os.environ.get("AGENSIC_AUTH_TOKEN", "") or "").strip()
     if not auth_token:
         try:
             auth_token = _AUTH_CACHE.get_token()

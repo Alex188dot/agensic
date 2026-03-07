@@ -9,9 +9,9 @@ Usage:
   signed_session.sh status
 
 Preferred session flow (no eval):
-  ghostshell_session_start --agent codex --model gpt-5.3 --agent-name 'Planner A' --ttl-minutes 120
-  ghostshell_session_status
-  ghostshell_session_stop
+  agensic_session_start --agent codex --model gpt-5.3 --agent-name 'Planner A' --ttl-minutes 120
+  agensic_session_status
+  agensic_session_stop
 USAGE
 }
 
@@ -19,12 +19,12 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
 CLI=()
 
-if command -v aiterminal >/dev/null 2>&1; then
-  CLI=(aiterminal)
+if command -v agensic >/dev/null 2>&1; then
+  CLI=(agensic)
 elif [[ -f "$REPO_ROOT/cli.py" ]]; then
   CLI=(python3 "$REPO_ROOT/cli.py")
 else
-  echo "Neither 'aiterminal' nor '$REPO_ROOT/cli.py' is available; deterministic AI_EXECUTED signing unavailable" >&2
+  echo "Neither 'agensic' nor '$REPO_ROOT/cli.py' is available; deterministic AI_EXECUTED signing unavailable" >&2
   exit 127
 fi
 

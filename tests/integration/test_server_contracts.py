@@ -3,8 +3,8 @@ from unittest.mock import patch
 
 try:
     from fastapi.testclient import TestClient
-    from ghostshell.server.app import app
-    from ghostshell.server import deps
+    from agensic.server.app import app
+    from agensic.server import deps
     SERVER_IMPORT_ERROR = None
 except Exception as exc:  # pragma: no cover - environment dependent
     TestClient = None
@@ -99,7 +99,7 @@ class ServerContractTests(unittest.TestCase):
         response = self._request_without_auth(
             "GET",
             "/status",
-            headers={"X-GhostShell-Auth": self.AUTH_TOKEN},
+            headers={"X-Agensic-Auth": self.AUTH_TOKEN},
         )
         self.assertEqual(response.status_code, 200)
 

@@ -1,8 +1,8 @@
 import unittest
 import importlib
-from unittest.mock import patch
+from unittest.mock import MagicMock, patch
 
-cli_app = importlib.import_module("ghostshell.cli.app")
+cli_app = importlib.import_module("agensic.cli.app")
 
 
 class SetupBudgetTests(unittest.TestCase):
@@ -52,6 +52,15 @@ class SetupBudgetTests(unittest.TestCase):
         ), patch.object(cli_app.console, "print"):
             cli_app.start()
         rotate_mock.assert_called_once_with("start")
+
+    def test_setup_select_uses_emoji_pointer(self):
+        question = MagicMock()
+        question.ask.return_value = "Choose AI provider"
+
+        with patch.object(cli_app, "_build_select_question", return_value=question) as build_mock:
+            cli_app._setup_select("Choose one:", ["Choose AI provider"])
+
+        self.assertEqual(build_mock.call_args.kwargs["pointer"], "👉")
 
 
 if __name__ == "__main__":

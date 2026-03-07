@@ -7,8 +7,8 @@ agent_name=""
 command_string=""
 defaulted_identity=0
 verify_enabled=1
-verify_mode="${GHOSTSHELL_SIGNED_VERIFY_MODE:-warn}"
-verify_max_wait_ms="${GHOSTSHELL_SIGNED_VERIFY_MAX_WAIT_MS:-150}"
+verify_mode="${AGENSIC_SIGNED_VERIFY_MODE:-warn}"
+verify_max_wait_ms="${AGENSIC_SIGNED_VERIFY_MAX_WAIT_MS:-150}"
 
 usage() {
   cat <<'USAGE'
@@ -83,7 +83,7 @@ _verify_ai_executed_for_command() {
   local expected_command="$1"
   local start_ts="$2"
   local max_wait_ms="$3"
-  local db_path="${GHOSTSHELL_STATE_DB_PATH:-$HOME/.ghostshell/state.sqlite}"
+  local db_path="${AGENSIC_STATE_DB_PATH:-$HOME/.agensic/state.sqlite}"
 
   python3 - "$db_path" "$expected_command" "$start_ts" "$max_wait_ms" <<'PY'
 import os
@@ -202,13 +202,13 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
 CLI=()
 
-if command -v aiterminal >/dev/null 2>&1; then
-  CLI=(aiterminal)
+if command -v agensic >/dev/null 2>&1; then
+  CLI=(agensic)
 elif [[ -f "$REPO_ROOT/cli.py" ]]; then
   CLI=(python3 "$REPO_ROOT/cli.py")
 else
   _emit_enforcement_message "ERROR" "wrapper_cli_unavailable"
-  echo "Neither 'aiterminal' nor '$REPO_ROOT/cli.py' is available." >&2
+  echo "Neither 'agensic' nor '$REPO_ROOT/cli.py' is available." >&2
   exit 127
 fi
 

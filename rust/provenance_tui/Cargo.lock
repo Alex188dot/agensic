@@ -3,6 +3,22 @@
 version = 4
 
 [[package]]
+name = "agensic-provenance-tui"
+version = "0.1.0"
+dependencies = [
+ "chrono",
+ "clap",
+ "crossterm",
+ "csv",
+ "libc",
+ "ratatui",
+ "reqwest",
+ "serde",
+ "serde_json",
+ "unicode-width 0.2.0",
+]
+
+[[package]]
 name = "allocator-api2"
 version = "0.2.21"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -427,22 +443,6 @@ dependencies = [
  "r-efi",
  "wasip2",
  "wasm-bindgen",
-]
-
-[[package]]
-name = "ghostshell-provenance-tui"
-version = "0.1.0"
-dependencies = [
- "chrono",
- "clap",
- "crossterm",
- "csv",
- "libc",
- "ratatui",
- "reqwest",
- "serde",
- "serde_json",
- "unicode-width 0.2.0",
 ]
 
 [[package]]

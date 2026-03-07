@@ -1,0 +1,160 @@
+import os
+from fastapi import APIRouter, BackgroundTasks
+from agensic.server import deps
+from agensic.server.schemas import (
+    CommandStoreAddResponse,
+    CommandStoreListResponse,
+    LogCommandPayload,
+    CommandStorePayload,
+    CommandStoreRemovePayload,
+    CommandStoreRemoveResponse,
+    LogCommandResponse,
+)
+
+router = APIRouter()
+MAX_COMMAND_DURATION_MS = 86_400_000
+
+
+@router.post("/log_command", response_model=LogCommandResponse, response_model_exclude_unset=True)
+def log_command(data: LogCommandPayload, background_tasks: BackgroundTasks) -> LogCommandResponse:
+    deps.enter_request_or_503()
+    try:
+        command = str(data.command or "").strip()
+        if not command:
+            return {"status": "ignored", "reason": "empty_command"}
+
+        raw_exit_code = data.exit_code
+        exit_code = None
+        if raw_exit_code is not None:
+            try:
+                exit_code = int(raw_exit_code)
+            except (TypeError, ValueError):
+                return {"status": "ignored", "reason": "invalid_exit_code"}
+        raw_duration_ms = data.duration_ms
+        duration_ms = None
+        if raw_duration_ms is not None:
+            try:
+                duration_ms = min(MAX_COMMAND_DURATION_MS, max(0, int(raw_duration_ms)))
+            except (TypeError, ValueError):
+                return {"status": "ignored", "reason": "invalid_duration_ms"}
+
+        source = str(data.source or "unknown").strip().lower()
+        if source not in {"runtime", "history", "unknown"}:
+            return {"status": "ignored", "reason": "invalid_source"}
+        working_directory = str(data.working_directory or "").strip() or None
+
+        config = deps.load_config()
+        patterns = deps.disabled_patterns_from_config(config)
+        if deps.command_matches_disabled_pattern(command, patterns):
+            return {"status": "ignored", "reason": "disabled_pattern"}
+
+        provenance_payload = {
+            "captured_stdout_tail": data.captured_stdout_tail,
+            "captured_stderr_tail": data.captured_stderr_tail,
+            "captured_output_truncated": data.captured_output_truncated,
+            "shell_pid": data.shell_pid,
+            "provenance_last_action": data.provenance_last_action,
+            "provenance_accept_origin": data.provenance_accept_origin,
+            "provenance_accept_mode": data.provenance_accept_mode,
+            "provenance_suggestion_kind": data.provenance_suggestion_kind,
+            "provenance_manual_edit_after_accept": data.provenance_manual_edit_after_accept,
+            "provenance_ai_agent": data.provenance_ai_agent,
+            "provenance_ai_provider": data.provenance_ai_provider,
+            "provenance_ai_model": data.provenance_ai_model,
+            "provenance_agent_name": data.provenance_agent_name,
+            "provenance_agent_hint": data.provenance_agent_hint,
+            "provenance_model_raw": data.provenance_model_raw,
+            "provenance_wrapper_id": data.provenance_wrapper_id,
+            "proof_label": data.proof_label,
+            "proof_agent": data.proof_agent,
+            "proof_model": data.proof_model,
+            "proof_trace": data.proof_trace,
+            "proof_timestamp": data.proof_timestamp,
+            "proof_signature": data.proof_signature,
+            "proof_signer_scope": data.proof_signer_scope,
+            "proof_key_fingerprint": data.proof_key_fingerprint,
+            "proof_host_fingerprint": data.proof_host_fingerprint,
+        }
+
+        background_tasks.add_task(
+            deps.run_background_task,
+            deps.engine.log_executed_command,
+            command,
+            exit_code,
+            duration_ms,
+            source,
+            working_directory,
+            provenance_payload,
+        )
+        return {"status": "ok"}
+    finally:
+        deps.release_request_slot()
+
+
+@router.get("/command_store/list", response_model=CommandStoreListResponse, response_model_exclude_unset=True)
+def command_store_list(shell: str = "", include_all: bool = False) -> CommandStoreListResponse:
+    deps.enter_request_or_503()
+    try:
+        target_shell = (shell or os.environ.get("SHELL", "zsh")).strip()
+        history_file = deps.get_history_file(target_shell)
+        vector_db = deps.engine._ensure_vector_db()
+        payload = vector_db.list_command_store(history_file=history_file, include_all=include_all)
+        return {
+            "status": "ok",
+            "history_file": history_file,
+            **payload,
+        }
+    finally:
+        deps.release_request_slot()
+
+
+@router.post("/command_store/add", response_model=CommandStoreAddResponse, response_model_exclude_unset=True)
+def command_store_add(data: CommandStorePayload) -> CommandStoreAddResponse:
+    deps.enter_request_or_503()
+    try:
+        vector_db = deps.engine._ensure_vector_db()
+        result = vector_db.add_manual_commands(data.commands or [])
+        return {
+            "status": "ok",
+            **result,
+        }
+    finally:
+        deps.release_request_slot()
+
+
+@router.post(
+    "/command_store/remove",
+    response_model=CommandStoreRemoveResponse,
+    response_model_exclude_unset=True,
+)
+def command_store_remove(data: CommandStoreRemovePayload) -> CommandStoreRemoveResponse:
+    deps.enter_request_or_503()
+    try:
+        target_shell = (data.shell or os.environ.get("SHELL", "zsh")).strip()
+        history_file = deps.get_history_file(target_shell)
+        vector_db = deps.engine._ensure_vector_db()
+
+        normalized_targets = deps.normalize_unique_commands(data.commands or [], vector_db)
+        result = vector_db.remove_commands_exact(normalized_targets)
+
+        history_removed_lines = 0
+        warnings_list: list[str] = []
+        if normalized_targets:
+            history_removed_lines, history_warning = deps.rewrite_history_without_commands(
+                history_file,
+                set(normalized_targets),
+            )
+            if history_warning:
+                warnings_list.append(history_warning)
+            elif history_file and not vector_db.align_history_index_state_to_end(history_file):
+                warnings_list.append("History index pointer could not be aligned after rewrite.")
+
+        return {
+            "status": "ok",
+            "history_file": history_file,
+            "history_removed_lines": history_removed_lines,
+            "warnings": warnings_list,
+            **result,
+        }
+    finally:
+        deps.release_request_slot()

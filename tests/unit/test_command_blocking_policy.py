@@ -1,6 +1,6 @@
 import unittest
 
-from ghostshell.vector_db.command_db import CommandVectorDB
+from agensic.vector_db.command_db import CommandVectorDB
 
 
 class CommandBlockingPolicyTests(unittest.TestCase):

@@ -3,7 +3,7 @@ from unittest.mock import patch
 
 from typer.testing import CliRunner
 
-from ghostshell.cli.app import app
+from agensic.cli.app import app
 
 
 class _MockResponse:
@@ -16,17 +16,17 @@ class CliAiExecTests(unittest.TestCase):
         self.runner = CliRunner()
 
     def test_ai_exec_defaults_identity_and_warns_once(self):
-        with patch("ghostshell.cli.app.sign_proof_payload", return_value="sig") as mock_sign, patch(
-            "ghostshell.cli.app.build_local_proof_metadata",
+        with patch("agensic.cli.app.sign_proof_payload", return_value="sig") as mock_sign, patch(
+            "agensic.cli.app.build_local_proof_metadata",
             return_value={
                 "proof_signer_scope": "local-hmac",
                 "proof_key_fingerprint": "deadbeefdeadbeef",
                 "proof_host_fingerprint": "cafebabecafebabe",
             },
         ), patch(
-            "ghostshell.cli.app._daemon_auth_headers",
+            "agensic.cli.app._daemon_auth_headers",
             return_value={},
-        ), patch("ghostshell.cli.app.requests.request", return_value=_MockResponse()) as mock_request:
+        ), patch("agensic.cli.app.requests.request", return_value=_MockResponse()) as mock_request:
             result = self.runner.invoke(
                 app,
                 [
@@ -54,17 +54,17 @@ class CliAiExecTests(unittest.TestCase):
         self.assertEqual(payload["proof_host_fingerprint"], "cafebabecafebabe")
 
     def test_ai_exec_normalizes_agent_and_propagates_exit_code(self):
-        with patch("ghostshell.cli.app.sign_proof_payload", return_value="sig"), patch(
-            "ghostshell.cli.app.build_local_proof_metadata",
+        with patch("agensic.cli.app.sign_proof_payload", return_value="sig"), patch(
+            "agensic.cli.app.build_local_proof_metadata",
             return_value={
                 "proof_signer_scope": "local-hmac",
                 "proof_key_fingerprint": "",
                 "proof_host_fingerprint": "",
             },
         ), patch(
-            "ghostshell.cli.app._daemon_auth_headers",
+            "agensic.cli.app._daemon_auth_headers",
             return_value={},
-        ), patch("ghostshell.cli.app.requests.request", return_value=_MockResponse()) as mock_request:
+        ), patch("agensic.cli.app.requests.request", return_value=_MockResponse()) as mock_request:
             result = self.runner.invoke(
                 app,
                 [
@@ -89,17 +89,17 @@ class CliAiExecTests(unittest.TestCase):
         self.assertGreaterEqual(int(payload.get("duration_ms", -1) or -1), 0)
 
     def test_ai_exec_captures_output_for_nonzero_exit(self):
-        with patch("ghostshell.cli.app.sign_proof_payload", return_value="sig"), patch(
-            "ghostshell.cli.app.build_local_proof_metadata",
+        with patch("agensic.cli.app.sign_proof_payload", return_value="sig"), patch(
+            "agensic.cli.app.build_local_proof_metadata",
             return_value={
                 "proof_signer_scope": "local-hmac",
                 "proof_key_fingerprint": "",
                 "proof_host_fingerprint": "",
             },
         ), patch(
-            "ghostshell.cli.app._daemon_auth_headers",
+            "agensic.cli.app._daemon_auth_headers",
             return_value={},
-        ), patch("ghostshell.cli.app.requests.request", return_value=_MockResponse()) as mock_request:
+        ), patch("agensic.cli.app.requests.request", return_value=_MockResponse()) as mock_request:
             result = self.runner.invoke(
                 app,
                 [
@@ -122,17 +122,17 @@ class CliAiExecTests(unittest.TestCase):
         self.assertNotIn("captured_output_truncated", payload)
 
     def test_ai_exec_does_not_store_output_for_zero_exit(self):
-        with patch("ghostshell.cli.app.sign_proof_payload", return_value="sig"), patch(
-            "ghostshell.cli.app.build_local_proof_metadata",
+        with patch("agensic.cli.app.sign_proof_payload", return_value="sig"), patch(
+            "agensic.cli.app.build_local_proof_metadata",
             return_value={
                 "proof_signer_scope": "local-hmac",
                 "proof_key_fingerprint": "",
                 "proof_host_fingerprint": "",
             },
         ), patch(
-            "ghostshell.cli.app._daemon_auth_headers",
+            "agensic.cli.app._daemon_auth_headers",
             return_value={},
-        ), patch("ghostshell.cli.app.requests.request", return_value=_MockResponse()) as mock_request:
+        ), patch("agensic.cli.app.requests.request", return_value=_MockResponse()) as mock_request:
             result = self.runner.invoke(
                 app,
                 [

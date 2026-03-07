@@ -1,4 +1,4 @@
-from ghostshell.engine import RequestContext, Settings, SuggestionEngine, SystemInventory
+from agensic.engine import RequestContext, Settings, SuggestionEngine, SystemInventory
 
 __all__ = [
     "RequestContext",

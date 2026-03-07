@@ -26,8 +26,8 @@ use std::path::Path;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 #[derive(Debug, Parser, Clone)]
-#[command(name = "ghostshell-provenance-tui")]
-#[command(about = "Full-screen provenance viewer for GhostShell")]
+#[command(name = "agensic-provenance-tui")]
+#[command(about = "Full-screen provenance viewer for Agensic")]
 struct Args {
     #[arg(long, default_value = "http://127.0.0.1:22000")]
     daemon_url: String,
@@ -1334,7 +1334,7 @@ fn draw_ui(terminal: &mut Terminal<CrosstermBackend<Stdout>>, app: &App) -> io::
                 total_pages,
             )),
         ]))
-        .block(Block::default().borders(Borders::ALL).title("GhostShell Provenance"));
+        .block(Block::default().borders(Borders::ALL).title("Agensic Provenance"));
         frame.render_widget(top, chunks[0]);
 
         let compact = area.width < 120;
@@ -2297,7 +2297,7 @@ mod tests {
             .duration_since(UNIX_EPOCH)
             .expect("time should be monotonic")
             .as_nanos();
-        std::env::temp_dir().join(format!("ghostshell-provenance-export-{}.{}", unique, ext))
+        std::env::temp_dir().join(format!("agensic-provenance-export-{}.{}", unique, ext))
     }
 
     #[test]

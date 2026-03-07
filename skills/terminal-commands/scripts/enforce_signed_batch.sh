@@ -77,8 +77,8 @@ _is_session_start() {
     || "$line" == "scripts/signed_session.sh start"* \
     || "$line" == "signed_session.sh start"* \
     || "$line" == */"signed_session.sh start"* \
-    || "$line" == "ghostshell_session_start"* \
-    || "$line" == "aiterminal ai-session start"* \
+    || "$line" == "agensic_session_start"* \
+    || "$line" == "agensic ai-session start"* \
     || "$line" == "python3 "*"/cli.py ai-session start"* ]]
 }
 
@@ -89,8 +89,8 @@ _is_session_stop() {
     || "$line" == "scripts/signed_session.sh stop"* \
     || "$line" == "signed_session.sh stop"* \
     || "$line" == */"signed_session.sh stop"* \
-    || "$line" == "ghostshell_session_stop"* \
-    || "$line" == "aiterminal ai-session stop"* \
+    || "$line" == "agensic_session_stop"* \
+    || "$line" == "agensic ai-session stop"* \
     || "$line" == "python3 "*"/cli.py ai-session stop"* ]]
 }
 
@@ -101,7 +101,7 @@ _is_signed_oneoff() {
     || "$line" == "scripts/signed_exec.sh "* \
     || "$line" == "signed_exec.sh "* \
     || "$line" == */"signed_exec.sh "* \
-    || "$line" == "aiterminal ai-exec "* \
+    || "$line" == "agensic ai-exec "* \
     || "$line" == "python3 "*"/cli.py ai-exec "* ]]
 }
 

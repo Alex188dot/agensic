@@ -151,7 +151,7 @@ class ShellClientAuthTests(unittest.TestCase):
                 ]
             )
         self.assertEqual(len(lines), 12)
-        self.assertEqual(lines[0], "ghostshell_shell_lines_v1")
+        self.assertEqual(lines[0], "agensic_shell_lines_v1")
         self.assertEqual(lines[1], "intent")
         self.assertEqual(lines[2], "1")
         self.assertEqual(lines[3], "")
@@ -181,7 +181,7 @@ class ShellClientAuthTests(unittest.TestCase):
                     "zsh",
                 ]
             )
-        self.assertEqual(lines[0], "ghostshell_shell_lines_v1")
+        self.assertEqual(lines[0], "agensic_shell_lines_v1")
         self.assertEqual(lines[1], "intent")
         self.assertEqual(lines[2], "0")
         self.assertEqual(lines[3], "auth_failed")
@@ -276,7 +276,7 @@ class ShellClientAuthTests(unittest.TestCase):
                     "zsh",
                 ]
             )
-        self.assertEqual(lines[0], "ghostshell_shell_lines_v1")
+        self.assertEqual(lines[0], "agensic_shell_lines_v1")
         self.assertEqual(lines[1], "assist")
         self.assertEqual(lines[2], "1")
         self.assertEqual(lines[3], "")
@@ -299,7 +299,7 @@ class ShellClientAuthTests(unittest.TestCase):
                     "zsh",
                 ]
             )
-        self.assertEqual(lines[0], "ghostshell_shell_lines_v1")
+        self.assertEqual(lines[0], "agensic_shell_lines_v1")
         self.assertEqual(lines[1], "assist")
         self.assertEqual(lines[2], "0")
         self.assertEqual(lines[4], "1")

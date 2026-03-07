@@ -1,33 +1,37 @@
 #!/bin/bash
 
-echo "🚀 Installing GhostShell 👻✨..."
+echo "🚀 Installing Agensic 🔒..."
 
 # 1. Create directory
-INSTALL_DIR="$HOME/.ghostshell"
+INSTALL_DIR="$HOME/.agensic"
+FIRST_INSTALL=0
+if [ ! -f "$INSTALL_DIR/cli.py" ]; then
+    FIRST_INSTALL=1
+fi
 mkdir -p "$INSTALL_DIR"
 
 # 2. Copy files
 cp requirements.txt "$INSTALL_DIR/"
 cp server.py "$INSTALL_DIR/"
 cp cli.py "$INSTALL_DIR/"
-cp ghostshell.zsh "$INSTALL_DIR/"
+cp agensic.zsh "$INSTALL_DIR/"
 cp engine.py "$INSTALL_DIR/"
 cp vector_db.py "$INSTALL_DIR/"
 cp privacy_guard.py "$INSTALL_DIR/"
 cp shell_client.py "$INSTALL_DIR/"
-rm -rf "$INSTALL_DIR/ghostshell"
-cp -R ghostshell "$INSTALL_DIR/"
+rm -rf "$INSTALL_DIR/agensic"
+cp -R agensic "$INSTALL_DIR/"
 
 # 2b. Install local provenance TUI sidecar if already built
 mkdir -p "$INSTALL_DIR/bin"
-LOCAL_TUI_BIN="$PWD/rust/provenance_tui/target/release/ghostshell-provenance-tui"
+LOCAL_TUI_BIN="$PWD/rust/provenance_tui/target/release/agensic-provenance-tui"
 if [ -x "$LOCAL_TUI_BIN" ]; then
-    cp "$LOCAL_TUI_BIN" "$INSTALL_DIR/bin/ghostshell-provenance-tui"
-    chmod +x "$INSTALL_DIR/bin/ghostshell-provenance-tui"
+    cp "$LOCAL_TUI_BIN" "$INSTALL_DIR/bin/agensic-provenance-tui"
+    chmod +x "$INSTALL_DIR/bin/agensic-provenance-tui"
     echo "✅ Installed local provenance TUI sidecar to $INSTALL_DIR/bin"
 else
-    MANIFEST_URL="${GHOSTSHELL_PROVENANCE_TUI_MANIFEST_URL:-https://github.com/Alex188dot/ai-terminal/releases/latest/download/provenance_tui_manifest.json}"
-    python3 - "$MANIFEST_URL" "$INSTALL_DIR/bin/ghostshell-provenance-tui" <<'PY' || echo "⚠️ Could not download provenance TUI sidecar; CLI fallback will still work."
+    MANIFEST_URL="${AGENSIC_PROVENANCE_TUI_MANIFEST_URL:-https://github.com/Alex188dot/ai-terminal/releases/latest/download/provenance_tui_manifest.json}"
+    python3 - "$MANIFEST_URL" "$INSTALL_DIR/bin/agensic-provenance-tui" <<'PY' || echo "⚠️ Could not download provenance TUI sidecar; CLI fallback will still work."
 import hashlib
 import json
 import os
@@ -66,10 +70,10 @@ if not isinstance(entry, dict) or not entry.get("url"):
 artifact_url = str(entry.get("url", "") or "").strip()
 artifact_sha = str(entry.get("artifact_sha256", "") or "").strip().lower()
 binary_sha = str(entry.get("binary_sha256", "") or "").strip().lower()
-binary_name = str(entry.get("binary", "ghostshell-provenance-tui") or "ghostshell-provenance-tui")
+binary_name = str(entry.get("binary", "agensic-provenance-tui") or "agensic-provenance-tui")
 
 os.makedirs(os.path.dirname(dest_bin), exist_ok=True)
-with tempfile.TemporaryDirectory(prefix="ghostshell-tui-install-") as tmp:
+with tempfile.TemporaryDirectory(prefix="agensic-tui-install-") as tmp:
     artifact_path = os.path.join(tmp, "provenance_tui.tar.gz")
     with urllib.request.urlopen(artifact_url, timeout=30) as response, open(artifact_path, "wb") as out:
         shutil.copyfileobj(response, out)
@@ -107,7 +111,7 @@ print(f"✅ Downloaded provenance TUI sidecar to {dest_bin}")
 PY
 fi
 
-# 2c. Lock down install permissions for all GhostShell files.
+# 2c. Lock down install permissions for all Agensic files.
 # Executable payloads keep owner-only execute bits; everything else becomes 0600.
 chmod -R u=rwX,go= "$INSTALL_DIR"
 
@@ -116,39 +120,72 @@ echo "📦 Installing Python dependencies..."
 pip3 install -r "$INSTALL_DIR/requirements.txt"
 
 # 4. Create alias for the CLI (idempotent)
-# We add this to rc file so 'aiterminal' command works
+# We add this to rc file so 'agensic' command works
 SHELL_RC="$HOME/.zshrc"
 if [ -f "$HOME/.bashrc" ]; then
     SHELL_RC="$HOME/.bashrc"
 fi
 
-START_MARKER="# >>> ghostshell >>>"
-END_MARKER="# <<< ghostshell <<<"
+START_MARKER="# >>> agensic >>>"
+END_MARKER="# <<< agensic <<<"
+LEGACY_INSTALL_NAME="ghost""shell"
+LEGACY_CLI_NAME="ai""terminal"
+LEGACY_START_MARKER="# >>> ${LEGACY_INSTALL_NAME} >>>"
+LEGACY_END_MARKER="# <<< ${LEGACY_INSTALL_NAME} <<<"
+UNINSTALL_SENTINEL="${TMPDIR:-/tmp}/agensic-shell-uninstalled-$(id -u)"
 
 touch "$SHELL_RC"
+rm -f "$UNINSTALL_SENTINEL"
 
 # Remove old unmanaged lines from previous installs.
 sed -i.bak \
-  -e "\|alias aiterminal='python3 .*\\.ghostshell/cli\\.py'|d" \
-  -e "\|source .*\\.ghostshell/ghostshell\\.zsh|d" \
+  -e "\|alias ${LEGACY_CLI_NAME}='python3 .*\\.${LEGACY_INSTALL_NAME}/cli\\.py'|d" \
+  -e "\|alias agensic='python3 .*\\.agensic/cli\\.py'|d" \
+  -e "\|source .*\\.${LEGACY_INSTALL_NAME}/${LEGACY_INSTALL_NAME}\\.zsh|d" \
+  -e "\|source .*\\.agensic/agensic\\.zsh|d" \
   "$SHELL_RC"
 
 # Remove previous managed block if present.
 sed -i.bak \
+  -e "/$LEGACY_START_MARKER/,/$LEGACY_END_MARKER/d" \
   -e "/$START_MARKER/,/$END_MARKER/d" \
   "$SHELL_RC"
 
 cat >> "$SHELL_RC" <<EOF
 $START_MARKER
-alias aiterminal='python3 $INSTALL_DIR/cli.py'
-source $INSTALL_DIR/ghostshell.zsh
+alias agensic='python3 $INSTALL_DIR/cli.py'
+source $INSTALL_DIR/agensic.zsh
 $END_MARKER
 EOF
 
 echo ""
-echo "✅ GhostShell 👻✨ Installation complete!"
+echo "✅ Agensic 🔒 Installation complete!"
 echo "------------------------------------------------"
 echo "1. Restart your terminal."
-echo "2. Run: aiterminal setup"
-echo "3. Start typing commands (e.g. 'git c', 'docker ru')."
+if [ "$FIRST_INSTALL" -eq 1 ]; then
+    echo "2. Complete the first-time setup flow."
+    echo "3. Start typing commands (e.g. 'git c', 'docker ru')."
+else
+    echo "2. Run: agensic setup"
+    echo "3. Start typing commands (e.g. 'git c', 'docker ru')."
+fi
 echo "------------------------------------------------"
+
+if [ "$FIRST_INSTALL" -eq 1 ]; then
+    echo ""
+    echo "Starting Agensic for first-time setup..."
+    if ! python3 "$INSTALL_DIR/cli.py" start; then
+        echo "⚠️ Agensic start did not complete cleanly."
+    fi
+
+    if [ -t 0 ] && [ -t 1 ]; then
+        echo "Opening first-time Agensic setup..."
+        python3 "$INSTALL_DIR/cli.py" setup || {
+            echo "⚠️ First-time setup did not complete."
+            echo "   Run: python3 $INSTALL_DIR/cli.py setup"
+        }
+    else
+        echo "First-time setup was skipped because this install is not running in an interactive terminal."
+        echo "Run: python3 $INSTALL_DIR/cli.py setup"
+    fi
+fi

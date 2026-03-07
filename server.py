@@ -1,4 +1,4 @@
-from ghostshell.server.app import app, run
+from agensic.server.app import app, run
 
 __all__ = [
     "app",

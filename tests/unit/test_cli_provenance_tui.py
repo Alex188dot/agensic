@@ -3,7 +3,7 @@ from unittest.mock import patch
 
 from typer.testing import CliRunner
 
-from ghostshell.cli.app import app
+from agensic.cli.app import app
 
 
 class CliProvenanceTuiTests(unittest.TestCase):
@@ -11,14 +11,14 @@ class CliProvenanceTuiTests(unittest.TestCase):
         self.runner = CliRunner()
 
     def test_provenance_tui_invokes_sidecar(self):
-        with patch("ghostshell.cli.app._run_provenance_tui", return_value=True) as run_tui:
+        with patch("agensic.cli.app._run_provenance_tui", return_value=True) as run_tui:
             result = self.runner.invoke(app, ["provenance", "--tui"])
         self.assertEqual(result.exit_code, 0)
         run_tui.assert_called_once()
 
     def test_provenance_tui_export_defaults_output_path(self):
-        with patch("ghostshell.cli.app._default_export_path", return_value="/tmp/default-prov.json"), patch(
-            "ghostshell.cli.app._run_provenance_tui",
+        with patch("agensic.cli.app._default_export_path", return_value="/tmp/default-prov.json"), patch(
+            "agensic.cli.app._run_provenance_tui",
             return_value=True,
         ) as run_tui:
             result = self.runner.invoke(app, ["provenance", "--tui", "--export", "json"])
@@ -28,8 +28,8 @@ class CliProvenanceTuiTests(unittest.TestCase):
         self.assertIn("Exported provenance rows to:", result.stdout)
 
     def test_provenance_tui_export_falls_back_when_sidecar_fails(self):
-        with patch("ghostshell.cli.app._run_provenance_tui", return_value=False), patch(
-            "ghostshell.cli.app._fallback_export_provenance"
+        with patch("agensic.cli.app._run_provenance_tui", return_value=False), patch(
+            "agensic.cli.app._fallback_export_provenance"
         ) as fallback:
             result = self.runner.invoke(
                 app,

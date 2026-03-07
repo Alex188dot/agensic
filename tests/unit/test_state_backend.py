@@ -3,7 +3,7 @@ import stat
 import tempfile
 import unittest
 
-from ghostshell.state import EventJournal, SnapshotManager, SQLiteStateStore
+from agensic.state import EventJournal, SnapshotManager, SQLiteStateStore
 
 
 class StateBackendTests(unittest.TestCase):
@@ -109,7 +109,7 @@ class StateBackendTests(unittest.TestCase):
 
     def test_state_backend_artifacts_are_owner_only(self):
         with tempfile.TemporaryDirectory() as tmp:
-            root = os.path.join(tmp, "ghostshell")
+            root = os.path.join(tmp, "agensic")
             db_path = os.path.join(root, "state.sqlite")
             events_dir = os.path.join(root, "events")
             snapshots_dir = os.path.join(root, "snapshots")

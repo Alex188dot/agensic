@@ -1,6 +1,6 @@
 import unittest
 
-from ghostshell.engine.agent_registry import AgentRegistry, build_model_fingerprint
+from agensic.engine.agent_registry import AgentRegistry, build_model_fingerprint
 
 
 class AgentRegistryTests(unittest.TestCase):

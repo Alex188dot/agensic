@@ -1,7 +1,7 @@
 import unittest
 from unittest.mock import Mock, patch
 
-from ghostshell.engine.suggestion_engine import SuggestionEngine
+from agensic.engine.suggestion_engine import SuggestionEngine
 
 
 def _classification(label: str) -> dict:
@@ -39,10 +39,10 @@ class SuggestionIngestionFilterTests(unittest.TestCase):
     def test_ai_executed_is_excluded_from_suggestion_store_by_default(self):
         engine, vector_db = self._build_engine()
         with patch(
-            "ghostshell.engine.suggestion_engine.classify_command_run",
+            "agensic.engine.suggestion_engine.classify_command_run",
             return_value=_classification("AI_EXECUTED"),
         ), patch(
-            "ghostshell.engine.suggestion_engine.load_config_file",
+            "agensic.engine.suggestion_engine.load_config_file",
             return_value={},
         ):
             engine.log_executed_command(
@@ -60,10 +60,10 @@ class SuggestionIngestionFilterTests(unittest.TestCase):
     def test_ai_executed_can_be_included_when_flag_enabled(self):
         engine, vector_db = self._build_engine()
         with patch(
-            "ghostshell.engine.suggestion_engine.classify_command_run",
+            "agensic.engine.suggestion_engine.classify_command_run",
             return_value=_classification("AI_EXECUTED"),
         ), patch(
-            "ghostshell.engine.suggestion_engine.load_config_file",
+            "agensic.engine.suggestion_engine.load_config_file",
             return_value={"include_ai_executed_in_suggestions": True},
         ):
             engine.log_executed_command(
@@ -79,10 +79,10 @@ class SuggestionIngestionFilterTests(unittest.TestCase):
     def test_non_ai_executed_still_ingests_with_default_config(self):
         engine, vector_db = self._build_engine()
         with patch(
-            "ghostshell.engine.suggestion_engine.classify_command_run",
+            "agensic.engine.suggestion_engine.classify_command_run",
             return_value=_classification("HUMAN_TYPED"),
         ), patch(
-            "ghostshell.engine.suggestion_engine.load_config_file",
+            "agensic.engine.suggestion_engine.load_config_file",
             return_value={},
         ):
             engine.log_executed_command(
@@ -98,10 +98,10 @@ class SuggestionIngestionFilterTests(unittest.TestCase):
     def test_runtime_nonzero_persists_provenance_but_skips_ingestion(self):
         engine, vector_db = self._build_engine()
         with patch(
-            "ghostshell.engine.suggestion_engine.classify_command_run",
+            "agensic.engine.suggestion_engine.classify_command_run",
             return_value=_classification("HUMAN_TYPED"),
         ), patch(
-            "ghostshell.engine.suggestion_engine.load_config_file",
+            "agensic.engine.suggestion_engine.load_config_file",
             return_value={},
         ):
             engine.log_executed_command(

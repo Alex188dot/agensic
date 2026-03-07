@@ -5,7 +5,7 @@ ROOT_DIR="$(cd "$(dirname "$0")/.." && pwd)"
 CRATE_DIR="$ROOT_DIR/rust/provenance_tui"
 TARGET="aarch64-apple-darwin"
 PLATFORM_KEY="darwin-arm64"
-BINARY_NAME="ghostshell-provenance-tui"
+BINARY_NAME="agensic-provenance-tui"
 VERSION="${1:-}"
 
 if [[ -z "$VERSION" ]]; then

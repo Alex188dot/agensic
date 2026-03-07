@@ -2,7 +2,7 @@ import unittest
 from types import SimpleNamespace
 from unittest.mock import patch
 
-from ghostshell.engine.suggestion_engine import (
+from agensic.engine.suggestion_engine import (
     COMMAND_PROVENANCE_RETENTION_DAYS,
     COMMAND_PROVENANCE_RETENTION_SECONDS,
     SuggestionEngine,
@@ -37,7 +37,7 @@ class SuggestionEngineProvenanceRetentionTests(unittest.TestCase):
         engine._last_command_runs_prune_ts = 0
         engine.privacy_guard = SimpleNamespace(sanitize_for_log=lambda value: value)
 
-        with patch("ghostshell.engine.suggestion_engine.time.time", return_value=2_000_000_000):
+        with patch("agensic.engine.suggestion_engine.time.time", return_value=2_000_000_000):
             engine._maybe_prune_command_runs()
 
         self.assertEqual(

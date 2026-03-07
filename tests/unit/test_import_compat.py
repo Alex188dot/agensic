@@ -12,11 +12,11 @@ except Exception as exc:  # pragma: no cover - environment dependent
     vector_db = None
     VECTOR_DB_IMPORT_ERROR = exc
 
-from ghostshell.engine import RequestContext as PackageRequestContext
-from ghostshell.engine import SuggestionEngine as PackageSuggestionEngine
-from ghostshell.privacy import PrivacyGuard as PackagePrivacyGuard
+from agensic.engine import RequestContext as PackageRequestContext
+from agensic.engine import SuggestionEngine as PackageSuggestionEngine
+from agensic.privacy import PrivacyGuard as PackagePrivacyGuard
 try:
-    from ghostshell.vector_db import CommandVectorDB as PackageCommandVectorDB
+    from agensic.vector_db import CommandVectorDB as PackageCommandVectorDB
 except Exception:  # pragma: no cover - environment dependent
     PackageCommandVectorDB = None
 

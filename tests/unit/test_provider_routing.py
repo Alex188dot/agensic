@@ -2,10 +2,10 @@ import asyncio
 import importlib
 import unittest
 
-from ghostshell.engine.context import RequestContext
-from ghostshell.engine.suggestion_engine import SuggestionEngine
+from agensic.engine.context import RequestContext
+from agensic.engine.suggestion_engine import SuggestionEngine
 
-cli_app = importlib.import_module("ghostshell.cli.app")
+cli_app = importlib.import_module("agensic.cli.app")
 
 
 class ProviderRoutingTests(unittest.TestCase):

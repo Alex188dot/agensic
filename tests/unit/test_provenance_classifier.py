@@ -1,7 +1,7 @@
 import unittest
 from unittest.mock import patch
 
-from ghostshell.engine.provenance import classify_command_run
+from agensic.engine.provenance import classify_command_run
 
 
 class ProvenanceClassifierTests(unittest.TestCase):
@@ -20,10 +20,10 @@ class ProvenanceClassifierTests(unittest.TestCase):
             "proof_host_fingerprint": "def456def456def4",
         }
         with patch(
-            "ghostshell.engine.provenance.verify_signed_proof",
+            "agensic.engine.provenance.verify_signed_proof",
             return_value=(True, "proof_valid"),
         ), patch(
-            "ghostshell.engine.provenance.inspect_process_lineage",
+            "agensic.engine.provenance.inspect_process_lineage",
             return_value={"lineage": [], "hints": []},
         ):
             out = classify_command_run("echo hi", payload)
@@ -44,7 +44,7 @@ class ProvenanceClassifierTests(unittest.TestCase):
             "provenance_manual_edit_after_accept": True,
         }
         with patch(
-            "ghostshell.engine.provenance.inspect_process_lineage",
+            "agensic.engine.provenance.inspect_process_lineage",
             return_value={"lineage": [], "hints": []},
         ):
             out = classify_command_run("git status", payload)
@@ -53,7 +53,7 @@ class ProvenanceClassifierTests(unittest.TestCase):
     def test_human_edit_classifies_as_human_typed(self):
         payload = {"provenance_last_action": "human_edit"}
         with patch(
-            "ghostshell.engine.provenance.inspect_process_lineage",
+            "agensic.engine.provenance.inspect_process_lineage",
             return_value={"lineage": [], "hints": []},
         ):
             out = classify_command_run("git status", payload)
@@ -62,7 +62,7 @@ class ProvenanceClassifierTests(unittest.TestCase):
     def test_human_paste_classifies_as_human_typed(self):
         payload = {"provenance_last_action": "human_paste"}
         with patch(
-            "ghostshell.engine.provenance.inspect_process_lineage",
+            "agensic.engine.provenance.inspect_process_lineage",
             return_value={"lineage": [], "hints": []},
         ):
             out = classify_command_run("git status", payload)
@@ -79,10 +79,10 @@ class ProvenanceClassifierTests(unittest.TestCase):
             "proof_signature": "present-but-invalid",
         }
         with patch(
-            "ghostshell.engine.provenance.verify_signed_proof",
+            "agensic.engine.provenance.verify_signed_proof",
             return_value=(False, "proof_signature_invalid"),
         ), patch(
-            "ghostshell.engine.provenance.inspect_process_lineage",
+            "agensic.engine.provenance.inspect_process_lineage",
             return_value={"lineage": [], "hints": []},
         ):
             out = classify_command_run("echo hi", payload)
@@ -103,7 +103,7 @@ class ProvenanceClassifierTests(unittest.TestCase):
             "provenance_ai_provider": "openai",
         }
         with patch(
-            "ghostshell.engine.provenance.inspect_process_lineage",
+            "agensic.engine.provenance.inspect_process_lineage",
             return_value={"lineage": [], "hints": []},
         ):
             out = classify_command_run("npm test", payload)
@@ -121,7 +121,7 @@ class ProvenanceClassifierTests(unittest.TestCase):
             "provenance_manual_edit_after_accept": False,
         }
         with patch(
-            "ghostshell.engine.provenance.inspect_process_lineage",
+            "agensic.engine.provenance.inspect_process_lineage",
             return_value={"lineage": [], "hints": []},
         ):
             out = classify_command_run("docker ps", payload)
@@ -134,7 +134,7 @@ class ProvenanceClassifierTests(unittest.TestCase):
             "provenance_manual_edit_after_accept": True,
         }
         with patch(
-            "ghostshell.engine.provenance.inspect_process_lineage",
+            "agensic.engine.provenance.inspect_process_lineage",
             return_value={"lineage": [], "hints": []},
         ):
             out = classify_command_run("python app.py", payload)
@@ -148,10 +148,10 @@ class ProvenanceClassifierTests(unittest.TestCase):
             "provenance_ai_agent": "codex",
             "provenance_ai_provider": "openai",
             "provenance_ai_model": "gpt-5.3",
-            "provenance_wrapper_id": "aiterminal_ai_exec:abc",
+            "provenance_wrapper_id": "agensic_ai_exec:abc",
         }
         with patch(
-            "ghostshell.engine.provenance.inspect_process_lineage",
+            "agensic.engine.provenance.inspect_process_lineage",
             return_value={"lineage": [], "hints": [], "match": {}},
         ):
             out = classify_command_run("echo hi", payload)
@@ -162,7 +162,7 @@ class ProvenanceClassifierTests(unittest.TestCase):
     def test_lineage_heuristic_sets_unknown_confidence(self):
         payload = {"shell_pid": 100}
         with patch(
-            "ghostshell.engine.provenance.inspect_process_lineage",
+            "agensic.engine.provenance.inspect_process_lineage",
             return_value={
                 "lineage": [],
                 "hints": ["cursor"],
@@ -195,10 +195,10 @@ class ProvenanceClassifierTests(unittest.TestCase):
             "proof_signature": "sig",
         }
         with patch(
-            "ghostshell.engine.provenance.verify_signed_proof",
+            "agensic.engine.provenance.verify_signed_proof",
             return_value=(True, "proof_valid"),
         ), patch(
-            "ghostshell.engine.provenance.inspect_process_lineage",
+            "agensic.engine.provenance.inspect_process_lineage",
             return_value={"lineage": [], "hints": [], "match": {}},
         ):
             out = classify_command_run("echo hi", payload)

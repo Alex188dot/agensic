@@ -1,4 +1,4 @@
-from ghostshell.cli.app import app, main, show_shortcuts
+from agensic.cli.app import app, main, show_shortcuts
 
 __all__ = [
     "app",

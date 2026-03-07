@@ -4,7 +4,7 @@ from unittest.mock import patch
 
 from typer.testing import CliRunner
 
-cli_app = importlib.import_module("ghostshell.cli.app")
+cli_app = importlib.import_module("agensic.cli.app")
 app = cli_app.app
 
 

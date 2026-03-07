@@ -18,21 +18,21 @@
 3. It is informational only and not used for signature trust decisions.
 
 ## Session-First Signing Contract
-1. Prefer `ghostshell_session_start` for multi-command runs.
-2. Commands run while session env is active are auto-signed by GhostShell and expected to classify as `AI_EXECUTED`.
-3. End with `ghostshell_session_stop`.
-4. Use `ghostshell_session_status` for checks.
+1. Prefer `agensic_session_start` for multi-command runs.
+2. Commands run while session env is active are auto-signed by Agensic and expected to classify as `AI_EXECUTED`.
+3. End with `agensic_session_stop`.
+4. Use `agensic_session_status` for checks.
 5. Session expiry is actively enforced by timer signal (not only lazily on next command).
-6. Use `aiterminal ai-exec` for one-off commands.
-7. `aiterminal ai-session start/stop` export flow remains available for compatibility, but is deprecated.
+6. Use `agensic ai-exec` for one-off commands.
+7. `agensic ai-session start/stop` export flow remains available for compatibility, but is deprecated.
 
 ## Examples
 1. Session flow (mapped identity):
-   - `ghostshell_session_start --agent codex --model gpt-5.3 --agent-name 'Planner A' --ttl-minutes 120`
+   - `agensic_session_start --agent codex --model gpt-5.3 --agent-name 'Planner A' --ttl-minutes 120`
    - run commands normally
-   - `ghostshell_session_stop`
+   - `agensic_session_stop`
 2. One-off flow (unmapped identity):
-   - `aiterminal ai-exec --agent my-new-agent --model custom-v1 --agent-name 'Ops Bot' -- echo ok`
+   - `agensic ai-exec --agent my-new-agent --model custom-v1 --agent-name 'Ops Bot' -- echo ok`
 3. Defaulted identity flow (missing identity):
-   - `aiterminal ai-exec -- echo ok`
+   - `agensic ai-exec -- echo ok`
    - runtime defaults to `agent=unknown` and `model=unknown-model` (warning emitted)

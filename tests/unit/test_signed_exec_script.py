@@ -15,13 +15,13 @@ class SignedExecScriptTests(unittest.TestCase):
     def _run_script(self, args: list[str]) -> tuple[subprocess.CompletedProcess, list[str]]:
         with tempfile.TemporaryDirectory() as tmpdir:
             capture_path = Path(tmpdir) / "captured_args.txt"
-            aiterminal_path = Path(tmpdir) / "aiterminal"
-            aiterminal_path.write_text(
+            agensic_path = Path(tmpdir) / "agensic"
+            agensic_path.write_text(
                 "#!/usr/bin/env bash\n"
                 "printf '%s\\n' \"$@\" > \"$AIT_CAPTURE_PATH\"\n",
                 encoding="utf-8",
             )
-            os.chmod(aiterminal_path, stat.S_IRWXU)
+            os.chmod(agensic_path, stat.S_IRWXU)
 
             env = dict(os.environ)
             env["PATH"] = f"{tmpdir}:{env.get('PATH', '')}"
