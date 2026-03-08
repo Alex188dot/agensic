@@ -1,0 +1,62 @@
+[build-system]
+requires = ["setuptools>=69", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "agensic"
+version = "0.1.0"
+description = "Forensic observability for AI agents in the terminal."
+readme = "README.md"
+requires-python = ">=3.10"
+license = "Apache-2.0"
+authors = [
+  { name = "Alessio Leodori" }
+]
+dependencies = [
+  "fastapi==0.131.0",
+  "uvicorn==0.34.0",
+  "litellm==1.81.9",
+  "rich==14.3.2",
+  "typer==0.21.1",
+  "requests==2.32.5",
+  "psutil==6.1.0",
+  "questionary==2.1.1",
+  "prompt-toolkit>=3,<4",
+  "pydantic>=2,<3",
+  "cryptography>=42",
+  "zvec>=0.1.0",
+  "sentence-transformers==5.2.3",
+  "transformers==5.2.0",
+  "tokenizers==0.22.2",
+  "torch==2.10.0",
+  "rapidfuzz==3.12.2",
+]
+
+[project.optional-dependencies]
+dev = [
+  "pytest==9.0.2",
+]
+
+[project.scripts]
+agensic = "agensic.cli.app:app"
+
+[project.urls]
+Homepage = "https://github.com/Alex188dot/agensic"
+Repository = "https://github.com/Alex188dot/agensic"
+
+[tool.setuptools]
+include-package-data = true
+py-modules = [
+  "cli",
+  "engine",
+  "privacy_guard",
+  "server",
+  "shell_client",
+  "vector_db",
+]
+
+[tool.setuptools.packages.find]
+include = ["agensic*"]
+
+[tool.setuptools.package-data]
+agensic = ["engine/data/*.json"]

@@ -59,12 +59,12 @@ How the proof works, briefly:
 You can install this skill from GitHub, in one of the following ways:
 
 ```bash
-npx skills add Alex188dot/ai-terminal
+npx skills add Alex188dot/agensic
 
-npx ctx7 skills install Alex188dot/ai-terminal
+npx ctx7 skills install Alex188dot/agensic
 ```
 
-Repo: [github.com/Alex188dot/ai-terminal](https://github.com/Alex188dot/ai-terminal)
+Repo: [github.com/Alex188dot/agensic](https://github.com/Alex188dot/agensic)
 
 That means you can answer questions like:
 
@@ -113,7 +113,19 @@ Open a new terminal and run:
 agensic setup
 ```
 
-The installer writes a real launcher to `~/.agensic/bin/agensic` and adds that directory to your shell `PATH` in a managed shell RC block.
+The installer writes a real launcher to `~/.agensic/bin/agensic`, installs the Python package into `~/.agensic/.venv`, and adds that directory to your shell `PATH` in a managed shell RC block.
+
+When `uv` is available, the installer prefers it for faster environment creation and package installation. Otherwise it falls back to stdlib `venv` + `pip`.
+
+If you only want an isolated CLI install, you can also use standard Python tooling:
+
+```bash
+uv tool install .
+# or
+pipx install .
+```
+
+That avoids `pip install` into the host interpreter. Use `bash ./install.sh` when you also want the managed Zsh shell wiring from this repo.
 
 Once the daemon is running, you can use the `agensic` CLI to interact with it or use the shell integration to use it inline autocomplete in your existing shell.
 

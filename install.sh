@@ -4,24 +4,17 @@ echo "🚀 Installing Agensic 🔒..."
 
 # 1. Create directory
 INSTALL_DIR="$HOME/.agensic"
+VENV_DIR="$INSTALL_DIR/.venv"
 FIRST_INSTALL=0
-if [ ! -f "$INSTALL_DIR/cli.py" ]; then
+if [ ! -x "$INSTALL_DIR/bin/agensic" ]; then
     FIRST_INSTALL=1
 fi
 mkdir -p "$INSTALL_DIR"
 mkdir -p "$INSTALL_DIR/bin"
 
-# 2. Copy files
-cp requirements.txt "$INSTALL_DIR/"
-cp server.py "$INSTALL_DIR/"
-cp cli.py "$INSTALL_DIR/"
+# 2. Copy shell integration assets
 cp agensic.zsh "$INSTALL_DIR/"
-cp engine.py "$INSTALL_DIR/"
-cp vector_db.py "$INSTALL_DIR/"
-cp privacy_guard.py "$INSTALL_DIR/"
 cp shell_client.py "$INSTALL_DIR/"
-rm -rf "$INSTALL_DIR/agensic"
-cp -R agensic "$INSTALL_DIR/"
 
 # 2b. Install local provenance TUI sidecar if already built
 LOCAL_TUI_BIN="$PWD/rust/provenance_tui/target/release/agensic-provenance-tui"
@@ -30,7 +23,7 @@ if [ -x "$LOCAL_TUI_BIN" ]; then
     chmod +x "$INSTALL_DIR/bin/agensic-provenance-tui"
     echo "✅ Installed local provenance TUI sidecar to $INSTALL_DIR/bin"
 else
-    MANIFEST_URL="${AGENSIC_PROVENANCE_TUI_MANIFEST_URL:-https://github.com/Alex188dot/ai-terminal/releases/latest/download/provenance_tui_manifest.json}"
+    MANIFEST_URL="${AGENSIC_PROVENANCE_TUI_MANIFEST_URL:-https://github.com/Alex188dot/agensic/releases/latest/download/provenance_tui_manifest.json}"
     python3 - "$MANIFEST_URL" "$INSTALL_DIR/bin/agensic-provenance-tui" <<'PY' || echo "⚠️ Could not download provenance TUI sidecar; CLI fallback will still work."
 import hashlib
 import json
@@ -115,19 +108,30 @@ fi
 # Executable payloads keep owner-only execute bits; everything else becomes 0600.
 chmod -R u=rwX,go= "$INSTALL_DIR"
 
-# 2d. Create a stable PATH launcher for the CLI.
+# 2d. Install the Python package into an isolated virtual environment.
+echo "📦 Installing Python package into $VENV_DIR..."
+if command -v uv >/dev/null 2>&1; then
+    echo "⚡ Using uv for faster environment setup"
+    uv venv "$VENV_DIR"
+    uv pip install --python "$VENV_DIR/bin/python" "$PWD"
+else
+    python3 -m venv "$VENV_DIR"
+    if ! "$VENV_DIR/bin/python" -m pip --version >/dev/null 2>&1; then
+        "$VENV_DIR/bin/python" -m ensurepip --upgrade
+    fi
+    "$VENV_DIR/bin/python" -m pip install --upgrade pip setuptools wheel
+    "$VENV_DIR/bin/python" -m pip install "$PWD"
+fi
+
+# 2e. Create stable PATH launchers for the CLI and helper.
 CLI_LAUNCHER="$INSTALL_DIR/bin/agensic"
 cat > "$CLI_LAUNCHER" <<EOF
 #!/bin/sh
-exec python3 "$INSTALL_DIR/cli.py" "\$@"
+exec "$VENV_DIR/bin/agensic" "\$@"
 EOF
 chmod 700 "$CLI_LAUNCHER"
 
-# 3. Install Python Dependencies
-echo "📦 Installing Python dependencies..."
-pip3 install -r "$INSTALL_DIR/requirements.txt"
-
-# 4. Add Agensic to PATH and source shell integration (idempotent)
+# 3. Add Agensic to PATH and source shell integration (idempotent)
 SHELL_RC="$HOME/.zshrc"
 SHELL_PROFILE="$HOME/.zprofile"
 
@@ -199,12 +203,12 @@ if [ "$FIRST_INSTALL" -eq 1 ]; then
     echo ""
     if [ -t 0 ] && [ -t 1 ]; then
         echo "Opening first-time Agensic onboarding..."
-        python3 "$INSTALL_DIR/cli.py" first-run || {
+        "$VENV_DIR/bin/agensic" first-run || {
             echo "⚠️ First-time onboarding did not complete."
-            echo "   Run: python3 $INSTALL_DIR/cli.py first-run"
+            echo "   Run: $VENV_DIR/bin/agensic first-run"
         }
     else
         echo "First-time onboarding was skipped because this install is not running in an interactive terminal."
-        echo "Run: python3 $INSTALL_DIR/cli.py first-run"
+        echo "Run: $VENV_DIR/bin/agensic first-run"
     fi
 fi

@@ -142,7 +142,7 @@ MOUSE_REPORTING_RESET_SEQ = "\x1b[?1000l\x1b[?1002l\x1b[?1003l\x1b[?1006l\x1b[?1
 CURSOR_SAVE_SEQ = "\x1b7"
 CURSOR_RESTORE_SEQ = "\x1b8"
 DEFAULT_TUI_MANIFEST_URL = (
-    "https://github.com/Alex188dot/ai-terminal/releases/latest/download/provenance_tui_manifest.json"
+    "https://github.com/Alex188dot/agensic/releases/latest/download/provenance_tui_manifest.json"
 )
 DEFAULT_SIGNING_AGENT = "unknown"
 DEFAULT_SIGNING_MODEL = "unknown-model"

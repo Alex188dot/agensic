@@ -2,7 +2,7 @@
 set -euo pipefail
 
 ROOT_DIR="$(cd "$(dirname "$0")/.." && pwd)"
-REPO="${GITHUB_REPO:-Alex188dot/ai-terminal}"
+REPO="${GITHUB_REPO:-Alex188dot/agensic}"
 TAG="${1:-}"
 
 if [[ -z "$TAG" ]]; then

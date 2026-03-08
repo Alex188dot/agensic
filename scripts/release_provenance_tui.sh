@@ -48,7 +48,7 @@ cat > "$MANIFEST_PATH" <<JSON
   "generated_at": $(date +%s),
   "platforms": {
     "$PLATFORM_KEY": {
-      "url": "https://github.com/Alex188dot/ai-terminal/releases/download/$VERSION/$ARTIFACT_NAME",
+      "url": "https://github.com/Alex188dot/agensic/releases/download/$VERSION/$ARTIFACT_NAME",
       "artifact_sha256": "$ARTIFACT_SHA",
       "binary": "$BINARY_NAME",
       "binary_sha256": "$BINARY_SHA"

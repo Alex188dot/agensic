@@ -3,9 +3,15 @@ import hashlib
 import os
 import socket
 import subprocess
-import tempfile
 import time
 from typing import Any
+
+from cryptography.exceptions import InvalidSignature
+from cryptography.hazmat.primitives import serialization
+from cryptography.hazmat.primitives.asymmetric.ed25519 import (
+    Ed25519PrivateKey,
+    Ed25519PublicKey,
+)
 
 from .agent_registry import AgentRegistry, build_model_fingerprint
 from agensic.utils import ensure_private_dir
@@ -99,28 +105,37 @@ def ensure_provenance_keypair(
     ensure_private_dir(os.path.dirname(private_target))
     ensure_private_dir(os.path.dirname(public_target))
 
+    private_key: Ed25519PrivateKey | None = None
     if not os.path.exists(private_target):
-        generated = subprocess.run(
-            ["openssl", "genpkey", "-algorithm", "ED25519", "-out", private_target],
-            capture_output=True,
-            text=True,
-            check=False,
-            timeout=5,
-        )
-        if generated.returncode != 0:
-            raise RuntimeError((generated.stderr or generated.stdout or "openssl genpkey failed").strip())
+        private_key = Ed25519PrivateKey.generate()
+        with open(private_target, "wb") as private_file:
+            private_file.write(
+                private_key.private_bytes(
+                    encoding=serialization.Encoding.PEM,
+                    format=serialization.PrivateFormat.PKCS8,
+                    encryption_algorithm=serialization.NoEncryption(),
+                )
+            )
     os.chmod(private_target, 0o600)
 
     if not os.path.exists(public_target):
-        exported = subprocess.run(
-            ["openssl", "pkey", "-in", private_target, "-pubout", "-out", public_target],
-            capture_output=True,
-            text=True,
-            check=False,
-            timeout=5,
-        )
-        if exported.returncode != 0:
-            raise RuntimeError((exported.stderr or exported.stdout or "openssl pkey -pubout failed").strip())
+        if private_key is None:
+            with open(private_target, "rb") as private_file:
+                loaded_private = serialization.load_pem_private_key(
+                    private_file.read(),
+                    password=None,
+                )
+            if not isinstance(loaded_private, Ed25519PrivateKey):
+                raise RuntimeError("provenance private key is not Ed25519")
+            private_key = loaded_private
+        public_key = private_key.public_key()
+        with open(public_target, "wb") as public_file:
+            public_file.write(
+                public_key.public_bytes(
+                    encoding=serialization.Encoding.PEM,
+                    format=serialization.PublicFormat.SubjectPublicKeyInfo,
+                )
+            )
     os.chmod(public_target, 0o600)
     return (private_target, public_target)
 
@@ -207,38 +222,16 @@ def verify_signed_proof(
     except Exception:
         return (False, "proof_signature_encoding_invalid")
 
-    message = _proof_message(clean_label, agent, model, trace, ts_value)
     try:
-        with tempfile.TemporaryDirectory(prefix="agensic-proof-verify-") as tmpdir:
-            message_path = os.path.join(tmpdir, "message.txt")
-            signature_path = os.path.join(tmpdir, "signature.bin")
-            with open(message_path, "wb") as message_file:
-                message_file.write(message)
-            with open(signature_path, "wb") as signature_file:
-                signature_file.write(signature_bytes)
-            verified = subprocess.run(
-                [
-                    "openssl",
-                    "pkeyutl",
-                    "-verify",
-                    "-pubin",
-                    "-inkey",
-                    public_key_path,
-                    "-rawin",
-                    "-in",
-                    message_path,
-                    "-sigfile",
-                    signature_path,
-                ],
-                capture_output=True,
-                text=True,
-                check=False,
-                timeout=5,
-            )
+        with open(public_key_path, "rb") as public_key_file:
+            loaded_public = serialization.load_pem_public_key(public_key_file.read())
+        if not isinstance(loaded_public, Ed25519PublicKey):
+            return (False, "proof_public_key_unavailable")
+        loaded_public.verify(signature_bytes, _proof_message(clean_label, agent, model, trace, ts_value))
+    except InvalidSignature:
+        return (False, "proof_signature_invalid")
     except Exception:
         return (False, "proof_verifier_unavailable")
-    if verified.returncode != 0:
-        return (False, "proof_signature_invalid")
     return (True, "proof_valid")
 
 
@@ -252,34 +245,15 @@ def sign_proof_payload(
     public_path: str = DEFAULT_PUBLIC_KEY_PATH,
 ) -> str:
     private_key_path, _ = ensure_provenance_keypair(private_path=private_path, public_path=public_path)
-    message = _proof_message(label, agent, model, trace, timestamp)
-    with tempfile.TemporaryDirectory(prefix="agensic-proof-sign-") as tmpdir:
-        message_path = os.path.join(tmpdir, "message.txt")
-        signature_path = os.path.join(tmpdir, "signature.bin")
-        with open(message_path, "wb") as message_file:
-            message_file.write(message)
-        signed = subprocess.run(
-            [
-                "openssl",
-                "pkeyutl",
-                "-sign",
-                "-inkey",
-                private_key_path,
-                "-rawin",
-                "-in",
-                message_path,
-                "-out",
-                signature_path,
-            ],
-            capture_output=True,
-            text=True,
-            check=False,
-            timeout=5,
+    with open(private_key_path, "rb") as private_key_file:
+        loaded_private = serialization.load_pem_private_key(
+            private_key_file.read(),
+            password=None,
         )
-        if signed.returncode != 0:
-            raise RuntimeError((signed.stderr or signed.stdout or "openssl pkeyutl -sign failed").strip())
-        with open(signature_path, "rb") as signature_file:
-            return base64.b64encode(signature_file.read()).decode("ascii")
+    if not isinstance(loaded_private, Ed25519PrivateKey):
+        raise RuntimeError("provenance private key is not Ed25519")
+    signature = loaded_private.sign(_proof_message(label, agent, model, trace, timestamp))
+    return base64.b64encode(signature).decode("ascii")
 
 
 def build_local_proof_metadata(

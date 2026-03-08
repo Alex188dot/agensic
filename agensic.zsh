@@ -110,6 +110,10 @@ typeset -g AGENSIC_HOME="${HOME}/.agensic"
 typeset -g AGENSIC_CONFIG_PATH="${HOME}/.agensic/config.json"
 typeset -g AGENSIC_AUTH_PATH="${HOME}/.agensic/auth.json"
 typeset -g AGENSIC_CLIENT_HELPER="${AGENSIC_SOURCE_DIR}/shell_client.py"
+typeset -g AGENSIC_RUNTIME_PYTHON="${AGENSIC_HOME}/.venv/bin/python"
+if [[ ! -x "$AGENSIC_RUNTIME_PYTHON" ]]; then
+    AGENSIC_RUNTIME_PYTHON="python3"
+fi
 typeset -g AGENSIC_PLUGIN_LOG="${AGENSIC_HOME}/plugin.log"
 typeset -g AGENSIC_UNINSTALL_SENTINEL="${TMPDIR:-/tmp}/agensic-shell-uninstalled-${UID:-${EUID:-0}}"
 typeset -g AGENSIC_SESSION_DISABLED=0
@@ -671,7 +675,7 @@ print(json.dumps(payload, separators=(',', ':')))
     _agensic_reload_auth_token_if_needed
     local response_json
     local -a helper_cmd
-    helper_cmd=(python3 "$AGENSIC_CLIENT_HELPER" --timeout 3.0)
+    helper_cmd=("$AGENSIC_RUNTIME_PYTHON" "$AGENSIC_CLIENT_HELPER" --timeout 3.0)
     if [[ -n "$AGENSIC_AUTH_TOKEN" ]]; then
         helper_cmd+=(--auth-token "$AGENSIC_AUTH_TOKEN")
     fi
@@ -1016,7 +1020,7 @@ _agensic_resolve_intent_command() {
     local response
     local -a helper_cmd
     helper_cmd=(
-        python3 "$AGENSIC_CLIENT_HELPER"
+        "$AGENSIC_RUNTIME_PYTHON" "$AGENSIC_CLIENT_HELPER"
         --op intent
         --format shell_lines_v1
         --timeout 3.0
@@ -1111,7 +1115,7 @@ _agensic_resolve_general_assist() {
     local response
     local -a helper_cmd
     helper_cmd=(
-        python3 "$AGENSIC_CLIENT_HELPER"
+        "$AGENSIC_RUNTIME_PYTHON" "$AGENSIC_CLIENT_HELPER"
         --op assist
         --format shell_lines_v1
         --timeout 4.0
