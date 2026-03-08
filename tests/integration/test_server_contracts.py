@@ -266,7 +266,11 @@ class ServerContractTests(unittest.TestCase):
             self.assertFalse(assist_llm.called)
 
     def test_assist_rate_limit_response(self):
-        with patch.object(deps, "check_and_track_llm_rate_limit", return_value=(False, 120, 120)):
+        with patch.object(deps, "load_config", return_value={"provider": "openai"}), patch.object(
+            deps,
+            "check_and_track_llm_rate_limit",
+            return_value=(False, 120, 120),
+        ):
             response = self.client.post(
                 "/assist",
                 json={
@@ -433,14 +437,6 @@ class ServerContractTests(unittest.TestCase):
             deps.engine,
             "get_provenance_registry_agent",
             return_value={"agent_id": "codex", "status": "verified"},
-        ), patch.object(
-            deps.engine,
-            "refresh_provenance_registry",
-            return_value={"ok": True, "reason": "updated", "updated": True, "version": "v1"},
-        ), patch.object(
-            deps.engine,
-            "verify_provenance_registry_cache",
-            return_value={"ok": True, "reason": "signature_valid", "version": "v1", "verified_at": 1700000000, "url": "https://example.test"},
         ):
             summary = self.client.get("/provenance/registry")
             self.assertEqual(summary.status_code, 200)
@@ -453,14 +449,6 @@ class ServerContractTests(unittest.TestCase):
             show_agent = self.client.get("/provenance/registry/agents/codex")
             self.assertEqual(show_agent.status_code, 200)
             self.assertEqual(show_agent.json().get("summary", {}).get("agent_id"), "codex")
-
-            refresh = self.client.post("/provenance/registry/refresh?force=true")
-            self.assertEqual(refresh.status_code, 200)
-            self.assertTrue(bool(refresh.json().get("ok")))
-
-            verify = self.client.get("/provenance/registry/verify")
-            self.assertEqual(verify.status_code, 200)
-            self.assertTrue(bool(verify.json().get("ok")))
 
     def test_shutdown_gating_routes(self):
         deps.begin_shutdown("test")

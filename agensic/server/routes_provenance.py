@@ -3,9 +3,7 @@ from agensic.server import deps
 from agensic.server.schemas import (
     ProvenanceRunsResponse,
     ProvenanceRegistryAgentsResponse,
-    ProvenanceRegistryRefreshResponse,
     ProvenanceRegistrySummaryResponse,
-    ProvenanceRegistryVerifyResponse,
 )
 
 router = APIRouter()
@@ -150,45 +148,3 @@ def provenance_registry_agent(agent_id: str) -> ProvenanceRegistrySummaryRespons
     finally:
         deps.release_request_slot()
 
-
-@router.post(
-    "/provenance/registry/refresh",
-    response_model=ProvenanceRegistryRefreshResponse,
-    response_model_exclude_unset=True,
-)
-def provenance_registry_refresh(force: bool = False) -> ProvenanceRegistryRefreshResponse:
-    deps.enter_request_or_503()
-    try:
-        config = deps.load_config()
-        result = deps.engine.refresh_provenance_registry(config=config, force=bool(force))
-        return {
-            "status": "ok",
-            "ok": bool(result.get("ok", False)),
-            "reason": str(result.get("reason", "") or ""),
-            "updated": bool(result.get("updated", False)),
-            "version": str(result.get("version", "") or ""),
-        }
-    finally:
-        deps.release_request_slot()
-
-
-@router.get(
-    "/provenance/registry/verify",
-    response_model=ProvenanceRegistryVerifyResponse,
-    response_model_exclude_unset=True,
-)
-def provenance_registry_verify() -> ProvenanceRegistryVerifyResponse:
-    deps.enter_request_or_503()
-    try:
-        config = deps.load_config()
-        result = deps.engine.verify_provenance_registry_cache(config=config)
-        return {
-            "status": "ok",
-            "ok": bool(result.get("ok", False)),
-            "reason": str(result.get("reason", "") or ""),
-            "version": str(result.get("version", "") or ""),
-            "verified_at": int(result.get("verified_at", 0) or 0),
-            "url": str(result.get("url", "") or ""),
-        }
-    finally:
-        deps.release_request_slot()

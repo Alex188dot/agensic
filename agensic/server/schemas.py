@@ -247,20 +247,3 @@ class ProvenanceRegistryAgentsResponse(BaseModel):
     status: str = "ok"
     agents: list[dict[str, Any]] = Field(default_factory=list)
     total: int = 0
-
-
-class ProvenanceRegistryRefreshResponse(BaseModel):
-    status: str = "ok"
-    ok: bool = False
-    reason: str = ""
-    updated: bool = False
-    version: str = ""
-
-
-class ProvenanceRegistryVerifyResponse(BaseModel):
-    status: str = "ok"
-    ok: bool = False
-    reason: str = ""
-    version: str = ""
-    verified_at: int = 0
-    url: str = ""

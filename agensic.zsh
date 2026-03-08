@@ -1602,6 +1602,49 @@ agensic_session_status() {
     print -r -- "${state} agent=${AGENSIC_AI_SESSION_AGENT:-} model=${AGENSIC_AI_SESSION_MODEL:-} agent_name=${AGENSIC_AI_SESSION_AGENT_NAME:-'-'} session_id=${AGENSIC_AI_SESSION_ID:-'-'} remaining_seconds=${remaining}"
 }
 
+_agensic_generate_ai_proof() {
+    local label="${1:-AI_EXECUTED}"
+    local agent="$2"
+    local model="$3"
+    local trace="$4"
+    local timestamp="$5"
+    if [[ -z "$agent" || -z "$model" || -z "$trace" || -z "$timestamp" ]]; then
+        return 1
+    fi
+    AGENSIC_SOURCE_DIR="$AGENSIC_SOURCE_DIR" \
+    AGENSIC_HOME="$AGENSIC_HOME" \
+    AGENSIC_PROOF_LABEL="$label" \
+    AGENSIC_PROOF_AGENT="$agent" \
+    AGENSIC_PROOF_MODEL="$model" \
+    AGENSIC_PROOF_TRACE="$trace" \
+    AGENSIC_PROOF_TS="$timestamp" \
+    python3 - <<'PY' 2>/dev/null
+import os
+import sys
+
+source_dir = str(os.environ.get("AGENSIC_SOURCE_DIR", "") or "").strip()
+agensic_home = str(os.environ.get("AGENSIC_HOME", "") or "").strip()
+for candidate in (source_dir, agensic_home):
+    if candidate and os.path.isdir(candidate) and candidate not in sys.path:
+        sys.path.insert(0, candidate)
+
+from agensic.engine.provenance import build_local_proof_metadata, sign_proof_payload
+
+label = str(os.environ.get("AGENSIC_PROOF_LABEL", "AI_EXECUTED") or "").strip()
+agent = str(os.environ.get("AGENSIC_PROOF_AGENT", "") or "").strip().lower()
+model = str(os.environ.get("AGENSIC_PROOF_MODEL", "") or "").strip()
+trace = str(os.environ.get("AGENSIC_PROOF_TRACE", "") or "").strip()
+timestamp = int(os.environ.get("AGENSIC_PROOF_TS", "0") or "0")
+
+signature = sign_proof_payload(label, agent, model, trace, timestamp)
+metadata = build_local_proof_metadata()
+print(signature)
+print(str(metadata.get("proof_key_fingerprint", "") or ""))
+print(str(metadata.get("proof_host_fingerprint", "") or ""))
+print(str(metadata.get("proof_signer_scope", "") or ""))
+PY
+}
+
 _agensic_session_sign_if_active() {
     _agensic_ensure_ai_session_timer
     if [[ "${AGENSIC_AI_SESSION_ACTIVE:-0}" != "1" ]]; then
@@ -1634,51 +1677,14 @@ _agensic_session_sign_if_active() {
     local time_component
     time_component="$(_agensic_now_time_component)"
     local trace="session:${session_id}:${AGENSIC_AI_SESSION_COUNTER}:${time_component}"
-    local proof_blob signature key_fingerprint host_fingerprint
-    proof_blob="$(
-        AGENSIC_PROOF_LABEL="AI_EXECUTED" \
-        AGENSIC_PROOF_AGENT="$session_agent" \
-        AGENSIC_PROOF_MODEL="$session_model" \
-        AGENSIC_PROOF_TRACE="$trace" \
-        AGENSIC_PROOF_TS="$now_ts" \
-        python3 - <<'PY' 2>/dev/null
-import hashlib
-import hmac
-import os
-import secrets
-from pathlib import Path
-
-label = str(os.environ.get("AGENSIC_PROOF_LABEL", "AI_EXECUTED") or "").strip()
-agent = str(os.environ.get("AGENSIC_PROOF_AGENT", "") or "").strip()
-model = str(os.environ.get("AGENSIC_PROOF_MODEL", "") or "").strip()
-trace = str(os.environ.get("AGENSIC_PROOF_TRACE", "") or "").strip()
-ts = int(os.environ.get("AGENSIC_PROOF_TS", "0") or "0")
-
-secret_path = Path.home() / ".agensic" / "provenance_secret"
-secret_path.parent.mkdir(parents=True, exist_ok=True)
-secret_path.parent.chmod(0o700)
-if not secret_path.exists():
-    secret_path.write_bytes(secrets.token_bytes(32))
-    secret_path.chmod(0o600)
-else:
-    secret_path.chmod(0o600)
-secret = secret_path.read_bytes()
-msg = "\n".join([label, agent, model, trace, str(ts)])
-signature = hmac.new(secret, msg.encode("utf-8"), hashlib.sha256).hexdigest()
-key_fingerprint = hashlib.sha256(secret).hexdigest()[:16]
-host = os.uname().nodename if hasattr(os, "uname") else os.environ.get("HOSTNAME", "")
-host_material = secret + b"\n" + str(host).encode("utf-8")
-host_fingerprint = hashlib.sha256(host_material).hexdigest()[:16]
-print(signature)
-print(key_fingerprint)
-print(host_fingerprint)
-PY
-    )"
+    local proof_blob signature key_fingerprint host_fingerprint signer_scope
+    proof_blob="$(_agensic_generate_ai_proof "AI_EXECUTED" "$session_agent" "$session_model" "$trace" "$now_ts")"
     local -a proof_parts
     proof_parts=("${(@f)proof_blob}")
     signature="${proof_parts[1]:-}"
     key_fingerprint="${proof_parts[2]:-}"
     host_fingerprint="${proof_parts[3]:-}"
+    signer_scope="${proof_parts[4]:-}"
     if [[ -z "$signature" ]]; then
         return
     fi
@@ -1688,7 +1694,7 @@ PY
     AGENSIC_NEXT_PROOF_TRACE="$trace"
     AGENSIC_NEXT_PROOF_TIMESTAMP="$now_ts"
     AGENSIC_NEXT_PROOF_SIGNATURE="$signature"
-    AGENSIC_NEXT_PROOF_SIGNER_SCOPE="local-hmac"
+    AGENSIC_NEXT_PROOF_SIGNER_SCOPE="${signer_scope:-local-ed25519}"
     AGENSIC_NEXT_PROOF_KEY_FINGERPRINT="$key_fingerprint"
     AGENSIC_NEXT_PROOF_HOST_FINGERPRINT="$host_fingerprint"
     AGENSIC_PENDING_WRAPPER_ID="ai_session:${session_id}"
@@ -1711,51 +1717,14 @@ agensic_mark_ai_executed() {
     if [[ -z "$stamp" ]]; then
         stamp="0"
     fi
-    local proof_blob signature key_fingerprint host_fingerprint
-    proof_blob="$(
-        AGENSIC_PROOF_LABEL="AI_EXECUTED" \
-        AGENSIC_PROOF_AGENT="$agent" \
-        AGENSIC_PROOF_MODEL="$model" \
-        AGENSIC_PROOF_TRACE="$trace" \
-        AGENSIC_PROOF_TS="$stamp" \
-        python3 - <<'PY' 2>/dev/null
-import hashlib
-import hmac
-import os
-import secrets
-from pathlib import Path
-
-label = str(os.environ.get("AGENSIC_PROOF_LABEL", "AI_EXECUTED") or "").strip()
-agent = str(os.environ.get("AGENSIC_PROOF_AGENT", "") or "").strip()
-model = str(os.environ.get("AGENSIC_PROOF_MODEL", "") or "").strip()
-trace = str(os.environ.get("AGENSIC_PROOF_TRACE", "") or "").strip()
-ts = int(os.environ.get("AGENSIC_PROOF_TS", "0") or "0")
-
-secret_path = Path.home() / ".agensic" / "provenance_secret"
-secret_path.parent.mkdir(parents=True, exist_ok=True)
-secret_path.parent.chmod(0o700)
-if not secret_path.exists():
-    secret_path.write_bytes(secrets.token_bytes(32))
-    secret_path.chmod(0o600)
-else:
-    secret_path.chmod(0o600)
-secret = secret_path.read_bytes()
-msg = "\n".join([label, agent, model, trace, str(ts)])
-signature = hmac.new(secret, msg.encode("utf-8"), hashlib.sha256).hexdigest()
-key_fingerprint = hashlib.sha256(secret).hexdigest()[:16]
-host = os.uname().nodename if hasattr(os, "uname") else os.environ.get("HOSTNAME", "")
-host_material = secret + b"\n" + str(host).encode("utf-8")
-host_fingerprint = hashlib.sha256(host_material).hexdigest()[:16]
-print(signature)
-print(key_fingerprint)
-print(host_fingerprint)
-PY
-    )"
+    local proof_blob signature key_fingerprint host_fingerprint signer_scope
+    proof_blob="$(_agensic_generate_ai_proof "AI_EXECUTED" "$agent" "$model" "$trace" "$stamp")"
     local -a proof_parts
     proof_parts=("${(@f)proof_blob}")
     signature="${proof_parts[1]:-}"
     key_fingerprint="${proof_parts[2]:-}"
     host_fingerprint="${proof_parts[3]:-}"
+    signer_scope="${proof_parts[4]:-}"
     if [[ -z "$signature" ]]; then
         print -r -- "Could not create AI execution proof."
         return 1
@@ -1766,7 +1735,7 @@ PY
     AGENSIC_NEXT_PROOF_TRACE="$trace"
     AGENSIC_NEXT_PROOF_TIMESTAMP="$stamp"
     AGENSIC_NEXT_PROOF_SIGNATURE="$signature"
-    AGENSIC_NEXT_PROOF_SIGNER_SCOPE="local-hmac"
+    AGENSIC_NEXT_PROOF_SIGNER_SCOPE="${signer_scope:-local-ed25519}"
     AGENSIC_NEXT_PROOF_KEY_FINGERPRINT="$key_fingerprint"
     AGENSIC_NEXT_PROOF_HOST_FINGERPRINT="$host_fingerprint"
     print -r -- "AI execution proof armed for next command (${agent}/${model})."

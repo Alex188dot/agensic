@@ -1,27 +1,20 @@
+import base64
 import hashlib
-import hmac
-import json
 import os
-import secrets
 import socket
-import stat
 import subprocess
+import tempfile
 import time
-from pathlib import Path
 from typing import Any
 
 from .agent_registry import AgentRegistry, build_model_fingerprint
 from agensic.utils import ensure_private_dir
-from .registry_updater import (
-    DEFAULT_REGISTRY_URL,
-    DEFAULT_REMOTE_META_PATH,
-    refresh_remote_registry,
-    verify_cached_registry,
-)
 
 
 PROOF_MAX_AGE_SECONDS = 900
-DEFAULT_SECRET_PATH = os.path.expanduser("~/.agensic/provenance_secret")
+DEFAULT_PRIVATE_KEY_PATH = os.path.expanduser("~/.agensic/provenance_ed25519.pem")
+DEFAULT_PUBLIC_KEY_PATH = os.path.expanduser("~/.agensic/provenance_ed25519.pub.pem")
+PROOF_SIGNER_SCOPE = "local-ed25519"
 
 _HUMAN_ACTIONS = {
     "human_typed",
@@ -33,6 +26,7 @@ _HUMAN_ACTIONS = {
 
 _BASE_LABEL_CONFIDENCE = {
     "AI_EXECUTED": 0.99,
+    "INVALID_PROOF": 0.98,
     "HUMAN_TYPED": 0.93,
     "AI_SUGGESTED_HUMAN_RAN": 0.88,
     "AG_SUGGESTED_HUMAN_RAN": 0.86,
@@ -41,6 +35,7 @@ _BASE_LABEL_CONFIDENCE = {
 
 _TIER_CONFIDENCE = {
     "proof": 0.99,
+    "proof_invalid": 0.98,
     "integrated": 0.92,
     "verified": 0.80,
     "heuristic": 0.60,
@@ -83,7 +78,7 @@ def _proof_message(
     model: str,
     trace: str,
     timestamp: int,
-) -> str:
+    ) -> bytes:
     return "\n".join(
         [
             _normalize(label),
@@ -92,22 +87,90 @@ def _proof_message(
             _normalize(trace),
             str(int(timestamp)),
         ]
+    ).encode("utf-8")
+
+
+def ensure_provenance_keypair(
+    private_path: str = DEFAULT_PRIVATE_KEY_PATH,
+    public_path: str = DEFAULT_PUBLIC_KEY_PATH,
+) -> tuple[str, str]:
+    private_target = os.path.expanduser(private_path)
+    public_target = os.path.expanduser(public_path)
+    ensure_private_dir(os.path.dirname(private_target))
+    ensure_private_dir(os.path.dirname(public_target))
+
+    if not os.path.exists(private_target):
+        generated = subprocess.run(
+            ["openssl", "genpkey", "-algorithm", "ED25519", "-out", private_target],
+            capture_output=True,
+            text=True,
+            check=False,
+            timeout=5,
+        )
+        if generated.returncode != 0:
+            raise RuntimeError((generated.stderr or generated.stdout or "openssl genpkey failed").strip())
+    os.chmod(private_target, 0o600)
+
+    if not os.path.exists(public_target):
+        exported = subprocess.run(
+            ["openssl", "pkey", "-in", private_target, "-pubout", "-out", public_target],
+            capture_output=True,
+            text=True,
+            check=False,
+            timeout=5,
+        )
+        if exported.returncode != 0:
+            raise RuntimeError((exported.stderr or exported.stdout or "openssl pkey -pubout failed").strip())
+    os.chmod(public_target, 0o600)
+    return (private_target, public_target)
+
+
+def _proof_payload_present(
+    label: str,
+    agent: str,
+    model: str,
+    trace: str,
+    timestamp_raw: Any,
+    signature: str,
+) -> bool:
+    return any(
+        (
+            _normalize(label),
+            _normalize(agent),
+            _normalize(model),
+            _normalize(trace),
+            _normalize(timestamp_raw),
+            _normalize(signature),
+        )
     )
 
 
-def ensure_provenance_secret(path: str = DEFAULT_SECRET_PATH) -> bytes:
-    target = os.path.expanduser(path)
-    ensure_private_dir(os.path.dirname(target))
-    if not os.path.exists(target):
-        with open(target, "wb") as f:
-            f.write(secrets.token_bytes(32))
-        os.chmod(target, 0o600)
-    else:
-        mode = stat.S_IMODE(os.stat(target).st_mode)
-        if mode != 0o600:
-            os.chmod(target, 0o600)
-    with open(target, "rb") as f:
-        return f.read()
+def _collect_required_proof_issues(
+    label: str,
+    agent: str,
+    model: str,
+    trace: str,
+    timestamp: int,
+    signature: str,
+) -> list[str]:
+    issues: list[str] = []
+    clean_label = _normalize(label)
+
+    if not clean_label:
+        issues.append("proof_label_missing")
+    elif clean_label != "AI_EXECUTED":
+        issues.append("proof_label_invalid")
+    if not _normalize_lower(agent):
+        issues.append("proof_agent_missing")
+    if not _normalize(model):
+        issues.append("proof_model_missing")
+    if not _normalize(trace):
+        issues.append("proof_trace_missing")
+    if int(timestamp) <= 0:
+        issues.append("proof_timestamp_missing")
+    if not _normalize(signature):
+        issues.append("proof_signature_missing")
+    return issues
 
 
 def verify_signed_proof(
@@ -118,9 +181,10 @@ def verify_signed_proof(
     timestamp: int,
     signature: str,
     now_ts: int | None = None,
+    public_path: str = DEFAULT_PUBLIC_KEY_PATH,
 ) -> tuple[bool, str]:
     clean_label = _normalize(label)
-    clean_signature = _normalize_lower(signature)
+    clean_signature = _normalize(signature)
     ts_value = _safe_int(timestamp)
     current_ts = int(now_ts or time.time())
 
@@ -134,13 +198,46 @@ def verify_signed_proof(
         return (False, "proof_signature_missing")
 
     try:
-        secret = ensure_provenance_secret()
+        _, public_key_path = ensure_provenance_keypair(public_path=public_path)
     except Exception:
-        return (False, "proof_secret_unavailable")
+        return (False, "proof_public_key_unavailable")
+
+    try:
+        signature_bytes = base64.b64decode(clean_signature.encode("ascii"), validate=True)
+    except Exception:
+        return (False, "proof_signature_encoding_invalid")
 
     message = _proof_message(clean_label, agent, model, trace, ts_value)
-    expected = hmac.new(secret, message.encode("utf-8"), hashlib.sha256).hexdigest()
-    if not hmac.compare_digest(expected, clean_signature):
+    try:
+        with tempfile.TemporaryDirectory(prefix="agensic-proof-verify-") as tmpdir:
+            message_path = os.path.join(tmpdir, "message.txt")
+            signature_path = os.path.join(tmpdir, "signature.bin")
+            with open(message_path, "wb") as message_file:
+                message_file.write(message)
+            with open(signature_path, "wb") as signature_file:
+                signature_file.write(signature_bytes)
+            verified = subprocess.run(
+                [
+                    "openssl",
+                    "pkeyutl",
+                    "-verify",
+                    "-pubin",
+                    "-inkey",
+                    public_key_path,
+                    "-rawin",
+                    "-in",
+                    message_path,
+                    "-sigfile",
+                    signature_path,
+                ],
+                capture_output=True,
+                text=True,
+                check=False,
+                timeout=5,
+            )
+    except Exception:
+        return (False, "proof_verifier_unavailable")
+    if verified.returncode != 0:
         return (False, "proof_signature_invalid")
     return (True, "proof_valid")
 
@@ -151,24 +248,57 @@ def sign_proof_payload(
     model: str,
     trace: str,
     timestamp: int,
+    private_path: str = DEFAULT_PRIVATE_KEY_PATH,
+    public_path: str = DEFAULT_PUBLIC_KEY_PATH,
 ) -> str:
-    secret = ensure_provenance_secret()
+    private_key_path, _ = ensure_provenance_keypair(private_path=private_path, public_path=public_path)
     message = _proof_message(label, agent, model, trace, timestamp)
-    return hmac.new(secret, message.encode("utf-8"), hashlib.sha256).hexdigest()
+    with tempfile.TemporaryDirectory(prefix="agensic-proof-sign-") as tmpdir:
+        message_path = os.path.join(tmpdir, "message.txt")
+        signature_path = os.path.join(tmpdir, "signature.bin")
+        with open(message_path, "wb") as message_file:
+            message_file.write(message)
+        signed = subprocess.run(
+            [
+                "openssl",
+                "pkeyutl",
+                "-sign",
+                "-inkey",
+                private_key_path,
+                "-rawin",
+                "-in",
+                message_path,
+                "-out",
+                signature_path,
+            ],
+            capture_output=True,
+            text=True,
+            check=False,
+            timeout=5,
+        )
+        if signed.returncode != 0:
+            raise RuntimeError((signed.stderr or signed.stdout or "openssl pkeyutl -sign failed").strip())
+        with open(signature_path, "rb") as signature_file:
+            return base64.b64encode(signature_file.read()).decode("ascii")
 
 
-def build_local_proof_metadata() -> dict[str, str]:
-    secret: bytes | None = None
+def build_local_proof_metadata(
+    private_path: str = DEFAULT_PRIVATE_KEY_PATH,
+    public_path: str = DEFAULT_PUBLIC_KEY_PATH,
+) -> dict[str, str]:
+    public_key_bytes: bytes | None = None
     key_fingerprint = ""
     host_fingerprint = ""
 
     try:
-        secret = ensure_provenance_secret()
+        _, public_key_path = ensure_provenance_keypair(private_path=private_path, public_path=public_path)
+        with open(public_key_path, "rb") as public_key_file:
+            public_key_bytes = public_key_file.read()
     except Exception:
-        secret = None
+        public_key_bytes = None
 
-    if secret:
-        key_fingerprint = hashlib.sha256(secret).hexdigest()[:16]
+    if public_key_bytes:
+        key_fingerprint = hashlib.sha256(public_key_bytes).hexdigest()[:16]
 
     host = ""
     try:
@@ -177,11 +307,11 @@ def build_local_proof_metadata() -> dict[str, str]:
         host = _normalize(os.environ.get("HOSTNAME"))
 
     if host:
-        material = (secret + b"\n" + host.encode("utf-8")) if secret else host.encode("utf-8")
+        material = (public_key_bytes + b"\n" + host.encode("utf-8")) if public_key_bytes else host.encode("utf-8")
         host_fingerprint = hashlib.sha256(material).hexdigest()[:16]
 
     return {
-        "proof_signer_scope": "local-hmac",
+        "proof_signer_scope": PROOF_SIGNER_SCOPE,
         "proof_key_fingerprint": key_fingerprint,
         "proof_host_fingerprint": host_fingerprint,
     }
@@ -207,52 +337,6 @@ def list_registry_agents(status_filter: str = "", force_reload: bool = False) ->
 def get_registry_agent(agent_id: str, force_reload: bool = False) -> dict[str, Any] | None:
     registry = get_agent_registry(force_reload=force_reload)
     return registry.get_agent(agent_id)
-
-
-def _load_remote_meta(path: str = DEFAULT_REMOTE_META_PATH) -> dict[str, Any]:
-    target = Path(path).expanduser()
-    if not target.exists() or not target.is_file():
-        return {}
-    try:
-        with open(target, "r", encoding="utf-8") as f:
-            parsed = json.load(f)
-        return parsed if isinstance(parsed, dict) else {}
-    except Exception:
-        return {}
-
-
-def refresh_agent_registry(config: dict[str, Any] | None = None, force: bool = False) -> dict[str, Any]:
-    cfg = config if isinstance(config, dict) else {}
-    registry_url = _normalize(cfg.get("provenance_registry_url")) or DEFAULT_REGISTRY_URL
-    registry_pubkey = _normalize(cfg.get("provenance_registry_pubkey"))
-    refresh_hours = max(1, _safe_int(cfg.get("provenance_registry_refresh_hours", 24)))
-
-    now_ts = int(time.time())
-    meta = _load_remote_meta()
-    verified_at = _safe_int(meta.get("verified_at"))
-
-    if not force and verified_at > 0 and (now_ts - verified_at) < int(refresh_hours * 3600):
-        summary = get_registry_summary(force_reload=False)
-        return {
-            "ok": True,
-            "reason": "fresh_cache",
-            "updated": False,
-            "version": str(summary.get("version", "") or ""),
-        }
-
-    result = refresh_remote_registry(
-        url=registry_url,
-        public_key=registry_pubkey,
-    )
-    if bool(result.get("ok", False)):
-        get_agent_registry(force_reload=True)
-    return result
-
-
-def verify_cached_agent_registry(config: dict[str, Any] | None = None) -> dict[str, Any]:
-    cfg = config if isinstance(config, dict) else {}
-    registry_pubkey = _normalize(cfg.get("provenance_registry_pubkey"))
-    return verify_cached_registry(public_key=registry_pubkey)
 
 
 def _ps_row_for_pid(pid: int) -> dict[str, Any] | None:
@@ -359,13 +443,22 @@ def classify_command_run(command: str, payload: dict[str, Any]) -> dict[str, Any
     proof_agent = _normalize_lower(data.get("proof_agent"))
     proof_model = _normalize(data.get("proof_model"))
     proof_trace = _normalize(data.get("proof_trace"))
-    proof_timestamp = _safe_int(data.get("proof_timestamp"))
+    proof_timestamp_raw = data.get("proof_timestamp")
+    proof_timestamp = _safe_int(proof_timestamp_raw)
     proof_signature = _normalize(data.get("proof_signature"))
     proof_signer_scope = _normalize_lower(data.get("proof_signer_scope"))
     proof_key_fingerprint = _normalize_lower(data.get("proof_key_fingerprint"))
     proof_host_fingerprint = _normalize_lower(data.get("proof_host_fingerprint"))
 
-    proof_valid, proof_reason = verify_signed_proof(
+    proof_payload_present = _proof_payload_present(
+        proof_label,
+        proof_agent,
+        proof_model,
+        proof_trace,
+        proof_timestamp_raw,
+        proof_signature,
+    )
+    proof_field_issues = _collect_required_proof_issues(
         proof_label,
         proof_agent,
         proof_model,
@@ -373,8 +466,22 @@ def classify_command_run(command: str, payload: dict[str, Any]) -> dict[str, Any
         proof_timestamp,
         proof_signature,
     )
-    proof_signature_present = bool(proof_signature)
-    evidence.append(proof_reason)
+    if proof_payload_present and not proof_field_issues:
+        proof_valid, proof_reason = verify_signed_proof(
+            proof_label,
+            proof_agent,
+            proof_model,
+            proof_trace,
+            proof_timestamp,
+            proof_signature,
+        )
+    elif proof_payload_present:
+        proof_valid, proof_reason = (False, proof_field_issues[0])
+    else:
+        proof_valid, proof_reason = (False, "proof_absent")
+    for item in [proof_reason, *proof_field_issues]:
+        if item and item not in evidence:
+            evidence.append(item)
 
     shell_pid = _safe_int(data.get("shell_pid"))
     lineage_payload = inspect_process_lineage(shell_pid) if shell_pid > 0 else {"lineage": [], "hints": [], "match": {}}
@@ -398,10 +505,10 @@ def classify_command_run(command: str, payload: dict[str, Any]) -> dict[str, Any
             evidence.append(f"proof_key_fingerprint={proof_key_fingerprint}")
         if proof_host_fingerprint:
             evidence.append(f"proof_host_fingerprint={proof_host_fingerprint}")
-    elif proof_signature_present:
-        label = "AI_EXECUTED"
-        confidence = 0.97
-        evidence.append("proof_signature_present_override")
+    elif proof_payload_present:
+        label = "INVALID_PROOF"
+        confidence = _BASE_LABEL_CONFIDENCE["INVALID_PROOF"]
+        evidence.append("proof_enforced_strict")
         if proof_signer_scope:
             evidence.append(f"proof_signer_scope={proof_signer_scope}")
         if proof_key_fingerprint:
@@ -431,13 +538,24 @@ def classify_command_run(command: str, payload: dict[str, Any]) -> dict[str, Any
     evidence_tier = ""
     agent_source = ""
     registry_status = ""
+    proof_rejected = bool(proof_payload_present and not proof_valid)
 
-    if proof_valid or proof_signature_present:
+    if proof_valid:
         agent = proof_agent
         provider = ai_provider
         raw_model = proof_model or provenance_model_raw or ai_model
         evidence_tier = "proof"
-        agent_source = "proof" if proof_valid else "proof_signature"
+        agent_source = "proof"
+        if proof_trace:
+            evidence.append(f"proof_trace={proof_trace}")
+    elif proof_rejected:
+        agent = proof_agent
+        provider = ai_provider
+        raw_model = proof_model or provenance_model_raw or ai_model
+        evidence_tier = "proof_invalid"
+        agent_source = "proof_invalid"
+        registry_status = "invalid_proof"
+        evidence.append("proof_claim_unverified=true")
         if proof_trace:
             evidence.append(f"proof_trace={proof_trace}")
     elif accept_origin == "ai" and not manual_after_accept:
@@ -449,47 +567,50 @@ def classify_command_run(command: str, payload: dict[str, Any]) -> dict[str, Any
         if provenance_wrapper_id:
             evidence.append(f"wrapper_id={provenance_wrapper_id}")
 
-    inferred_from_payload = registry.infer_agent_from_provider_model(provider=provider, model=raw_model)
-    if not agent and inferred_from_payload.get("agent_id"):
-        agent = str(inferred_from_payload.get("agent_id", "") or "")
-        agent_source = agent_source or "provider_model_infer"
-    if not normalized_model:
-        normalized_model = str(inferred_from_payload.get("model_normalized", "") or "")
-    if not registry_status and not (proof_valid or proof_signature_present):
-        registry_status = str(inferred_from_payload.get("registry_status", "") or "")
-
-    if not agent and provenance_agent_hint:
-        hinted = registry.get_agent(provenance_agent_hint)
-        if hinted is not None:
-            agent = str(hinted.get("agent_id", "") or "")
-            agent_source = agent_source or "payload_hint"
-            registry_status = str(hinted.get("status", "") or "")
-
-    lineage_match = lineage_payload.get("match", {}) if isinstance(lineage_payload.get("match"), dict) else {}
-    if lineage_match:
-        if not agent:
-            agent = _normalize_lower(lineage_match.get("agent_id"))
-            agent_source = agent_source or (
-                "lineage_exact" if _normalize_lower(lineage_match.get("match_kind")) == "exact_executable" else "lineage_token"
-            )
-        if not provider:
-            provider = _normalize_lower(lineage_match.get("provider"))
-        if not raw_model:
-            raw_model = _normalize(lineage_match.get("model_raw"))
+    if not proof_rejected:
+        inferred_from_payload = registry.infer_agent_from_provider_model(provider=provider, model=raw_model)
+        if not agent and inferred_from_payload.get("agent_id"):
+            agent = str(inferred_from_payload.get("agent_id", "") or "")
+            agent_source = agent_source or "provider_model_infer"
         if not normalized_model:
-            normalized_model = _normalize_lower(lineage_match.get("model_normalized"))
-        if not registry_status and not (proof_valid or proof_signature_present):
-            registry_status = _normalize_lower(lineage_match.get("registry_status"))
-        if not evidence_tier:
-            evidence_tier = _normalize_lower(lineage_match.get("evidence_tier"))
-        for item in lineage_match.get("evidence", []) if isinstance(lineage_match.get("evidence", []), list) else []:
-            text = _normalize(item)
-            if text:
-                evidence.append(text)
+            normalized_model = str(inferred_from_payload.get("model_normalized", "") or "")
+        if not registry_status and not proof_valid:
+            registry_status = str(inferred_from_payload.get("registry_status", "") or "")
 
-    if not agent and lineage_hints:
-        agent = lineage_hints[0]
-        agent_source = agent_source or "lineage_hint"
+        if not agent and provenance_agent_hint:
+            hinted = registry.get_agent(provenance_agent_hint)
+            if hinted is not None:
+                agent = str(hinted.get("agent_id", "") or "")
+                agent_source = agent_source or "payload_hint"
+                registry_status = str(hinted.get("status", "") or "")
+
+        lineage_match = lineage_payload.get("match", {}) if isinstance(lineage_payload.get("match"), dict) else {}
+        if lineage_match:
+            if not agent:
+                agent = _normalize_lower(lineage_match.get("agent_id"))
+                agent_source = agent_source or (
+                    "lineage_exact"
+                    if _normalize_lower(lineage_match.get("match_kind")) == "exact_executable"
+                    else "lineage_token"
+                )
+            if not provider:
+                provider = _normalize_lower(lineage_match.get("provider"))
+            if not raw_model:
+                raw_model = _normalize(lineage_match.get("model_raw"))
+            if not normalized_model:
+                normalized_model = _normalize_lower(lineage_match.get("model_normalized"))
+            if not registry_status and not proof_valid:
+                registry_status = _normalize_lower(lineage_match.get("registry_status"))
+            if not evidence_tier:
+                evidence_tier = _normalize_lower(lineage_match.get("evidence_tier"))
+            for item in lineage_match.get("evidence", []) if isinstance(lineage_match.get("evidence", []), list) else []:
+                text = _normalize(item)
+                if text:
+                    evidence.append(text)
+
+        if not agent and lineage_hints:
+            agent = lineage_hints[0]
+            agent_source = agent_source or "lineage_hint"
 
     if not raw_model:
         raw_model = provenance_model_raw or ai_model
@@ -498,12 +619,14 @@ def classify_command_run(command: str, payload: dict[str, Any]) -> dict[str, Any
         normalized_model = registry.normalize_model(agent, raw_model, provider)
 
     agent_meta = registry.get_agent(agent) if agent else None
-    if proof_valid or proof_signature_present:
+    if proof_valid:
         if agent and agent_meta is None:
             registry_status = "unmapped_signed"
             evidence.append("proof_agent_unmapped=true")
         elif agent_meta is not None:
             registry_status = _normalize_lower(agent_meta.get("status"))
+    elif proof_rejected and agent_meta is not None:
+        evidence.append("proof_claim_registry_match=true")
     elif not registry_status and agent_meta is not None:
         registry_status = _normalize_lower(agent_meta.get("status"))
 

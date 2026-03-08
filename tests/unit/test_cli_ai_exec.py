@@ -19,7 +19,7 @@ class CliAiExecTests(unittest.TestCase):
         with patch("agensic.cli.app.sign_proof_payload", return_value="sig") as mock_sign, patch(
             "agensic.cli.app.build_local_proof_metadata",
             return_value={
-                "proof_signer_scope": "local-hmac",
+                "proof_signer_scope": "local-ed25519",
                 "proof_key_fingerprint": "deadbeefdeadbeef",
                 "proof_host_fingerprint": "cafebabecafebabe",
             },
@@ -49,7 +49,7 @@ class CliAiExecTests(unittest.TestCase):
         self.assertEqual(payload["provenance_ai_agent"], "unknown")
         self.assertEqual(payload["provenance_ai_model"], "unknown-model")
         self.assertGreaterEqual(int(payload.get("duration_ms", -1) or -1), 0)
-        self.assertEqual(payload["proof_signer_scope"], "local-hmac")
+        self.assertEqual(payload["proof_signer_scope"], "local-ed25519")
         self.assertEqual(payload["proof_key_fingerprint"], "deadbeefdeadbeef")
         self.assertEqual(payload["proof_host_fingerprint"], "cafebabecafebabe")
 
@@ -57,7 +57,7 @@ class CliAiExecTests(unittest.TestCase):
         with patch("agensic.cli.app.sign_proof_payload", return_value="sig"), patch(
             "agensic.cli.app.build_local_proof_metadata",
             return_value={
-                "proof_signer_scope": "local-hmac",
+                "proof_signer_scope": "local-ed25519",
                 "proof_key_fingerprint": "",
                 "proof_host_fingerprint": "",
             },
@@ -92,7 +92,7 @@ class CliAiExecTests(unittest.TestCase):
         with patch("agensic.cli.app.sign_proof_payload", return_value="sig"), patch(
             "agensic.cli.app.build_local_proof_metadata",
             return_value={
-                "proof_signer_scope": "local-hmac",
+                "proof_signer_scope": "local-ed25519",
                 "proof_key_fingerprint": "",
                 "proof_host_fingerprint": "",
             },
@@ -125,7 +125,7 @@ class CliAiExecTests(unittest.TestCase):
         with patch("agensic.cli.app.sign_proof_payload", return_value="sig"), patch(
             "agensic.cli.app.build_local_proof_metadata",
             return_value={
-                "proof_signer_scope": "local-hmac",
+                "proof_signer_scope": "local-ed25519",
                 "proof_key_fingerprint": "",
                 "proof_host_fingerprint": "",
             },

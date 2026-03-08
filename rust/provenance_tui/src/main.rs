@@ -373,6 +373,7 @@ impl App {
         match label {
             "HUMAN_TYPED" => Style::default().fg(Color::Green),
             "AI_EXECUTED" => Style::default().fg(Color::Rgb(0, 191, 255)),
+            "INVALID_PROOF" => Style::default().fg(Color::Red),
             "AG_SUGGESTED_HUMAN_RAN" => Style::default().fg(Color::Cyan),
             "AI_SUGGESTED_HUMAN_RAN" => Style::default().fg(Color::Rgb(125, 249, 255)),
             "UNKNOWN" => Style::default().fg(Color::Rgb(211, 211, 211)),

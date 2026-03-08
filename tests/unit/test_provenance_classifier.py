@@ -1,7 +1,16 @@
+import os
+import tempfile
+import time
 import unittest
 from unittest.mock import patch
 
-from agensic.engine.provenance import classify_command_run
+from agensic.engine.provenance import (
+    PROOF_MAX_AGE_SECONDS,
+    build_local_proof_metadata,
+    classify_command_run,
+    sign_proof_payload,
+    verify_signed_proof,
+)
 
 
 class ProvenanceClassifierTests(unittest.TestCase):
@@ -15,7 +24,7 @@ class ProvenanceClassifierTests(unittest.TestCase):
             "proof_trace": "abc",
             "proof_timestamp": 1700000000,
             "proof_signature": "sig",
-            "proof_signer_scope": "local-hmac",
+            "proof_signer_scope": "local-ed25519",
             "proof_key_fingerprint": "abc123abc123abc1",
             "proof_host_fingerprint": "def456def456def4",
         }
@@ -33,7 +42,7 @@ class ProvenanceClassifierTests(unittest.TestCase):
         self.assertEqual(out["model_fingerprint"], "codex_gpt-5-codex")
         self.assertEqual(out["registry_status"], "verified")
         self.assertEqual(out["agent_name"], "Planner A")
-        self.assertIn("proof_signer_scope=local-hmac", out["evidence"])
+        self.assertIn("proof_signer_scope=local-ed25519", out["evidence"])
         self.assertIn("proof_key_fingerprint=abc123abc123abc1", out["evidence"])
         self.assertIn("proof_host_fingerprint=def456def456def4", out["evidence"])
 
@@ -68,7 +77,7 @@ class ProvenanceClassifierTests(unittest.TestCase):
             out = classify_command_run("git status", payload)
         self.assertEqual(out["label"], "HUMAN_TYPED")
 
-    def test_proof_signature_present_overrides_human_typed(self):
+    def test_invalid_proof_becomes_invalid_proof_label(self):
         payload = {
             "provenance_last_action": "human_typed",
             "proof_label": "AI_EXECUTED",
@@ -86,12 +95,35 @@ class ProvenanceClassifierTests(unittest.TestCase):
             return_value={"lineage": [], "hints": []},
         ):
             out = classify_command_run("echo hi", payload)
-        self.assertEqual(out["label"], "AI_EXECUTED")
+        self.assertEqual(out["label"], "INVALID_PROOF")
         self.assertFalse(out["proof_valid"])
-        self.assertEqual(out["evidence_tier"], "proof")
+        self.assertEqual(out["evidence_tier"], "proof_invalid")
         self.assertEqual(out["agent"], "codex")
-        self.assertEqual(out["model"], "gpt-5.3")
-        self.assertIn("proof_signature_present_override", out["evidence"])
+        self.assertEqual(out["registry_status"], "invalid_proof")
+        self.assertIn("proof_claim_unverified=true", out["evidence"])
+        self.assertNotIn("proof_signature_present_override", out["evidence"])
+
+    def test_missing_proof_fields_becomes_invalid_proof_without_verifier_call(self):
+        payload = {
+            "proof_label": "AI_EXECUTED",
+            "proof_agent": "codex",
+            "proof_trace": "trace-xyz",
+            "proof_timestamp": 1700000000,
+            "proof_signature": "sig",
+        }
+        with patch(
+            "agensic.engine.provenance.verify_signed_proof",
+            return_value=(True, "proof_valid"),
+        ) as mock_verify, patch(
+            "agensic.engine.provenance.inspect_process_lineage",
+            return_value={"lineage": [], "hints": []},
+        ):
+            out = classify_command_run("echo hi", payload)
+        mock_verify.assert_not_called()
+        self.assertEqual(out["label"], "INVALID_PROOF")
+        self.assertFalse(out["proof_valid"])
+        self.assertEqual(out["proof_reason"], "proof_model_missing")
+        self.assertIn("proof_model_missing", out["evidence"])
 
     def test_ai_suggested_human_ran(self):
         payload = {
@@ -206,6 +238,68 @@ class ProvenanceClassifierTests(unittest.TestCase):
         self.assertEqual(out["agent"], "openhands")
         self.assertEqual(out["evidence_tier"], "proof")
         self.assertEqual(out["registry_status"], "unmapped_signed")
+
+    def test_ed25519_round_trip_and_metadata(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            private_path = os.path.join(tmpdir, "provenance_ed25519.pem")
+            public_path = os.path.join(tmpdir, "provenance_ed25519.pub.pem")
+            timestamp = int(time.time())
+            signature = sign_proof_payload(
+                "AI_EXECUTED",
+                "codex",
+                "gpt-5.3",
+                "trace-ed25519",
+                timestamp,
+                private_path=private_path,
+                public_path=public_path,
+            )
+
+            ok, reason = verify_signed_proof(
+                "AI_EXECUTED",
+                "codex",
+                "gpt-5.3",
+                "trace-ed25519",
+                timestamp,
+                signature,
+                now_ts=timestamp,
+                public_path=public_path,
+            )
+            metadata = build_local_proof_metadata(private_path=private_path, public_path=public_path)
+
+        self.assertTrue(ok)
+        self.assertEqual(reason, "proof_valid")
+        self.assertEqual(metadata["proof_signer_scope"], "local-ed25519")
+        self.assertRegex(metadata["proof_key_fingerprint"], r"^[0-9a-f]{16}$")
+        self.assertRegex(metadata["proof_host_fingerprint"], r"^[0-9a-f]{16}$")
+
+    def test_ed25519_proof_rejects_stale_timestamps(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            private_path = os.path.join(tmpdir, "provenance_ed25519.pem")
+            public_path = os.path.join(tmpdir, "provenance_ed25519.pub.pem")
+            timestamp = int(time.time())
+            signature = sign_proof_payload(
+                "AI_EXECUTED",
+                "codex",
+                "gpt-5.3",
+                "trace-stale",
+                timestamp,
+                private_path=private_path,
+                public_path=public_path,
+            )
+
+            ok, reason = verify_signed_proof(
+                "AI_EXECUTED",
+                "codex",
+                "gpt-5.3",
+                "trace-stale",
+                timestamp,
+                signature,
+                now_ts=timestamp + PROOF_MAX_AGE_SECONDS + 1,
+                public_path=public_path,
+            )
+
+        self.assertFalse(ok)
+        self.assertEqual(reason, "proof_timestamp_stale")
 
 
 if __name__ == "__main__":

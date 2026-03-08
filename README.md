@@ -4,7 +4,7 @@
 
 **Make your terminal smarter without replacing it.**
 
-Agensic records, signs, and verifies AI-generated terminal commands so developers can trust what ran, who produced it, and why. 
+Agensic records, signs, and verifies AI-generated terminal commands so developers can trust what ran, who produced it, and why.
 
 It is built for people who like their existing shell and want better intelligence, better auditability, and better control, not a brand new terminal to learn.
 
@@ -45,9 +45,16 @@ Natural-language flows:
 
 ## For Agents
 
-Agensic is not just an AI terminal UX layer. It is also a forensic layer for agent execution. 
+Agensic is not just an AI terminal UX layer. It is also a forensic layer for agent execution.
 
 The repo publishes a `terminal-commands` skill for agentic tools that need deterministic provenance for shell activity. When an agent uses the skill, commands are signed so they can be registered and later verified as AI-executed actions.
+
+How the proof works, briefly:
+
+- Each AI-executed command is signed locally with an Ed25519 keypair stored under `~/.agensic`.
+- The daemon verifies that signature before assigning the `AI_EXECUTED` label.
+- Incomplete, malformed, stale, or invalid proofs are recorded as `INVALID_PROOF`, not silently upgraded to success.
+- The provenance TUI and CLI read those stored records from SQLite so you can review them later.
 
 You can install this skill from GitHub, in one of the following ways:
 
@@ -64,7 +71,7 @@ That means you can answer questions like:
 - What command ran?
 - Which agent produced it?
 - Which model was used?
-- Was it signed and recorded correctly?
+- Was it signed and verified correctly?
 - What was the exit code and the error message?
 
 Preferred one-off flow:

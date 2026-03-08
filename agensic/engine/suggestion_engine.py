@@ -24,8 +24,6 @@ from .provenance import (
     get_registry_agent,
     get_registry_summary,
     list_registry_agents,
-    refresh_agent_registry,
-    verify_cached_agent_registry,
 )
 from agensic.privacy.guard import PrivacyGuard, PrivacyGuardError
 from agensic.utils import ensure_private_dir, harden_private_tree
@@ -1840,12 +1838,6 @@ class SuggestionEngine:
     def get_provenance_registry_agent(self, agent_id: str) -> dict | None:
         return get_registry_agent(agent_id, force_reload=False)
 
-    def refresh_provenance_registry(self, config: dict | None = None, force: bool = False) -> dict:
-        return refresh_agent_registry(config=config or {}, force=force)
-
-    def verify_provenance_registry_cache(self, config: dict | None = None) -> dict:
-        return verify_cached_agent_registry(config=config or {})
-    
     def close(self, join_timeout_seconds: float = 20.0, shutdown_reason: str = ""):
         """Clean up resources."""
         with self._bootstrap_lock:
