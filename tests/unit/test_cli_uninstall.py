@@ -54,14 +54,14 @@ class CliUninstallTests(unittest.TestCase):
         with patch.object(cli_app, "stop"), patch.object(
             cli_app, "_shell_rc_paths", return_value=[]
         ), patch.object(
-            cli_app, "_remove_tree_if_exists"
+            cli_app, "_remove_tree_if_exists", side_effect=[True, True]
         ) as remove_tree_mock, patch.object(
-            cli_app, "_remove_file_if_exists", return_value=False
+            cli_app, "_remove_file_if_exists", return_value=True
         ):
             result = self.runner.invoke(app, ["uninstall", "--yes", "--keep-data"])
 
         self.assertEqual(result.exit_code, 0)
-        remove_tree_mock.assert_not_called()
+        self.assertEqual(remove_tree_mock.call_count, 2)
 
 
 if __name__ == "__main__":

@@ -680,7 +680,7 @@ print(json.dumps(payload, separators=(',', ':')))
     local -a helper_cmd
     helper_cmd=("$AGENSIC_RUNTIME_PYTHON" "$AGENSIC_CLIENT_HELPER" --timeout 3.0)
     if [[ -n "$AGENSIC_AUTH_TOKEN" ]]; then
-        helper_cmd+=(--auth-token "$AGENSIC_AUTH_TOKEN")
+        helper_cmd+=("--auth-token=$AGENSIC_AUTH_TOKEN")
     fi
     response_json="$(printf '%s' "$request_json" | "${helper_cmd[@]}" 2>/dev/null)"
 
@@ -1034,7 +1034,7 @@ _agensic_resolve_intent_command() {
         --platform "$platform_name"
     )
     if [[ -n "$AGENSIC_AUTH_TOKEN" ]]; then
-        helper_cmd+=(--auth-token "$AGENSIC_AUTH_TOKEN")
+        helper_cmd+=("--auth-token=$AGENSIC_AUTH_TOKEN")
     fi
     response="$("${helper_cmd[@]}" 2>/dev/null)"
 
@@ -1129,7 +1129,7 @@ _agensic_resolve_general_assist() {
         --platform "$platform_name"
     )
     if [[ -n "$AGENSIC_AUTH_TOKEN" ]]; then
-        helper_cmd+=(--auth-token "$AGENSIC_AUTH_TOKEN")
+        helper_cmd+=("--auth-token=$AGENSIC_AUTH_TOKEN")
     fi
     response="$("${helper_cmd[@]}" 2>/dev/null)"
 

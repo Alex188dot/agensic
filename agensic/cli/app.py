@@ -2516,7 +2516,7 @@ def test():
 @app.command()
 def uninstall(
     yes: bool = typer.Option(False, "--yes", "-y", help="Skip the confirmation prompt."),
-    keep_data: bool = typer.Option(False, "--keep-data", help="Keep local state directories."),
+    keep_data: bool = typer.Option(False, "--keep-data", help="Keep local config/state/cache directories."),
 ):
     """Remove Agensic startup wiring and local install state."""
     if not yes:
@@ -2542,14 +2542,16 @@ def uninstall(
         if _scrub_shell_rc_file(rc_path):
             removed.append(str(rc_path))
 
+    for path in (INSTALL_DIR, LEGACY_CONFIG_DIR):
+        if _remove_tree_if_exists(path):
+            removed.append(path)
+    if _remove_file_if_exists(APP_PATHS.launcher_path):
+        removed.append(APP_PATHS.launcher_path)
+
     if not keep_data:
-        for path in (CONFIG_DIR, STATE_DIR, CACHE_DIR, INSTALL_DIR):
+        for path in (CONFIG_DIR, STATE_DIR, CACHE_DIR):
             if _remove_tree_if_exists(path):
                 removed.append(path)
-        if _remove_file_if_exists(APP_PATHS.launcher_path):
-            removed.append(APP_PATHS.launcher_path)
-        if _remove_tree_if_exists(LEGACY_CONFIG_DIR):
-            removed.append(LEGACY_CONFIG_DIR)
 
     if removed:
         console.print("[green]Removed:[/green]")

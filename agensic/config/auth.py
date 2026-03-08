@@ -45,7 +45,7 @@ def _auth_payload_for_token(token: str) -> dict:
 
 
 def generate_auth_token() -> str:
-    return secrets.token_urlsafe(AUTH_TOKEN_BYTES)
+    return f"ag_{secrets.token_urlsafe(AUTH_TOKEN_BYTES)}"
 
 
 def load_auth_payload(path: str | None = None) -> dict | None:
