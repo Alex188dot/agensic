@@ -6,10 +6,11 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
+from agensic.paths import APP_PATHS
 
-DEFAULT_REMOTE_CACHE_PATH = os.path.expanduser("~/.agensic/agent_registry.remote.json")
-DEFAULT_REMOTE_META_PATH = os.path.expanduser("~/.agensic/agent_registry.remote.meta.json")
-DEFAULT_LOCAL_OVERRIDE_PATH = os.path.expanduser("~/.agensic/agent_registry.local.json")
+DEFAULT_REMOTE_CACHE_PATH = APP_PATHS.agent_registry_remote_cache_path
+DEFAULT_REMOTE_META_PATH = APP_PATHS.agent_registry_remote_meta_path
+DEFAULT_LOCAL_OVERRIDE_PATH = APP_PATHS.agent_registry_local_override_path
 
 
 @dataclass(frozen=True)

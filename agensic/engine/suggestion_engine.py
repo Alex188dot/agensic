@@ -12,6 +12,7 @@ from pathlib import Path
 from litellm import acompletion
 import requests
 from agensic.state import EventJournal, SnapshotManager, SnapshotScheduler, SQLiteStateStore
+from agensic.paths import APP_PATHS, ensure_app_layout, migrate_legacy_layout
 from agensic.config.loader import (
     DEFAULT_TIMEOUT_SECONDS,
     MAX_TIMEOUT_SECONDS,
@@ -111,11 +112,12 @@ class SuggestionEngine:
         self._init_state_runtime()
 
     def _init_state_runtime(self) -> None:
-        home = os.path.expanduser("~/.agensic")
-        ensure_private_dir(home)
-        sqlite_path = os.path.join(home, "state.sqlite")
-        events_dir = os.path.join(home, "events")
-        snapshots_dir = os.path.join(home, "snapshots")
+        migrate_legacy_layout()
+        ensure_app_layout()
+        ensure_private_dir(APP_PATHS.state_dir)
+        sqlite_path = APP_PATHS.state_sqlite_path
+        events_dir = APP_PATHS.events_dir
+        snapshots_dir = APP_PATHS.snapshots_dir
         try:
             self.event_journal = EventJournal(events_dir)
             self.state_store = SQLiteStateStore(sqlite_path, journal=self.event_journal)
@@ -168,7 +170,7 @@ class SuggestionEngine:
 
             if self.snapshot_scheduler is not None:
                 self.snapshot_scheduler.start()
-            harden_private_tree(home)
+            harden_private_tree(APP_PATHS.state_dir)
         except Exception as exc:
             sanitized = self.privacy_guard.sanitize_for_log(str(exc))
             self.state_store = None
@@ -244,12 +246,11 @@ class SuggestionEngine:
 
     @staticmethod
     def _zvec_lock_paths() -> list[str]:
-        root = os.path.expanduser("~/.agensic")
         return [
-            os.path.join(root, "zvec_commands", "LOCK"),
-            os.path.join(root, "zvec_commands", "idmap.0", "LOCK"),
-            os.path.join(root, "zvec_feedback_stats", "LOCK"),
-            os.path.join(root, "zvec_feedback_stats", "idmap.0", "LOCK"),
+            os.path.join(APP_PATHS.zvec_commands_path, "LOCK"),
+            os.path.join(APP_PATHS.zvec_commands_path, "idmap.0", "LOCK"),
+            os.path.join(APP_PATHS.zvec_feedback_path, "LOCK"),
+            os.path.join(APP_PATHS.zvec_feedback_path, "idmap.0", "LOCK"),
         ]
 
     def _remove_stale_zvec_locks(self) -> int:

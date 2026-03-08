@@ -51,7 +51,7 @@ The repo publishes a `terminal-commands` skill for agentic tools that need deter
 
 How the proof works, briefly:
 
-- Each AI-executed command is signed locally with an Ed25519 keypair stored under `~/.agensic`.
+- Each AI-executed command is signed locally with an Ed25519 keypair stored under the app config directory (`$XDG_CONFIG_HOME/agensic` on macOS/Linux by default).
 - The daemon verifies that signature before assigning the `AI_EXECUTED` label.
 - Incomplete, malformed, stale, or invalid proofs are recorded as `INVALID_PROOF`, not silently upgraded to success.
 - The provenance TUI and CLI read those stored records from SQLite so you can review them later.
@@ -113,7 +113,7 @@ Open a new terminal and run:
 agensic setup
 ```
 
-The installer writes a real launcher to `~/.agensic/bin/agensic`, installs the Python package into `~/.agensic/.venv`, and adds that directory to your shell `PATH` in a managed shell RC block.
+The installer writes a real launcher to `~/.local/bin/agensic` by default, installs the Python package into `$XDG_STATE_HOME/agensic/install/.venv`, and uses XDG config/state/cache directories on macOS and Linux.
 
 When `uv` is available, the installer prefers it for faster environment creation and package installation. Otherwise it falls back to stdlib `venv` + `pip`.
 

@@ -102,15 +102,18 @@ AGENSIC_NATIVE_ESC_WIDGET=()
 typeset -g -a AGENSIC_DISABLED_PATTERNS
 AGENSIC_DISABLED_PATTERNS=()
 typeset -g AGENSIC_SOURCE_PATH="${(%):-%N}"
+typeset -g AGENSIC_CONFIG_HOME="${XDG_CONFIG_HOME:-${HOME}/.config}"
+typeset -g AGENSIC_STATE_HOME="${XDG_STATE_HOME:-${HOME}/.local/state}"
+typeset -g AGENSIC_CACHE_HOME="${XDG_CACHE_HOME:-${HOME}/.cache}"
 if [[ -z "$AGENSIC_SOURCE_PATH" || "$AGENSIC_SOURCE_PATH" == "zsh" ]]; then
-    AGENSIC_SOURCE_PATH="${HOME}/.agensic/agensic.zsh"
+    AGENSIC_SOURCE_PATH="${AGENSIC_STATE_HOME}/agensic/install/agensic.zsh"
 fi
 typeset -g AGENSIC_SOURCE_DIR="${AGENSIC_SOURCE_PATH:A:h}"
-typeset -g AGENSIC_HOME="${HOME}/.agensic"
-typeset -g AGENSIC_CONFIG_PATH="${HOME}/.agensic/config.json"
-typeset -g AGENSIC_AUTH_PATH="${HOME}/.agensic/auth.json"
+typeset -g AGENSIC_HOME="${AGENSIC_STATE_HOME}/agensic"
+typeset -g AGENSIC_CONFIG_PATH="${AGENSIC_CONFIG_HOME}/agensic/config.json"
+typeset -g AGENSIC_AUTH_PATH="${AGENSIC_CONFIG_HOME}/agensic/auth.json"
 typeset -g AGENSIC_CLIENT_HELPER="${AGENSIC_SOURCE_DIR}/shell_client.py"
-typeset -g AGENSIC_RUNTIME_PYTHON="${AGENSIC_HOME}/.venv/bin/python"
+typeset -g AGENSIC_RUNTIME_PYTHON="${AGENSIC_SOURCE_DIR}/.venv/bin/python"
 if [[ ! -x "$AGENSIC_RUNTIME_PYTHON" ]]; then
     AGENSIC_RUNTIME_PYTHON="python3"
 fi

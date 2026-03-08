@@ -3,14 +3,27 @@
 echo "🚀 Installing Agensic 🔒..."
 
 # 1. Create directory
-INSTALL_DIR="$HOME/.agensic"
+CONFIG_HOME="${XDG_CONFIG_HOME:-$HOME/.config}"
+STATE_HOME="${XDG_STATE_HOME:-$HOME/.local/state}"
+CACHE_HOME="${XDG_CACHE_HOME:-$HOME/.cache}"
+BIN_HOME="${XDG_BIN_HOME:-$HOME/.local/bin}"
+APP_CONFIG_DIR="$CONFIG_HOME/agensic"
+APP_STATE_DIR="$STATE_HOME/agensic"
+APP_CACHE_DIR="$CACHE_HOME/agensic"
+INSTALL_DIR="$APP_STATE_DIR/install"
+INSTALL_BIN_DIR="$INSTALL_DIR/bin"
+USER_BIN_DIR="$BIN_HOME"
 VENV_DIR="$INSTALL_DIR/.venv"
 FIRST_INSTALL=0
-if [ ! -x "$INSTALL_DIR/bin/agensic" ]; then
+if [ ! -x "$USER_BIN_DIR/agensic" ]; then
     FIRST_INSTALL=1
 fi
+mkdir -p "$APP_CONFIG_DIR"
+mkdir -p "$APP_STATE_DIR"
+mkdir -p "$APP_CACHE_DIR"
 mkdir -p "$INSTALL_DIR"
-mkdir -p "$INSTALL_DIR/bin"
+mkdir -p "$INSTALL_BIN_DIR"
+mkdir -p "$USER_BIN_DIR"
 
 # 2. Copy shell integration assets
 cp agensic.zsh "$INSTALL_DIR/"
@@ -19,12 +32,12 @@ cp shell_client.py "$INSTALL_DIR/"
 # 2b. Install local provenance TUI sidecar if already built
 LOCAL_TUI_BIN="$PWD/rust/provenance_tui/target/release/agensic-provenance-tui"
 if [ -x "$LOCAL_TUI_BIN" ]; then
-    cp "$LOCAL_TUI_BIN" "$INSTALL_DIR/bin/agensic-provenance-tui"
-    chmod +x "$INSTALL_DIR/bin/agensic-provenance-tui"
-    echo "✅ Installed local provenance TUI sidecar to $INSTALL_DIR/bin"
+    cp "$LOCAL_TUI_BIN" "$INSTALL_BIN_DIR/agensic-provenance-tui"
+    chmod +x "$INSTALL_BIN_DIR/agensic-provenance-tui"
+    echo "✅ Installed local provenance TUI sidecar to $INSTALL_BIN_DIR"
 else
     MANIFEST_URL="${AGENSIC_PROVENANCE_TUI_MANIFEST_URL:-https://github.com/Alex188dot/agensic/releases/latest/download/provenance_tui_manifest.json}"
-    python3 - "$MANIFEST_URL" "$INSTALL_DIR/bin/agensic-provenance-tui" <<'PY' || echo "⚠️ Could not download provenance TUI sidecar; CLI fallback will still work."
+    python3 - "$MANIFEST_URL" "$INSTALL_BIN_DIR/agensic-provenance-tui" <<'PY' || echo "⚠️ Could not download provenance TUI sidecar; CLI fallback will still work."
 import hashlib
 import json
 import os
@@ -106,7 +119,7 @@ fi
 
 # 2c. Lock down install permissions for all Agensic files.
 # Executable payloads keep owner-only execute bits; everything else becomes 0600.
-chmod -R u=rwX,go= "$INSTALL_DIR"
+chmod -R u=rwX,go= "$APP_CONFIG_DIR" "$APP_STATE_DIR" "$APP_CACHE_DIR"
 
 # 2d. Install the Python package into an isolated virtual environment.
 echo "📦 Installing Python package into $VENV_DIR..."
@@ -124,7 +137,7 @@ else
 fi
 
 # 2e. Create stable PATH launchers for the CLI and helper.
-CLI_LAUNCHER="$INSTALL_DIR/bin/agensic"
+CLI_LAUNCHER="$USER_BIN_DIR/agensic"
 cat > "$CLI_LAUNCHER" <<EOF
 #!/bin/sh
 exec "$VENV_DIR/bin/agensic" "\$@"
@@ -176,7 +189,7 @@ sed -i.bak \
 
 cat >> "$SHELL_PROFILE" <<EOF
 $PATH_START_MARKER
-export PATH="$HOME/.agensic/bin:$PATH"
+export PATH="$USER_BIN_DIR:\$PATH"
 $PATH_END_MARKER
 EOF
 
@@ -189,7 +202,7 @@ EOF
 echo ""
 echo "✅ Agensic 🔒 Installation complete!"
 echo "------------------------------------------------"
-echo "1. Open a new terminal, or run: export PATH=\"$INSTALL_DIR/bin:\$PATH\""
+echo "1. Open a new terminal, or run: export PATH=\"$USER_BIN_DIR:\$PATH\""
 if [ "$FIRST_INSTALL" -eq 1 ]; then
     echo "2. Complete the first-time setup flow."
     echo "3. Start typing commands (e.g. 'git c', 'docker ru')."

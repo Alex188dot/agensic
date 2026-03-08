@@ -17,6 +17,7 @@ import zvec
 from rapidfuzz import fuzz
 from rapidfuzz.distance import Levenshtein
 from sentence_transformers import SentenceTransformer
+from agensic.paths import APP_PATHS, ensure_app_layout, migrate_legacy_layout
 from agensic.utils import atomic_write_json_private, ensure_private_dir, harden_private_tree
 
 # Tell HuggingFace to avoid implicit network checks by default.
@@ -127,7 +128,9 @@ class CommandVectorDB:
             error="",
         )
         if db_path is None:
-            db_path = os.path.expanduser("~/.agensic/zvec_commands")
+            migrate_legacy_layout()
+            ensure_app_layout()
+            db_path = APP_PATHS.zvec_commands_path
 
         self.db_path = os.path.expanduser(db_path)
         self.feedback_db_path = os.path.join(

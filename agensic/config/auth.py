@@ -5,11 +5,12 @@ import tempfile
 import time
 from pathlib import Path
 
+from agensic.paths import APP_PATHS, ensure_app_layout, migrate_legacy_layout
 from .loader import CONFIG_DIR
 from agensic.utils import ensure_private_dir, enforce_private_file
 
 
-AUTH_FILE = os.path.join(CONFIG_DIR, "auth.json")
+AUTH_FILE = APP_PATHS.auth_file
 AUTH_VERSION = 1
 AUTH_TOKEN_BYTES = 32
 HEADER_AUTHORIZATION = "Authorization"
@@ -49,6 +50,8 @@ def generate_auth_token() -> str:
 
 def load_auth_payload(path: str | None = None) -> dict | None:
     target = Path(path or AUTH_FILE).expanduser()
+    migrate_legacy_layout()
+    ensure_app_layout()
     ensure_private_dir(target.parent)
     enforce_private_file(target)
     if not target.exists() or not target.is_file():
@@ -74,6 +77,8 @@ def save_auth_token(token: str, path: str | None = None) -> dict:
         raise ValueError("auth token must not be empty")
 
     target = Path(path or AUTH_FILE).expanduser()
+    migrate_legacy_layout()
+    ensure_app_layout()
     ensure_private_dir(target.parent)
     payload = _auth_payload_for_token(clean_token)
 

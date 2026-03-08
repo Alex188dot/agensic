@@ -13,13 +13,14 @@ from cryptography.hazmat.primitives.asymmetric.ed25519 import (
     Ed25519PublicKey,
 )
 
+from agensic.paths import APP_PATHS
 from .agent_registry import AgentRegistry, build_model_fingerprint
 from agensic.utils import ensure_private_dir
 
 
 PROOF_MAX_AGE_SECONDS = 900
-DEFAULT_PRIVATE_KEY_PATH = os.path.expanduser("~/.agensic/provenance_ed25519.pem")
-DEFAULT_PUBLIC_KEY_PATH = os.path.expanduser("~/.agensic/provenance_ed25519.pub.pem")
+DEFAULT_PRIVATE_KEY_PATH = APP_PATHS.provenance_private_key_path
+DEFAULT_PUBLIC_KEY_PATH = APP_PATHS.provenance_public_key_path
 PROOF_SIGNER_SCOPE = "local-ed25519"
 
 _HUMAN_ACTIONS = {

@@ -131,7 +131,8 @@ _verify_ai_executed_for_command() {
   local expected_command="$1"
   local start_ts="$2"
   local max_wait_ms="$3"
-  local db_path="${AGENSIC_STATE_DB_PATH:-$HOME/.agensic/state.sqlite}"
+  local state_home="${XDG_STATE_HOME:-$HOME/.local/state}"
+  local db_path="${AGENSIC_STATE_DB_PATH:-$state_home/agensic/state.sqlite}"
 
   python3 - "$db_path" "$expected_command" "$start_ts" "$max_wait_ms" <<'PY'
 import os

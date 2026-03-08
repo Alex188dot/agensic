@@ -17,6 +17,7 @@ os.environ.setdefault("VECLIB_MAXIMUM_THREADS", "1")
 os.environ.setdefault("NUMEXPR_NUM_THREADS", "1")
 
 from agensic.engine import RequestContext, SuggestionEngine
+from agensic.paths import APP_PATHS, ensure_app_layout, migrate_legacy_layout
 from agensic.config.loader import normalize_config_payload
 from agensic.config.auth import AuthTokenCache, HEADER_AUTHORIZATION, HEADER_CUSTOM_AUTH
 from agensic.privacy import PrivacyGuard
@@ -30,8 +31,8 @@ logging.basicConfig(
 )
 logger = logging.getLogger("agensic")
 
-CONFIG_DIR = os.path.expanduser("~/.agensic")
-CONFIG_FILE = os.path.join(CONFIG_DIR, "config.json")
+CONFIG_DIR = APP_PATHS.config_dir
+CONFIG_FILE = APP_PATHS.config_file
 
 engine = SuggestionEngine()
 privacy_guard = PrivacyGuard()
@@ -184,6 +185,8 @@ def reset_shutdown_state() -> None:
 
 
 def load_config() -> dict:
+    migrate_legacy_layout()
+    ensure_app_layout()
     if not os.path.exists(CONFIG_FILE):
         return normalize_config_payload({})
     try:

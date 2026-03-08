@@ -56,6 +56,7 @@ from agensic.config.auth import (
     rotate_auth_token,
 )
 from agensic.engine.provenance import build_local_proof_metadata, sign_proof_payload
+from agensic.paths import APP_PATHS, LEGACY_ROOT_DIR, ensure_app_layout, migrate_legacy_layout
 from agensic.utils import (
     atomic_write_json_private,
     atomic_write_text_private,
@@ -113,31 +114,41 @@ app.add_typer(ai_session_app, name="session", hidden=True)
 app.add_typer(auth_app, name="auth", hidden=True)
 console = Console()
 
-CONFIG_DIR = os.path.expanduser("~/.agensic")
-CONFIG_FILE = os.path.join(CONFIG_DIR, "config.json")
-PID_FILE = os.path.join(CONFIG_DIR, "daemon.pid")
+CONFIG_DIR = APP_PATHS.config_dir
+CONFIG_FILE = APP_PATHS.config_file
+STATE_DIR = APP_PATHS.state_dir
+CACHE_DIR = APP_PATHS.cache_dir
+INSTALL_DIR = APP_PATHS.install_dir
+USER_BIN_DIR = APP_PATHS.user_bin_dir
+PID_FILE = APP_PATHS.pid_file
 LEGACY_BRAND = "".join(("ghost", "shell"))
 LEGACY_CLI_NAME = "".join(("ai", "terminal"))
-LEGACY_CONFIG_DIR = os.path.expanduser(f"~/.{LEGACY_BRAND}")
+LEGACY_CONFIG_DIR = LEGACY_ROOT_DIR
 LEGACY_PID_FILE = os.path.join(LEGACY_CONFIG_DIR, "daemon.pid")
 UNINSTALL_SENTINEL = os.path.join(tempfile.gettempdir(), f"agensic-shell-uninstalled-{os.getuid()}")
 PROJECT_ROOT = str(Path(__file__).resolve().parents[2])
 SERVER_SCRIPT = os.path.join(PROJECT_ROOT, "server.py")
-SHELL_CLIENT_SCRIPT = os.path.join(PROJECT_ROOT, "shell_client.py")
+SHELL_CLIENT_SCRIPT = (
+    APP_PATHS.shell_client_path
+    if os.path.exists(APP_PATHS.shell_client_path)
+    else os.path.join(PROJECT_ROOT, "shell_client.py")
+)
 PLIST_PATH = os.path.expanduser("~/Library/LaunchAgents/com.agensic.daemon.plist")
 LEGACY_PLIST_PATH = os.path.expanduser(f"~/Library/LaunchAgents/com.{LEGACY_BRAND}.daemon.plist")
-LOCKS_DIR = os.path.join(CONFIG_DIR, "locks")
+LOCKS_DIR = APP_PATHS.locks_dir
 FIX_LOCK_FILE = os.path.join(LOCKS_DIR, "fix.lock")
-REPAIR_DIR = os.path.join(CONFIG_DIR, "repair")
-REPAIR_LOG_FILE = os.path.join(REPAIR_DIR, "repair.log")
-ZVEC_COMMANDS_PATH = os.path.join(CONFIG_DIR, "zvec_commands")
-ZVEC_FEEDBACK_PATH = os.path.join(CONFIG_DIR, "zvec_feedback_stats")
-LAST_INDEXED_PATH = os.path.join(CONFIG_DIR, "last_indexed_line")
-STATE_SQLITE_PATH = os.path.join(CONFIG_DIR, "state.sqlite")
-EVENTS_DIR = os.path.join(CONFIG_DIR, "events")
-SNAPSHOTS_DIR = os.path.join(CONFIG_DIR, "snapshots")
-BIN_DIR = os.path.join(CONFIG_DIR, "bin")
-PROVENANCE_TUI_BIN = os.path.join(BIN_DIR, "agensic-provenance-tui")
+REPAIR_DIR = APP_PATHS.repair_dir
+REPAIR_LOG_FILE = APP_PATHS.repair_log_file
+ZVEC_COMMANDS_PATH = APP_PATHS.zvec_commands_path
+ZVEC_FEEDBACK_PATH = APP_PATHS.zvec_feedback_path
+LAST_INDEXED_PATH = APP_PATHS.last_indexed_path
+STATE_SQLITE_PATH = APP_PATHS.state_sqlite_path
+EVENTS_DIR = APP_PATHS.events_dir
+SNAPSHOTS_DIR = APP_PATHS.snapshots_dir
+BIN_DIR = APP_PATHS.install_bin_dir
+PROVENANCE_TUI_BIN = APP_PATHS.provenance_tui_bin
+SERVER_LOG_FILE = APP_PATHS.server_log_file
+PLUGIN_LOG_FILE = APP_PATHS.plugin_log_file
 MOUSE_REPORTING_RESET_SEQ = "\x1b[?1000l\x1b[?1002l\x1b[?1003l\x1b[?1006l\x1b[?1015l"
 CURSOR_SAVE_SEQ = "\x1b7"
 CURSOR_RESTORE_SEQ = "\x1b8"
@@ -441,8 +452,11 @@ def _is_back(value: Any) -> bool:
     return value is BACK_SIGNAL
 
 def ensure_config_dir():
-    ensure_private_dir(CONFIG_DIR)
-    harden_private_tree(CONFIG_DIR)
+    migrate_legacy_layout()
+    ensure_app_layout()
+    for path in (CONFIG_DIR, STATE_DIR, CACHE_DIR, INSTALL_DIR, BIN_DIR):
+        ensure_private_dir(path)
+        harden_private_tree(path)
 
 def _load_config() -> dict:
     return load_config_file(CONFIG_FILE)
@@ -2266,9 +2280,9 @@ def _enable_startup_impl(start_now: bool) -> None:
     <key>KeepAlive</key>
     <true/>
     <key>StandardOutPath</key>
-    <string>{CONFIG_DIR}/server.log</string>
+    <string>{SERVER_LOG_FILE}</string>
     <key>StandardErrorPath</key>
-    <string>{CONFIG_DIR}/server.log</string>
+    <string>{SERVER_LOG_FILE}</string>
 </dict>
 </plist>
 """
@@ -2370,7 +2384,7 @@ def start():
         stop()
 
     console.print("[cyan]Starting Agensic Daemon...[/cyan]")
-    log_path = os.path.join(CONFIG_DIR, "server.log")
+    log_path = SERVER_LOG_FILE
     with open(log_path, "w") as out:
         process = subprocess.Popen(
             [sys.executable, SERVER_SCRIPT],
@@ -2383,7 +2397,7 @@ def start():
     atomic_write_text_private(PID_FILE, str(process.pid))
     
     console.print(f"[green]✔ Started (PID: {process.pid})[/green]")
-    console.print(f"[dim]Log file: {CONFIG_DIR}/server.log[/dim]")
+    console.print(f"[dim]Log file: {SERVER_LOG_FILE}[/dim]")
     ready, indexed, error = _wait_for_bootstrap_ready(started_pid=process.pid)
     if ready:
         console.print(f"[green]✔ Command index ready[/green]")
@@ -2453,7 +2467,7 @@ def stop():
 @app.command()
 def logs():
     """View server logs in real-time."""
-    log_file = os.path.join(CONFIG_DIR, "server.log")
+    log_file = SERVER_LOG_FILE
     if not os.path.exists(log_file):
         console.print("[yellow]No logs found. Server may not be running.[/yellow]")
         return
@@ -2529,8 +2543,11 @@ def uninstall(
             removed.append(str(rc_path))
 
     if not keep_data:
-        if _remove_tree_if_exists(CONFIG_DIR):
-            removed.append(CONFIG_DIR)
+        for path in (CONFIG_DIR, STATE_DIR, CACHE_DIR, INSTALL_DIR):
+            if _remove_tree_if_exists(path):
+                removed.append(path)
+        if _remove_file_if_exists(APP_PATHS.launcher_path):
+            removed.append(APP_PATHS.launcher_path)
         if _remove_tree_if_exists(LEGACY_CONFIG_DIR):
             removed.append(LEGACY_CONFIG_DIR)
 
@@ -2653,7 +2670,7 @@ def doctor():
         warnings.append("zsh_widget_not_bound")
         console.print("[yellow]⚠ Zsh binding:[/yellow] could not verify")
 
-    plugin_log = os.path.join(CONFIG_DIR, "plugin.log")
+    plugin_log = PLUGIN_LOG_FILE
     if os.path.exists(plugin_log):
         console.print(f"[dim]Plugin log: {plugin_log}[/dim]")
 
@@ -3311,11 +3328,12 @@ def _run_fix_factory_reset() -> int:
 
     _append_repair_log("fix_factory_reset_started", {})
     stop()
-    ok, err = _remove_path(CONFIG_DIR)
-    if not ok:
-        console.print(f"[red]Factory reset failed:[/red] {err}")
-        _append_repair_log("fix_factory_reset_failed", {"error": err})
-        return 1
+    for path in (CONFIG_DIR, STATE_DIR, CACHE_DIR, INSTALL_DIR):
+        ok, err = _remove_path(path)
+        if not ok:
+            console.print(f"[red]Factory reset failed:[/red] {err}")
+            _append_repair_log("fix_factory_reset_failed", {"error": err})
+            return 1
     ensure_config_dir()
     _save_config(normalize_config_payload({}))
     start()

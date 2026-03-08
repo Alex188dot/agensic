@@ -2,11 +2,12 @@ import json
 import os
 from pathlib import Path
 
+from agensic.paths import APP_PATHS, ensure_app_layout, migrate_legacy_layout
 from agensic.utils import atomic_write_json_private, enforce_private_file, ensure_private_dir
 
 
-CONFIG_DIR = os.path.expanduser("~/.agensic")
-CONFIG_FILE = os.path.join(CONFIG_DIR, "config.json")
+CONFIG_DIR = APP_PATHS.config_dir
+CONFIG_FILE = APP_PATHS.config_file
 DEFAULT_LLM_CALLS_PER_LINE = 4
 MAX_LLM_CALLS_PER_LINE = 99
 DEFAULT_LLM_REQUESTS_PER_MINUTE = 120
@@ -84,6 +85,8 @@ def normalize_config_payload(payload: dict | None) -> dict:
 
 def load_config_file(path: str | None = None) -> dict:
     target = Path(path or CONFIG_FILE).expanduser()
+    migrate_legacy_layout()
+    ensure_app_layout()
     ensure_private_dir(target.parent)
     enforce_private_file(target)
     if not target.exists() or not target.is_file():
@@ -100,6 +103,8 @@ def load_config_file(path: str | None = None) -> dict:
 
 def save_config_file(config: dict, path: str | None = None) -> None:
     target = Path(path or CONFIG_FILE).expanduser()
+    migrate_legacy_layout()
+    ensure_app_layout()
     ensure_private_dir(target.parent)
     normalized = normalize_config_payload(config)
     atomic_write_json_private(target, normalized, indent=4)
