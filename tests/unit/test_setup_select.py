@@ -51,7 +51,7 @@ class SetupSelectTerminalModeTests(unittest.TestCase):
         ):
             rendered_line_count = cli_app._render_raw_setup_select(
                 message="Choose one:",
-                choices=["Choose AI provider", "Manage command store (add/remove commands)"],
+                choices=["Choose AI provider", "Add/Remove commands from store"],
                 selected_index=0,
                 pointer="👉",
                 instruction=" ",
@@ -59,7 +59,7 @@ class SetupSelectTerminalModeTests(unittest.TestCase):
             )
             cli_app._render_raw_setup_select(
                 message="Choose one:",
-                choices=["Choose AI provider", "Manage command store (add/remove commands)"],
+                choices=["Choose AI provider", "Add/Remove commands from store"],
                 selected_index=1,
                 pointer="👉",
                 instruction=" ",
@@ -69,7 +69,7 @@ class SetupSelectTerminalModeTests(unittest.TestCase):
         rendered = fake_stdout.getvalue()
         self.assertTrue(rendered.startswith("? Choose one:"))
         self.assertIn("\r\033[3A\033[J? Choose one:", rendered)
-        self.assertIn("> Choose AI provider", rendered)
+        self.assertIn("👉 Choose AI provider", rendered)
 
     def test_render_raw_setup_select_accounts_for_wrapped_rows(self):
         fake_stdout = io.StringIO()

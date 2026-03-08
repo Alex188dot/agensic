@@ -106,6 +106,8 @@ Open a new terminal and run:
 agensic setup
 ```
 
+The installer writes a real launcher to `~/.agensic/bin/agensic` and adds that directory to your shell `PATH` in a managed shell RC block.
+
 Once the daemon is running, you can use the `agensic` CLI to interact with it or use the shell integration to use it inline autocomplete in your existing shell.
 
 ## Other Commands

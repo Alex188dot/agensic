@@ -62,6 +62,61 @@ class SetupBudgetTests(unittest.TestCase):
 
         self.assertEqual(build_mock.call_args.kwargs["pointer"], "👉")
 
+    def test_setup_menu_includes_daemon_launch(self):
+        observed_choices = []
+
+        def _fake_select(_message, choices):
+            observed_choices.extend(choices)
+            return cli_app.BACK_SIGNAL
+
+        with patch.object(cli_app, "_rotate_auth_token_or_exit"), patch.object(
+            cli_app, "_setup_select", side_effect=_fake_select
+        ), patch.object(cli_app.console, "print"):
+            cli_app.setup()
+
+        self.assertIn("Daemon launch", observed_choices)
+
+    def test_configure_provider_history_only_keeps_existing_budget(self):
+        saved = {}
+
+        with patch.object(
+            cli_app,
+            "_setup_select",
+            return_value="use without AI (will just use your history)",
+        ), patch.object(cli_app, "_save_config", side_effect=lambda config: saved.update(config)), patch.object(
+            cli_app.console, "print"
+        ):
+            completed = cli_app._configure_provider(
+                {"llm_calls_per_line": 4, "llm_budget_unlimited": True},
+                manage_runtime=False,
+            )
+
+        self.assertTrue(completed)
+        self.assertEqual(saved["provider"], "history_only")
+        self.assertEqual(saved["model"], "history-only")
+        self.assertEqual(saved["llm_calls_per_line"], 4)
+        self.assertTrue(saved["llm_budget_unlimited"])
+
+    def test_manage_daemon_launch_enables_startup_without_starting_now(self):
+        with patch.object(cli_app, "_is_startup_enabled", return_value=False), patch.object(
+            cli_app, "_setup_select", return_value="launch at startup (recommended)"
+        ), patch.object(cli_app, "_enable_startup_impl") as enable_mock, patch.object(
+            cli_app.console, "print"
+        ):
+            cli_app._manage_daemon_launch()
+
+        enable_mock.assert_called_once_with(start_now=False)
+
+    def test_manage_daemon_launch_disables_startup_when_requested(self):
+        with patch.object(cli_app, "_is_startup_enabled", return_value=True), patch.object(
+            cli_app, "_setup_select", return_value="remove from startup (not recommended)"
+        ), patch.object(cli_app, "_disable_startup_impl") as disable_mock, patch.object(
+            cli_app.console, "print"
+        ):
+            cli_app._manage_daemon_launch()
+
+        disable_mock.assert_called_once_with()
+
 
 if __name__ == "__main__":
     unittest.main()

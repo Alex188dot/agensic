@@ -9,6 +9,7 @@ if [ ! -f "$INSTALL_DIR/cli.py" ]; then
     FIRST_INSTALL=1
 fi
 mkdir -p "$INSTALL_DIR"
+mkdir -p "$INSTALL_DIR/bin"
 
 # 2. Copy files
 cp requirements.txt "$INSTALL_DIR/"
@@ -23,7 +24,6 @@ rm -rf "$INSTALL_DIR/agensic"
 cp -R agensic "$INSTALL_DIR/"
 
 # 2b. Install local provenance TUI sidecar if already built
-mkdir -p "$INSTALL_DIR/bin"
 LOCAL_TUI_BIN="$PWD/rust/provenance_tui/target/release/agensic-provenance-tui"
 if [ -x "$LOCAL_TUI_BIN" ]; then
     cp "$LOCAL_TUI_BIN" "$INSTALL_DIR/bin/agensic-provenance-tui"
@@ -115,16 +115,28 @@ fi
 # Executable payloads keep owner-only execute bits; everything else becomes 0600.
 chmod -R u=rwX,go= "$INSTALL_DIR"
 
+# 2d. Create a stable PATH launcher for the CLI.
+CLI_LAUNCHER="$INSTALL_DIR/bin/agensic"
+cat > "$CLI_LAUNCHER" <<EOF
+#!/bin/sh
+exec python3 "$INSTALL_DIR/cli.py" "\$@"
+EOF
+chmod 700 "$CLI_LAUNCHER"
+
 # 3. Install Python Dependencies
 echo "📦 Installing Python dependencies..."
 pip3 install -r "$INSTALL_DIR/requirements.txt"
 
-# 4. Create alias for the CLI (idempotent)
-# We add this to rc file so 'agensic' command works
-SHELL_RC="$HOME/.zshrc"
-if [ -f "$HOME/.bashrc" ]; then
-    SHELL_RC="$HOME/.bashrc"
-fi
+# 4. Add Agensic to PATH and source shell integration (idempotent)
+CURRENT_SHELL_NAME="$(basename "${SHELL:-}")"
+case "$CURRENT_SHELL_NAME" in
+    bash)
+        SHELL_RC="$HOME/.bashrc"
+        ;;
+    *)
+        SHELL_RC="$HOME/.zshrc"
+        ;;
+esac
 
 START_MARKER="# >>> agensic >>>"
 END_MARKER="# <<< agensic <<<"
@@ -141,6 +153,7 @@ rm -f "$UNINSTALL_SENTINEL"
 sed -i.bak \
   -e "\|alias ${LEGACY_CLI_NAME}='python3 .*\\.${LEGACY_INSTALL_NAME}/cli\\.py'|d" \
   -e "\|alias agensic='python3 .*\\.agensic/cli\\.py'|d" \
+  -e '\|export PATH=".*\.agensic/bin:\$PATH"|d' \
   -e "\|source .*\\.${LEGACY_INSTALL_NAME}/${LEGACY_INSTALL_NAME}\\.zsh|d" \
   -e "\|source .*\\.agensic/agensic\\.zsh|d" \
   "$SHELL_RC"
@@ -153,15 +166,15 @@ sed -i.bak \
 
 cat >> "$SHELL_RC" <<EOF
 $START_MARKER
-alias agensic='python3 $INSTALL_DIR/cli.py'
-source $INSTALL_DIR/agensic.zsh
+export PATH="$INSTALL_DIR/bin:\$PATH"
+source "$INSTALL_DIR/agensic.zsh"
 $END_MARKER
 EOF
 
 echo ""
 echo "✅ Agensic 🔒 Installation complete!"
 echo "------------------------------------------------"
-echo "1. Restart your terminal."
+echo "1. Open a new terminal, or run: export PATH=\"$INSTALL_DIR/bin:\$PATH\""
 if [ "$FIRST_INSTALL" -eq 1 ]; then
     echo "2. Complete the first-time setup flow."
     echo "3. Start typing commands (e.g. 'git c', 'docker ru')."
@@ -173,19 +186,14 @@ echo "------------------------------------------------"
 
 if [ "$FIRST_INSTALL" -eq 1 ]; then
     echo ""
-    echo "Starting Agensic for first-time setup..."
-    if ! python3 "$INSTALL_DIR/cli.py" start; then
-        echo "⚠️ Agensic start did not complete cleanly."
-    fi
-
     if [ -t 0 ] && [ -t 1 ]; then
-        echo "Opening first-time Agensic setup..."
-        python3 "$INSTALL_DIR/cli.py" setup || {
-            echo "⚠️ First-time setup did not complete."
-            echo "   Run: python3 $INSTALL_DIR/cli.py setup"
+        echo "Opening first-time Agensic onboarding..."
+        python3 "$INSTALL_DIR/cli.py" first-run || {
+            echo "⚠️ First-time onboarding did not complete."
+            echo "   Run: python3 $INSTALL_DIR/cli.py first-run"
         }
     else
-        echo "First-time setup was skipped because this install is not running in an interactive terminal."
-        echo "Run: python3 $INSTALL_DIR/cli.py setup"
+        echo "First-time onboarding was skipped because this install is not running in an interactive terminal."
+        echo "Run: python3 $INSTALL_DIR/cli.py first-run"
     fi
 fi

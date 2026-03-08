@@ -297,7 +297,7 @@ def _render_raw_setup_select(
     terminal_columns = _terminal_columns()
     lines = [_truncate_line(f"? {message}{prompt_suffix}", terminal_columns)]
     for idx, choice in enumerate(choices):
-        prefix = "> " if idx == selected_index else "  "
+        prefix = f"{pointer} " if idx == selected_index else "  "
         lines.append(_truncate_line(f"{prefix}{choice}", terminal_columns))
     visual_line_count = len(lines)
     block = "\n".join(lines)
@@ -1262,7 +1262,7 @@ def _manage_pattern_controls(existing_config: dict):
         _save_config(updated)
         console.print(f"[green]✓ Re-enabled Agensic for '{selected}'.[/green]")
 
-def _configure_provider(existing_config: dict) -> bool:
+def _configure_provider(existing_config: dict, manage_runtime: bool = True) -> bool:
     _print_screen_heading("Choose AI provider")
     config = dict(existing_config or {})
     provider = ""
@@ -1435,24 +1435,10 @@ def _configure_provider(existing_config: dict) -> bool:
                 config["api_key"] = ""
                 config["base_url"] = ""
                 config["model"] = "history-only"
-                config["llm_calls_per_line"] = 0
-                config["llm_budget_unlimited"] = False
 
             _save_config(config)
             console.print("[green]✓ Configuration saved![/green]")
             console.print(f"Provider: {provider}, Model: {model}", style="dim", highlight=False)
-            step = 6
-            continue
-
-        if step == 6:
-            enable_boot = _setup_confirm("Enable start on boot (Recommended)?")
-            if _is_back(enable_boot):
-                step = 5
-                continue
-            if enable_boot:
-                enable_startup()
-            else:
-                start()
             return True
 
 def _ensure_command_store_backend_ready() -> bool:
@@ -1480,6 +1466,66 @@ def _ensure_command_store_backend_ready() -> bool:
 
     console.print(f"[red]Command store unavailable:[/red] {error}")
     return False
+
+
+def _is_startup_enabled() -> bool:
+    return os.path.exists(PLIST_PATH)
+
+
+def _disable_startup_impl() -> None:
+    removed = False
+
+    if os.path.exists(PLIST_PATH):
+        subprocess.run(["launchctl", "unload", PLIST_PATH], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, check=False)
+        if _remove_file_if_exists(PLIST_PATH):
+            removed = True
+
+    if os.path.exists(LEGACY_PLIST_PATH):
+        subprocess.run(["launchctl", "unload", LEGACY_PLIST_PATH], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, check=False)
+        if _remove_file_if_exists(LEGACY_PLIST_PATH):
+            removed = True
+
+    if removed:
+        console.print("[green]✓ Removed daemon from startup.[/green]")
+    else:
+        console.print("[yellow]Daemon is not set to launch at startup.[/yellow]")
+
+
+def _manage_daemon_launch() -> None:
+    _print_screen_heading("Daemon launch")
+    startup_enabled = _is_startup_enabled()
+
+    if startup_enabled:
+        console.print("Daemon is set to launch at startup (recommended).")
+        action = _setup_select(
+            "Choose one:",
+            choices=[
+                "keep as is (recommended)",
+                "remove from startup (not recommended)",
+            ],
+        )
+        if _is_back(action) or not action:
+            return
+        if action.startswith("remove from startup"):
+            _disable_startup_impl()
+        else:
+            console.print("[green]✓ Kept daemon launch at startup.[/green]")
+        return
+
+    console.print("Daemon is not set to launch at startup.")
+    action = _setup_select(
+        "Choose one:",
+        choices=[
+            "launch at startup (recommended)",
+            "keep as is (not recommended)",
+        ],
+    )
+    if _is_back(action) or not action:
+        return
+    if action.startswith("launch at startup"):
+        _enable_startup_impl(start_now=False)
+    else:
+        console.print("[yellow]Daemon startup setting unchanged.[/yellow]")
 
 
 def _configure_llm_budget(existing_config: dict):
@@ -1615,7 +1661,7 @@ def _format_command_store_choice(
     if show_reason:
         reason = str(item.get("reason", "") or "").strip()
         if reason:
-            label.append(("class:text", f" ({reason})"))
+            label.append(("class:potential-wrong-reason", f" ({reason})"))
     return label
 
 def _checkbox_without_invert(
@@ -1631,6 +1677,8 @@ def _checkbox_without_invert(
             Style([("instruction-key", "fg:#ff8c00 bold")]),
             Style([("usage-high", "fg:#22c55e bold")]),
             Style([("usage-low", "fg:#ef4444 bold")]),
+            Style([("potential-wrong-reason", "fg:#fca5a5 bold")]),
+            Style([("separator", "fg:#ff8c00 bold")]),
         ]
     )
     ic = InquirerControl(
@@ -1814,7 +1862,7 @@ def _manage_command_store_remove():
         seen: set[str] = set()
 
         if potential_wrong:
-            choices.append(questionary.Separator("Potential wrong commands"))
+            choices.append(questionary.Separator("\n\n\nPotential wrong commands\n"))
             for item in potential_wrong:
                 if not isinstance(item, dict):
                     continue
@@ -1855,7 +1903,7 @@ def _manage_command_store_remove():
             )
 
         if regular_choices:
-            choices.append(questionary.Separator("Commands"))
+            choices.append(questionary.Separator("\n\nCommands\n"))
             choices.extend(regular_choices)
 
         if not choices:
@@ -2040,6 +2088,10 @@ def _scrub_shell_rc_file(path: Path) -> bool:
         re.compile(r"alias agensic='python3 .*\.agensic/cli\.py'"),
         re.compile(rf"alias {re.escape(LEGACY_CLI_NAME)}='python3 .*\.{re.escape(LEGACY_BRAND)}/cli\.py'"),
     )
+    export_patterns = (
+        re.compile(r'export PATH=".*\.agensic/bin:\$PATH"'),
+        re.compile(rf'export PATH=".*\.{re.escape(LEGACY_BRAND)}/bin:\$PATH"'),
+    )
     source_patterns = (
         re.compile(r"source .*\.agensic/agensic\.zsh"),
         re.compile(rf"source .*\.{re.escape(LEGACY_BRAND)}/{re.escape(LEGACY_BRAND)}\.zsh"),
@@ -2061,7 +2113,7 @@ def _scrub_shell_rc_file(path: Path) -> bool:
             if stripped in block_ends:
                 in_block = False
             continue
-        if any(pattern.search(stripped) for pattern in alias_patterns + source_patterns):
+        if any(pattern.search(stripped) for pattern in alias_patterns + export_patterns + source_patterns):
             changed = True
             continue
         cleaned_lines.append(line)
@@ -2166,9 +2218,10 @@ def setup():
             "Choose one:",
             choices=[
                 "Choose AI provider",
+                "Daemon launch",
                 "Customize LLM budget",
                 "Manage Agensic command patterns",
-                "Manage command store (add/remove commands)",
+                "Add/Remove commands from store",
             ],
         )
         if _is_back(action) or not action:
@@ -2178,6 +2231,9 @@ def setup():
             if completed:
                 return
             continue
+        if action == "Daemon launch":
+            _manage_daemon_launch()
+            continue
         if action == "Customize LLM budget":
             _configure_llm_budget(existing_config)
             continue
@@ -2186,9 +2242,7 @@ def setup():
             continue
         _manage_command_store()
 
-@app.command()
-def enable_startup():
-    """Create a macOS LaunchAgent to start on boot."""
+def _enable_startup_impl(start_now: bool) -> None:
     if sys.platform != "darwin":
         console.print("[red]Start on boot is currently only supported on macOS.[/red]")
         return
@@ -2221,6 +2275,10 @@ def enable_startup():
     with open(PLIST_PATH, "w") as f:
         f.write(plist_content)
 
+    if not start_now:
+        console.print("[green]✔ Start on boot enabled[/green]")
+        return
+
     was_running = is_port_open()
     if was_running:
         console.print("[yellow]Agensic is already running. Restarting under launchd...[/yellow]")
@@ -2242,6 +2300,46 @@ def enable_startup():
 
     console.print(f"[red]✗ Startup failed before readiness:[/red] {error}")
     raise typer.Exit(code=1)
+
+
+@app.command()
+def enable_startup():
+    """Create a macOS LaunchAgent to start on boot."""
+    _enable_startup_impl(start_now=True)
+
+
+def _run_first_install_onboarding() -> bool:
+    ensure_config_dir()
+    _clear_uninstall_sentinel()
+    _rotate_auth_token_or_exit("setup")
+    console.print(
+        Panel.fit("[bold cyan]Agensic Setup[/bold cyan] [bold #ff8c00](Esc = back)[/bold #ff8c00]")
+    )
+
+    while True:
+        existing_config = _load_config()
+        completed = _configure_provider(existing_config, manage_runtime=False)
+        if not completed:
+            return False
+
+        enable_boot = _setup_confirm("Enable start on boot (Recommended)?")
+        if _is_back(enable_boot):
+            continue
+
+        if enable_boot:
+            _enable_startup_impl(start_now=False)
+
+        start()
+        console.print("[bold green]Open a new terminal window and start using agensic[/bold green]")
+        return True
+
+
+@app.command("first-run")
+def first_run():
+    """Run the first-install onboarding flow."""
+    completed = _run_first_install_onboarding()
+    if not completed:
+        raise typer.Exit(code=1)
 
 @app.command()
 def start():
