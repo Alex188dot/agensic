@@ -2072,7 +2072,7 @@ def _clear_uninstall_sentinel() -> None:
 
 
 def _shell_rc_paths() -> list[Path]:
-    return [Path.home() / ".zshrc", Path.home() / ".bashrc"]
+    return [Path.home() / ".zprofile", Path.home() / ".zshrc", Path.home() / ".bashrc"]
 
 
 def _scrub_shell_rc_file(path: Path) -> bool:

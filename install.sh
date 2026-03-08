@@ -128,18 +128,13 @@ echo "📦 Installing Python dependencies..."
 pip3 install -r "$INSTALL_DIR/requirements.txt"
 
 # 4. Add Agensic to PATH and source shell integration (idempotent)
-CURRENT_SHELL_NAME="$(basename "${SHELL:-}")"
-case "$CURRENT_SHELL_NAME" in
-    bash)
-        SHELL_RC="$HOME/.bashrc"
-        ;;
-    *)
-        SHELL_RC="$HOME/.zshrc"
-        ;;
-esac
+SHELL_RC="$HOME/.zshrc"
+SHELL_PROFILE="$HOME/.zprofile"
 
-START_MARKER="# >>> agensic >>>"
-END_MARKER="# <<< agensic <<<"
+PATH_START_MARKER="# >>> agensic path >>>"
+PATH_END_MARKER="# <<< agensic path <<<"
+RC_START_MARKER="# >>> agensic >>>"
+RC_END_MARKER="# <<< agensic <<<"
 LEGACY_INSTALL_NAME="ghost""shell"
 LEGACY_CLI_NAME="ai""terminal"
 LEGACY_START_MARKER="# >>> ${LEGACY_INSTALL_NAME} >>>"
@@ -147,6 +142,7 @@ LEGACY_END_MARKER="# <<< ${LEGACY_INSTALL_NAME} <<<"
 UNINSTALL_SENTINEL="${TMPDIR:-/tmp}/agensic-shell-uninstalled-$(id -u)"
 
 touch "$SHELL_RC"
+touch "$SHELL_PROFILE"
 rm -f "$UNINSTALL_SENTINEL"
 
 # Remove old unmanaged lines from previous installs.
@@ -158,17 +154,32 @@ sed -i.bak \
   -e "\|source .*\\.agensic/agensic\\.zsh|d" \
   "$SHELL_RC"
 
-# Remove previous managed block if present.
+# Keep PATH management out of .zshrc; scrub legacy PATH lines there too.
 sed -i.bak \
   -e "/$LEGACY_START_MARKER/,/$LEGACY_END_MARKER/d" \
-  -e "/$START_MARKER/,/$END_MARKER/d" \
+  -e "/$PATH_START_MARKER/,/$PATH_END_MARKER/d" \
+  -e "/$RC_START_MARKER/,/$RC_END_MARKER/d" \
   "$SHELL_RC"
 
+sed -i.bak \
+  -e "\|alias ${LEGACY_CLI_NAME}='python3 .*\\.${LEGACY_INSTALL_NAME}/cli\\.py'|d" \
+  -e "\|alias agensic='python3 .*\\.agensic/cli\\.py'|d" \
+  -e '\|export PATH=".*\.agensic/bin:\$PATH"|d' \
+  -e "/$LEGACY_START_MARKER/,/$LEGACY_END_MARKER/d" \
+  -e "/$PATH_START_MARKER/,/$PATH_END_MARKER/d" \
+  -e "/$RC_START_MARKER/,/$RC_END_MARKER/d" \
+  "$SHELL_PROFILE"
+
+cat >> "$SHELL_PROFILE" <<EOF
+$PATH_START_MARKER
+export PATH="$HOME/.agensic/bin:$PATH"
+$PATH_END_MARKER
+EOF
+
 cat >> "$SHELL_RC" <<EOF
-$START_MARKER
-export PATH="$INSTALL_DIR/bin:\$PATH"
+$RC_START_MARKER
 source "$INSTALL_DIR/agensic.zsh"
-$END_MARKER
+$RC_END_MARKER
 EOF
 
 echo ""
