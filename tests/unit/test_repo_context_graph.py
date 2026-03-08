@@ -180,7 +180,7 @@ class RepoContextGraphTests(unittest.TestCase):
             label_set = {str(v or "").strip() for v in (labels or [])}
             if "HUMAN_TYPED" in label_set:
                 out["agensic provenance --tui"] = 6
-            if label_set.intersection({"AI_SUGGESTED_HUMAN_RAN", "GS_SUGGESTED_HUMAN_RAN", "AI_EXECUTED"}):
+            if label_set.intersection({"AI_SUGGESTED_HUMAN_RAN", "AG_SUGGESTED_HUMAN_RAN", "AI_EXECUTED"}):
                 out["agensic setup"] = 3
             return out
 

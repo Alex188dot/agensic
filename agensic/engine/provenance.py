@@ -35,7 +35,7 @@ _BASE_LABEL_CONFIDENCE = {
     "AI_EXECUTED": 0.99,
     "HUMAN_TYPED": 0.93,
     "AI_SUGGESTED_HUMAN_RAN": 0.88,
-    "GS_SUGGESTED_HUMAN_RAN": 0.86,
+    "AG_SUGGESTED_HUMAN_RAN": 0.86,
     "UNKNOWN": 0.35,
 }
 
@@ -416,10 +416,10 @@ def classify_command_run(command: str, payload: dict[str, Any]) -> dict[str, Any
         label = "AI_SUGGESTED_HUMAN_RAN"
         confidence = _BASE_LABEL_CONFIDENCE["AI_SUGGESTED_HUMAN_RAN"]
         evidence.append("accept_origin=ai")
-    elif accept_origin == "gs" and not manual_after_accept:
-        label = "GS_SUGGESTED_HUMAN_RAN"
-        confidence = _BASE_LABEL_CONFIDENCE["GS_SUGGESTED_HUMAN_RAN"]
-        evidence.append("accept_origin=gs")
+    elif accept_origin == "ag" and not manual_after_accept:
+        label = "AG_SUGGESTED_HUMAN_RAN"
+        confidence = _BASE_LABEL_CONFIDENCE["AG_SUGGESTED_HUMAN_RAN"]
+        evidence.append(f"accept_origin={accept_origin}")
     else:
         if manual_after_accept:
             evidence.append("manual_edit_after_accept=true")

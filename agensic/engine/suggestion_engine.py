@@ -1631,7 +1631,11 @@ class SuggestionEngine:
             )
             return
 
-        payload = dict(provenance_payload or {})
+        payload = {
+            str(key): value
+            for key, value in dict(provenance_payload or {}).items()
+            if str(key) not in {"captured_stdout_tail", "captured_stderr_tail", "captured_output_truncated"}
+        }
         classification_label = "UNKNOWN"
         classification: dict | None = None
         try:

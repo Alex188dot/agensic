@@ -88,7 +88,7 @@ class CliAiExecTests(unittest.TestCase):
         self.assertEqual(payload["provenance_ai_model"], "gpt-5.3")
         self.assertGreaterEqual(int(payload.get("duration_ms", -1) or -1), 0)
 
-    def test_ai_exec_captures_output_for_nonzero_exit(self):
+    def test_ai_exec_logs_metadata_only_for_nonzero_exit(self):
         with patch("agensic.cli.app.sign_proof_payload", return_value="sig"), patch(
             "agensic.cli.app.build_local_proof_metadata",
             return_value={
@@ -117,8 +117,8 @@ class CliAiExecTests(unittest.TestCase):
 
         self.assertEqual(result.exit_code, 9)
         payload = mock_request.call_args.kwargs["json"]
-        self.assertEqual(payload.get("captured_stderr_tail"), "err-line\n")
         self.assertNotIn("captured_stdout_tail", payload)
+        self.assertNotIn("captured_stderr_tail", payload)
         self.assertNotIn("captured_output_truncated", payload)
 
     def test_ai_exec_does_not_store_output_for_zero_exit(self):

@@ -49,9 +49,6 @@ def log_command(data: LogCommandPayload, background_tasks: BackgroundTasks) -> L
             return {"status": "ignored", "reason": "disabled_pattern"}
 
         provenance_payload = {
-            "captured_stdout_tail": data.captured_stdout_tail,
-            "captured_stderr_tail": data.captured_stderr_tail,
-            "captured_output_truncated": data.captured_output_truncated,
             "shell_pid": data.shell_pid,
             "provenance_last_action": data.provenance_last_action,
             "provenance_accept_origin": data.provenance_accept_origin,

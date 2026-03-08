@@ -129,10 +129,10 @@ class AgensicSessionShellTests(unittest.TestCase):
         lines = [line.strip() for line in result.stdout.splitlines() if line.strip()]
         self.assertIn("human_paste|", lines)
 
-    def test_preexec_preserves_gs_accept_pending_state(self):
+    def test_preexec_preserves_ag_accept_pending_state(self):
         result = self._run_zsh(
             """
-            _agensic_set_suggestion_accept_state "gs" "suffix_append" "normal" "" "" ""
+            _agensic_set_suggestion_accept_state "ag" "suffix_append" "normal" "" "" ""
             _agensic_snapshot_pending_execution
             _agensic_reset_provenance_line_state
             _agensic_preexec_hook "echo hi"
@@ -141,7 +141,7 @@ class AgensicSessionShellTests(unittest.TestCase):
         )
         self.assertEqual(result.returncode, 0, msg=result.stderr)
         lines = [line.strip() for line in result.stdout.splitlines() if line.strip()]
-        self.assertIn("suggestion_accept|gs", lines)
+        self.assertIn("suggestion_accept|ag", lines)
 
     def test_preexec_refreshes_proof_without_clobbering_pending_action(self):
         result = self._run_zsh(
@@ -173,7 +173,7 @@ class AgensicSessionShellTests(unittest.TestCase):
         self.assertIn("first\nsecond\n\n- bullet", result.stdout)
         self.assertNotIn("first\\nsecond", result.stdout)
 
-    def test_build_log_command_json_includes_captured_output_tails(self):
+    def test_build_log_command_json_omits_captured_output_fields(self):
         result = self._run_zsh(
             """
             stdout_path="$(mktemp "${HOME}/stdout.XXXXXX")"
@@ -186,8 +186,9 @@ class AgensicSessionShellTests(unittest.TestCase):
             """
         )
         self.assertEqual(result.returncode, 0, msg=result.stderr)
-        self.assertIn('"captured_stderr_tail":"hello stderr"', result.stdout)
         self.assertNotIn('"captured_stdout_tail"', result.stdout)
+        self.assertNotIn('"captured_stderr_tail"', result.stdout)
+        self.assertNotIn('"captured_output_truncated"', result.stdout)
         self.assertIn('"duration_ms":86400000', result.stdout)
 
     def test_build_log_command_json_omits_output_for_zero_exit(self):
@@ -265,6 +266,7 @@ class AgensicSessionShellTests(unittest.TestCase):
         result = self._run_zsh(
             """
             AGENSIC_FORCE_RUNTIME_OUTPUT_CAPTURE=1
+            _agensic_should_capture_runtime_output "agensic setup"; print -r -- "agensic_alias=$?"
             _agensic_should_capture_runtime_output "python3 $AGENSIC_HOME/cli.py setup"; print -r -- "home_cli=$?"
             _agensic_should_capture_runtime_output "python3 $AGENSIC_SOURCE_DIR/cli.py setup"; print -r -- "source_cli=$?"
             _agensic_should_capture_runtime_output "python3 /tmp/other.py"; print -r -- "other_py=$?"
@@ -272,6 +274,7 @@ class AgensicSessionShellTests(unittest.TestCase):
         )
         self.assertEqual(result.returncode, 0, msg=result.stderr)
         lines = [line.strip() for line in result.stdout.splitlines() if line.strip()]
+        self.assertIn("agensic_alias=1", lines)
         self.assertIn("home_cli=1", lines)
         self.assertIn("source_cli=1", lines)
         self.assertIn("other_py=0", lines)

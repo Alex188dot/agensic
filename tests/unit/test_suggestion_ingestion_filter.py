@@ -115,7 +115,7 @@ class SuggestionIngestionFilterTests(unittest.TestCase):
         engine.state_store.record_command_provenance.assert_called_once()
         kwargs = engine.state_store.record_command_provenance.call_args.kwargs
         self.assertEqual(kwargs.get("exit_code"), 9)
-        self.assertEqual(kwargs.get("payload", {}).get("captured_stderr_tail"), "boom\n")
+        self.assertNotIn("captured_stderr_tail", kwargs.get("payload", {}))
 
 
 if __name__ == "__main__":

@@ -114,10 +114,10 @@ class ProvenanceClassifierTests(unittest.TestCase):
         self.assertEqual(out["raw_model"], "gpt-5.3")
         self.assertEqual(out["normalized_model"], "gpt-5-codex")
 
-    def test_gs_suggested_human_ran(self):
+    def test_ag_suggested_human_ran(self):
         payload = {
             "provenance_last_action": "suggestion_accept",
-            "provenance_accept_origin": "gs",
+            "provenance_accept_origin": "ag",
             "provenance_manual_edit_after_accept": False,
         }
         with patch(
@@ -125,7 +125,7 @@ class ProvenanceClassifierTests(unittest.TestCase):
             return_value={"lineage": [], "hints": []},
         ):
             out = classify_command_run("docker ps", payload)
-        self.assertEqual(out["label"], "GS_SUGGESTED_HUMAN_RAN")
+        self.assertEqual(out["label"], "AG_SUGGESTED_HUMAN_RAN")
 
     def test_unknown_when_manual_edit_after_accept_without_human_last_action(self):
         payload = {

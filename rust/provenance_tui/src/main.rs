@@ -373,7 +373,7 @@ impl App {
         match label {
             "HUMAN_TYPED" => Style::default().fg(Color::Green),
             "AI_EXECUTED" => Style::default().fg(Color::Rgb(0, 191, 255)),
-            "GS_SUGGESTED_HUMAN_RAN" => Style::default().fg(Color::Cyan),
+            "AG_SUGGESTED_HUMAN_RAN" => Style::default().fg(Color::Cyan),
             "AI_SUGGESTED_HUMAN_RAN" => Style::default().fg(Color::Rgb(125, 249, 255)),
             "UNKNOWN" => Style::default().fg(Color::Rgb(211, 211, 211)),
             _ => Style::default().fg(Color::Rgb(211, 211, 211)),
@@ -390,20 +390,6 @@ impl App {
 
     fn header_style() -> Style {
         Style::default().fg(Color::Cyan).add_modifier(Modifier::BOLD)
-    }
-
-    fn stderr_of<'a>(row: &'a RunEntry) -> &'a str {
-        row.payload
-            .get("captured_stderr_tail")
-            .and_then(Value::as_str)
-            .unwrap_or("")
-    }
-
-    fn output_truncated(row: &RunEntry) -> bool {
-        row.payload
-            .get("captured_output_truncated")
-            .and_then(Value::as_bool)
-            .unwrap_or(false)
     }
 
     fn search_hit(row: &RunEntry, query: &str) -> bool {
@@ -1536,8 +1522,6 @@ fn draw_ui(terminal: &mut Terminal<CrosstermBackend<Stdout>>, app: &App) -> io::
             let popup = centered_rect(90, 80, area);
             if let Some(global_idx) = app.selected_global_index() {
                 if let Some(row) = app.view_rows.get(global_idx) {
-                    let stderr_tail = App::stderr_of(row);
-                    let captured_output_truncated = App::output_truncated(row);
                     let payload_without_output = match &row.payload {
                         Value::Object(map) => {
                             let mut filtered = map.clone();
@@ -1581,17 +1565,6 @@ fn draw_ui(terminal: &mut Terminal<CrosstermBackend<Stdout>>, app: &App) -> io::
                         Line::from("command:"),
                         Line::from(Span::styled(row.command.clone(), App::command_style())),
                     ];
-                    let show_stderr = row.exit_code.unwrap_or(0) != 0 && !stderr_tail.is_empty();
-                    if show_stderr {
-                        details.push(Line::from(""));
-                        if captured_output_truncated {
-                            details.push(Line::from("captured output: tail only (truncated)"));
-                        }
-                        if show_stderr {
-                            details.push(Line::from("stderr:"));
-                            push_text_block(&mut details, stderr_tail);
-                        }
-                    }
                     details.push(Line::from(""));
                     details.push(Line::from("payload:"));
                     push_text_block(&mut details, &payload_summary);
@@ -1911,8 +1884,6 @@ fn export_rows(rows: &[RunEntry], export_format: &str, out_path: &str) -> Result
             "shell_pid",
             "evidence",
             "payload",
-            "stderr",
-            "output_truncated",
         ])
         .map_err(|e| format!("write csv header failed: {}", e))?;
 
@@ -1950,8 +1921,6 @@ fn export_rows(rows: &[RunEntry], export_format: &str, out_path: &str) -> Result
                 row.shell_pid.map(|v| v.to_string()).unwrap_or_default(),
                 evidence_json,
                 payload_json,
-                App::stderr_of(row).to_string(),
-                App::output_truncated(row).to_string(),
             ])
             .map_err(|e| format!("write csv row failed: {}", e))?;
     }
@@ -1971,11 +1940,6 @@ fn export_row_json_value(row: &RunEntry) -> Result<Value, String> {
         map.insert(
             "duration".to_string(),
             Value::String(App::format_duration(row.duration_ms)),
-        );
-        map.insert("stderr".to_string(), Value::String(App::stderr_of(row).to_string()));
-        map.insert(
-            "output_truncated".to_string(),
-            Value::Bool(App::output_truncated(row)),
         );
     }
     Ok(value)
@@ -2260,7 +2224,7 @@ mod tests {
         assert_eq!(page.rows[2].run_id, "run-1");
     }
 
-    fn sample_run_entry(stderr: &str, truncated: bool) -> RunEntry {
+    fn sample_run_entry() -> RunEntry {
         RunEntry {
             run_id: "run-1".to_string(),
             ts: 1,
@@ -2285,9 +2249,7 @@ mod tests {
             shell_pid: Some(123),
             evidence: vec!["sig:ok".to_string(), "host:ok".to_string()],
             payload: json!({
-                "example": "value",
-                "captured_stderr_tail": stderr,
-                "captured_output_truncated": truncated
+                "example": "value"
             }),
         }
     }
@@ -2301,9 +2263,9 @@ mod tests {
     }
 
     #[test]
-    fn export_json_includes_stderr_and_truncation_fields() {
+    fn export_json_omits_stderr_and_truncation_fields() {
         let out = temp_export_path("json");
-        let rows = vec![sample_run_entry("fatal: bad revision\n", true)];
+        let rows = vec![sample_run_entry()];
 
         export_rows(&rows, "json", out.to_str().expect("valid temp path")).expect("json export");
 
@@ -2313,8 +2275,8 @@ mod tests {
         assert_eq!(payload["runs"][0]["actor"], "Codex");
         assert_eq!(payload["runs"][0]["exit"], "1");
         assert_eq!(payload["runs"][0]["duration"], "42ms");
-        assert_eq!(payload["runs"][0]["stderr"], "fatal: bad revision\n");
-        assert_eq!(payload["runs"][0]["output_truncated"], true);
+        assert!(payload["runs"][0].get("stderr").is_none());
+        assert!(payload["runs"][0].get("output_truncated").is_none());
         assert_eq!(payload["runs"][0]["raw_model"], "gpt-5-raw");
         assert_eq!(payload["runs"][0]["payload"]["example"], "value");
         assert_eq!(payload["runs"][0]["evidence"][0], "sig:ok");
@@ -2323,9 +2285,9 @@ mod tests {
     }
 
     #[test]
-    fn export_csv_includes_stderr_and_truncation_columns() {
+    fn export_csv_omits_stderr_and_truncation_columns() {
         let out = temp_export_path("csv");
-        let rows = vec![sample_run_entry("fatal: bad revision\n", true)];
+        let rows = vec![sample_run_entry()];
 
         export_rows(&rows, "csv", out.to_str().expect("valid temp path")).expect("csv export");
 
@@ -2361,8 +2323,6 @@ mod tests {
                 "shell_pid",
                 "evidence",
                 "payload",
-                "stderr",
-                "output_truncated",
             ]
         );
         let record = reader
@@ -2378,8 +2338,6 @@ mod tests {
         let payload: Value = serde_json::from_str(record.get(26).expect("payload field")).expect("parse payload");
         assert_eq!(evidence[0], "sig:ok");
         assert_eq!(payload["example"], "value");
-        assert_eq!(record.get(27), Some("fatal: bad revision\n"));
-        assert_eq!(record.get(28), Some("true"));
 
         let _ = fs::remove_file(out);
     }

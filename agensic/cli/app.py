@@ -16,7 +16,6 @@ import questionary
 import socket
 import signal
 import shlex
-import threading
 import uuid
 import re
 import select
@@ -148,7 +147,6 @@ DEFAULT_TUI_MANIFEST_URL = (
 DEFAULT_SIGNING_AGENT = "unknown"
 DEFAULT_SIGNING_MODEL = "unknown-model"
 MAX_COMMAND_DURATION_MS = 86_400_000
-AI_EXEC_CAPTURE_LIMIT_BYTES = 16 * 1024
 DAEMON_BASE_URL = "http://127.0.0.1:22000"
 _DAEMON_AUTH_CACHE = AuthTokenCache()
 SHELL_RC_BLOCK_START = "# >>> agensic >>>"
@@ -157,91 +155,10 @@ LEGACY_SHELL_RC_BLOCK_START = f"# >>> {LEGACY_BRAND} >>>"
 LEGACY_SHELL_RC_BLOCK_END = f"# <<< {LEGACY_BRAND} <<<"
 
 
-class _TailCaptureBuffer:
-    def __init__(self, limit_bytes: int) -> None:
-        self.limit_bytes = max(0, int(limit_bytes))
-        self._chunks: list[bytes] = []
-        self._size = 0
-        self.truncated = False
-
-    def append(self, chunk: bytes) -> None:
-        if not chunk:
-            return
-        if self.limit_bytes <= 0:
-            self.truncated = True
-            return
-        self._chunks.append(chunk)
-        self._size += len(chunk)
-        while self._size > self.limit_bytes and self._chunks:
-            overflow = self._size - self.limit_bytes
-            head = self._chunks[0]
-            if len(head) <= overflow:
-                self._chunks.pop(0)
-                self._size -= len(head)
-            else:
-                self._chunks[0] = head[overflow:]
-                self._size -= overflow
-            self.truncated = True
-
-    def text(self) -> str:
-        if not self._chunks:
-            return ""
-        return b"".join(self._chunks).decode("utf-8", errors="replace")
-
-
-def _write_stream_chunk(target: Any, chunk: bytes) -> None:
-    if not chunk:
-        return
-    buffer = getattr(target, "buffer", None)
-    if buffer is not None:
-        buffer.write(chunk)
-        buffer.flush()
-        return
-    target.write(chunk.decode("utf-8", errors="replace"))
-    target.flush()
-
-
-def _run_command_with_live_capture(
-    args: list[str],
-    capture_limit_bytes: int = AI_EXEC_CAPTURE_LIMIT_BYTES,
-) -> tuple[int, str, str, bool, bool]:
-    process = subprocess.Popen(
-        args,
-        stdin=None,
-        stdout=subprocess.PIPE,
-        stderr=subprocess.PIPE,
-    )
-    stdout_buffer = _TailCaptureBuffer(capture_limit_bytes)
-    stderr_buffer = _TailCaptureBuffer(capture_limit_bytes)
-
-    def pump(stream: Any, target: Any, tail: _TailCaptureBuffer) -> None:
-        if stream is None:
-            return
-        try:
-            while True:
-                chunk = stream.read(4096)
-                if not chunk:
-                    break
-                _write_stream_chunk(target, chunk)
-                tail.append(chunk)
-        finally:
-            stream.close()
-
-    stdout_thread = threading.Thread(
-        target=pump,
-        args=(process.stdout, sys.stdout, stdout_buffer),
-        daemon=True,
-    )
-    stderr_thread = threading.Thread(
-        target=pump,
-        args=(process.stderr, sys.stderr, stderr_buffer),
-        daemon=True,
-    )
-    stdout_thread.start()
-    stderr_thread.start()
-
+def _run_command_passthrough(args: list[str]) -> int:
+    process = subprocess.Popen(args)
     try:
-        return_code = int(process.wait() or 0)
+        return int(process.wait() or 0)
     except KeyboardInterrupt:
         try:
             process.wait(timeout=0.2)
@@ -252,18 +169,7 @@ def _run_command_with_live_capture(
             except subprocess.TimeoutExpired:
                 process.kill()
                 process.wait()
-        return_code = int(process.returncode or 130)
-    finally:
-        stdout_thread.join(timeout=1)
-        stderr_thread.join(timeout=1)
-
-    return (
-        return_code,
-        stdout_buffer.text(),
-        stderr_buffer.text(),
-        stdout_buffer.truncated,
-        stderr_buffer.truncated,
-    )
+        return int(process.returncode or 130)
 
 class _BackSignal:
     pass
@@ -2331,7 +2237,7 @@ def enable_startup():
     ready, indexed, error = _wait_for_bootstrap_ready()
     if ready:
         console.print("[green]✔ Command index ready[/green]")
-        console.print("[bold green]✔ Agensic started and set to start automatically![/bold green]")
+        console.print("[bold green]✔ Agensic started and set to start automatically! Open a new terminal to use it![/bold green]")
         return
 
     console.print(f"[red]✗ Startup failed before readiness:[/red] {error}")
@@ -3022,18 +2928,8 @@ def ai_exec(
     command_text = shlex.join(args)
     started = time.perf_counter()
     duration_ms = None
-    captured_stdout_tail = ""
-    captured_stderr_tail = ""
-    captured_stdout_truncated = False
-    captured_stderr_truncated = False
     try:
-        (
-            exit_code,
-            captured_stdout_tail,
-            captured_stderr_tail,
-            captured_stdout_truncated,
-            captured_stderr_truncated,
-        ) = _run_command_with_live_capture(args)
+        exit_code = _run_command_passthrough(args)
         duration_ms = min(MAX_COMMAND_DURATION_MS, max(0, int((time.perf_counter() - started) * 1000.0)))
     except KeyboardInterrupt:
         exit_code = 130
@@ -3071,11 +2967,6 @@ def ai_exec(
         "proof_key_fingerprint": str(proof_metadata.get("proof_key_fingerprint", "") or ""),
         "proof_host_fingerprint": str(proof_metadata.get("proof_host_fingerprint", "") or ""),
     }
-    if exit_code != 0 and captured_stderr_tail:
-        payload["captured_stderr_tail"] = captured_stderr_tail
-    if exit_code != 0 and captured_stderr_truncated:
-        payload["captured_output_truncated"] = True
-
     try:
         response = _daemon_request(
             "POST",

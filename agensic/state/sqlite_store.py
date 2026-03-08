@@ -11,6 +11,11 @@ from .snapshot import SnapshotManager
 from agensic.utils import enforce_private_file, ensure_private_dir
 
 MAX_COMMAND_DURATION_MS = 86_400_000
+OUTPUT_CAPTURE_PAYLOAD_KEYS = {
+    "captured_stdout_tail",
+    "captured_stderr_tail",
+    "captured_output_truncated",
+}
 
 
 def _clamp_duration_ms(value: object) -> Optional[int]:
@@ -143,6 +148,7 @@ class SQLiteStateStore:
                 """
             )
             self._ensure_command_runs_columns(conn)
+            self._scrub_command_run_payload_output_fields(conn)
             conn.commit()
             self._harden_sqlite_artifacts()
 
@@ -168,6 +174,39 @@ class SQLiteStateStore:
                 continue
             conn.execute(f"ALTER TABLE command_runs ADD COLUMN {name} {ddl}")
             existing.add(name)
+
+    @staticmethod
+    def _sanitize_command_run_payload(payload: object) -> Dict[str, object]:
+        if not isinstance(payload, dict):
+            return {}
+        return {
+            str(key): value
+            for key, value in payload.items()
+            if str(key) not in OUTPUT_CAPTURE_PAYLOAD_KEYS
+        }
+
+    def _scrub_command_run_payload_output_fields(self, conn: sqlite3.Connection) -> None:
+        rows = conn.execute(
+            """
+            SELECT run_id, payload_json
+            FROM command_runs
+            WHERE payload_json LIKE '%captured_stdout_tail%'
+               OR payload_json LIKE '%captured_stderr_tail%'
+               OR payload_json LIKE '%captured_output_truncated%'
+            """
+        ).fetchall()
+        for row in rows:
+            try:
+                payload = json.loads(str(row["payload_json"] or "{}"))
+            except Exception:
+                payload = {}
+            cleaned = self._sanitize_command_run_payload(payload)
+            if cleaned == payload:
+                continue
+            conn.execute(
+                "UPDATE command_runs SET payload_json = ? WHERE run_id = ?",
+                (self._json_dumps(cleaned, "{}"), str(row["run_id"] or "")),
+            )
 
     def integrity_check(self) -> Tuple[bool, str]:
         try:
@@ -642,7 +681,7 @@ class SQLiteStateStore:
             "duration_ms": _clamp_duration_ms(duration_ms),
             "shell_pid": (int(shell_pid) if shell_pid is not None else None),
             "evidence": list(evidence or []),
-            "payload": dict(payload or {}),
+            "payload": self._sanitize_command_run_payload(dict(payload or {})),
             "ts": now_ts,
         }
         return self.apply_event(event, append_to_journal=True)
@@ -910,8 +949,7 @@ class SQLiteStateStore:
             payload = json.loads(payload_raw)
         except Exception:
             payload = {}
-        if not isinstance(payload, dict):
-            payload = {}
+        payload = SQLiteStateStore._sanitize_command_run_payload(payload)
         return {
             "run_id": str(row["run_id"] or ""),
             "ts": int(row["ts"] or 0),

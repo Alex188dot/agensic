@@ -2600,7 +2600,7 @@ class CommandVectorDB:
                     raw_assist_counts = self.state_store.get_command_run_counts(
                         full_commands,
                         since_ts=manual_window_since,
-                        labels=["AI_SUGGESTED_HUMAN_RAN", "GS_SUGGESTED_HUMAN_RAN", "AI_EXECUTED"],
+                        labels=["AI_SUGGESTED_HUMAN_RAN", "AG_SUGGESTED_HUMAN_RAN", "AI_EXECUTED"],
                     )
                     if isinstance(raw_assist_counts, dict):
                         assist_counts_by_command = raw_assist_counts

@@ -493,9 +493,17 @@ _agensic_disable_mouse_reporting() {
 
 _agensic_is_self_cli_command() {
     local command="$1"
+    local exe=""
     local -a tokens
     local token=""
     local normalized=""
+
+    exe="$(_agensic_extract_executable_token "$command")"
+    case "$exe" in
+        agensic)
+            return 0
+            ;;
+    esac
 
     tokens=(${(z)command})
     if (( ${#tokens[@]} == 0 )); then
@@ -2045,8 +2053,6 @@ _agensic_build_log_command_json() {
     local exit_code="$2"
     local source="${3:-runtime}"
     local duration_ms="${4:-}"
-    local stdout_capture_path="${5:-}"
-    local stderr_capture_path="${6:-}"
     local log_cwd="$PWD"
     local log_shell_pid="$$"
     local log_last_action="$AGENSIC_PENDING_LAST_ACTION"
@@ -2098,9 +2104,6 @@ _agensic_build_log_command_json() {
     AGENSIC_LOG_PROOF_SIGNER_SCOPE="$log_proof_signer_scope" \
     AGENSIC_LOG_PROOF_KEY_FINGERPRINT="$log_proof_key_fingerprint" \
     AGENSIC_LOG_PROOF_HOST_FINGERPRINT="$log_proof_host_fingerprint" \
-    AGENSIC_LOG_STDOUT_CAPTURE_PATH="$stdout_capture_path" \
-    AGENSIC_LOG_STDERR_CAPTURE_PATH="$stderr_capture_path" \
-    AGENSIC_LOG_CAPTURE_LIMIT_BYTES="16384" \
     python3 - <<'PY' 2>/dev/null
 import json
 import os
@@ -2113,21 +2116,6 @@ def as_int(value, default=None):
     except (TypeError, ValueError):
         return default
 
-def read_tail(path, limit):
-    clean = str(path or "").strip()
-    if not clean or limit <= 0:
-        return ("", False)
-    try:
-        with open(clean, "rb") as handle:
-            handle.seek(0, os.SEEK_END)
-            size = handle.tell()
-            start = max(0, size - limit)
-            handle.seek(start, os.SEEK_SET)
-            data = handle.read()
-        return (data.decode("utf-8", errors="replace"), size > limit)
-    except OSError:
-        return ("", False)
-
 command = str(os.environ.get("AGENSIC_LOG_COMMAND", "") or "")
 exit_code = as_int(os.environ.get("AGENSIC_LOG_EXIT", None), None)
 duration_ms = as_int(os.environ.get("AGENSIC_LOG_DURATION_MS", None), None)
@@ -2136,15 +2124,6 @@ if duration_ms is not None:
 manual_after_accept = str(
     os.environ.get("AGENSIC_LOG_MANUAL_AFTER_ACCEPT", "0") or "0"
 ).strip() in {"1", "true", "True"}
-capture_limit = as_int(os.environ.get("AGENSIC_LOG_CAPTURE_LIMIT_BYTES", None), 16384) or 16384
-stdout_tail, stdout_truncated = read_tail(
-    os.environ.get("AGENSIC_LOG_STDOUT_CAPTURE_PATH", ""),
-    capture_limit,
-)
-stderr_tail, stderr_truncated = read_tail(
-    os.environ.get("AGENSIC_LOG_STDERR_CAPTURE_PATH", ""),
-    capture_limit,
-)
 
 payload = {
     "command": command,
@@ -2175,11 +2154,6 @@ payload = {
     "proof_key_fingerprint": str(os.environ.get("AGENSIC_LOG_PROOF_KEY_FINGERPRINT", "") or ""),
     "proof_host_fingerprint": str(os.environ.get("AGENSIC_LOG_PROOF_HOST_FINGERPRINT", "") or ""),
 }
-if exit_code != 0:
-    if stderr_tail:
-        payload["captured_stderr_tail"] = stderr_tail
-    if stderr_truncated:
-        payload["captured_output_truncated"] = True
 print(json.dumps(payload, separators=(",", ":")))
 PY
 }
@@ -2189,11 +2163,8 @@ _agensic_log_command() {
     local exit_code="$2"
     local source="${3:-runtime}"
     local duration_ms="${4:-}"
-    local stdout_capture_path="${5:-}"
-    local stderr_capture_path="${6:-}"
-
     local json_data
-    json_data="$(_agensic_build_log_command_json "$command" "$exit_code" "$source" "$duration_ms" "$stdout_capture_path" "$stderr_capture_path")"
+    json_data="$(_agensic_build_log_command_json "$command" "$exit_code" "$source" "$duration_ms")"
     if [[ -z "$json_data" ]]; then
         return
     fi
@@ -2362,7 +2333,6 @@ _agensic_preexec_hook() {
     fi
     AGENSIC_LAST_EXECUTED_CMD="$1"
     AGENSIC_LAST_EXECUTED_STARTED_AT_MS="$(_agensic_now_epoch_ms)"
-    _agensic_begin_runtime_capture "$1"
 }
 
 _agensic_precmd_hook() {
@@ -2373,21 +2343,14 @@ _agensic_precmd_hook() {
     _agensic_disable_mouse_reporting
     local cmd="$AGENSIC_LAST_EXECUTED_CMD"
     local started_at_ms="$AGENSIC_LAST_EXECUTED_STARTED_AT_MS"
-    local stdout_capture_path="$AGENSIC_RUNTIME_CAPTURE_STDOUT_PATH"
-    local stderr_capture_path="$AGENSIC_RUNTIME_CAPTURE_STDERR_PATH"
     local finished_at_ms=""
     local duration_ms=""
     AGENSIC_LAST_EXECUTED_CMD=""
     AGENSIC_LAST_EXECUTED_STARTED_AT_MS=0
-    AGENSIC_RUNTIME_CAPTURE_STDOUT_PATH=""
-    AGENSIC_RUNTIME_CAPTURE_STDERR_PATH=""
-    _agensic_end_runtime_capture
-    _agensic_wait_for_runtime_capture_flush "$stdout_capture_path" "$stderr_capture_path"
     _agensic_ensure_ai_session_timer
     _agensic_reload_disabled_patterns_if_needed
 
     if [[ -z "$cmd" ]]; then
-        _agensic_cleanup_runtime_capture_paths "$stdout_capture_path" "$stderr_capture_path"
         return
     fi
 
@@ -2404,20 +2367,17 @@ _agensic_precmd_hook() {
     fi
 
     if _agensic_is_blocked_runtime_command "$cmd"; then
-        _agensic_cleanup_runtime_capture_paths "$stdout_capture_path" "$stderr_capture_path"
         _agensic_clear_pending_execution
         _agensic_reset_provenance_line_state
         return
     fi
     if _agensic_matches_disabled_pattern "$cmd"; then
-        _agensic_cleanup_runtime_capture_paths "$stdout_capture_path" "$stderr_capture_path"
         _agensic_clear_pending_execution
         _agensic_reset_provenance_line_state
         return
     fi
 
-    _agensic_log_command "$cmd" "$exit_code" "runtime" "$duration_ms" "$stdout_capture_path" "$stderr_capture_path"
-    _agensic_cleanup_runtime_capture_paths "$stdout_capture_path" "$stderr_capture_path"
+    _agensic_log_command "$cmd" "$exit_code" "runtime" "$duration_ms"
     _agensic_clear_pending_execution
     _agensic_reset_provenance_line_state
 }
@@ -2804,7 +2764,7 @@ _agensic_accept_widget() {
     if _agensic_is_status_suggestion "$current"; then
         zle expand-or-complete
     elif [[ -n "$current" ]]; then
-        local origin="gs"
+        local origin="ag"
         local ai_agent=""
         local ai_provider=""
         local ai_model=""
@@ -2848,7 +2808,7 @@ _agensic_partial_accept() {
     local current="${AGENSIC_SUGGESTIONS[$AGENSIC_SUGGESTION_INDEX]}"
     local mode="${AGENSIC_ACCEPT_MODES[$AGENSIC_SUGGESTION_INDEX]}"
     local kind="${AGENSIC_SUGGESTION_KINDS[$AGENSIC_SUGGESTION_INDEX]}"
-    local origin="gs"
+    local origin="ag"
     local ai_agent=""
     local ai_provider=""
     local ai_model=""
