@@ -18,11 +18,20 @@ USAGE
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
 CLI=()
+STATE_HOME="${XDG_STATE_HOME:-$HOME/.local/state}"
+INSTALL_RUNTIME="$STATE_HOME/agensic/install/.venv/bin/python"
+CLI_PYTHON="${AGENSIC_CLI_PYTHON:-}"
 
-if command -v agensic >/dev/null 2>&1; then
-  CLI=(agensic)
+if [[ -n "$CLI_PYTHON" && -x "$CLI_PYTHON" && -f "$REPO_ROOT/cli.py" ]]; then
+  CLI=("$CLI_PYTHON" "$REPO_ROOT/cli.py")
+elif [[ -x "$INSTALL_RUNTIME" && -f "$REPO_ROOT/cli.py" ]]; then
+  CLI=("$INSTALL_RUNTIME" "$REPO_ROOT/cli.py")
+elif [[ -x "$REPO_ROOT/.venv/bin/python" && -f "$REPO_ROOT/cli.py" ]]; then
+  CLI=("$REPO_ROOT/.venv/bin/python" "$REPO_ROOT/cli.py")
 elif [[ -f "$REPO_ROOT/cli.py" ]]; then
   CLI=(python3 "$REPO_ROOT/cli.py")
+elif command -v agensic >/dev/null 2>&1; then
+  CLI=(agensic)
 else
   echo "Neither 'agensic' nor '$REPO_ROOT/cli.py' is available; deterministic AI_EXECUTED signing unavailable" >&2
   exit 127

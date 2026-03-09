@@ -2546,8 +2546,14 @@ def uninstall(
     for path in (INSTALL_DIR, LEGACY_CONFIG_DIR):
         if _remove_tree_if_exists(path):
             removed.append(path)
-    if _remove_file_if_exists(APP_PATHS.launcher_path):
-        removed.append(APP_PATHS.launcher_path)
+    for launcher_path in (
+        APP_PATHS.launcher_path,
+        APP_PATHS.session_start_launcher_path,
+        APP_PATHS.session_status_launcher_path,
+        APP_PATHS.session_stop_launcher_path,
+    ):
+        if _remove_file_if_exists(launcher_path):
+            removed.append(launcher_path)
 
     if not keep_data:
         for path in (CONFIG_DIR, STATE_DIR, CACHE_DIR):
@@ -2916,6 +2922,63 @@ def _shell_export_line(name: str, value: str) -> str:
     return f"export {name}={shlex.quote(str(value or ''))}"
 
 
+AI_SESSION_ENV_KEYS = (
+    "AGENSIC_AI_SESSION_ACTIVE",
+    "AGENSIC_AI_SESSION_AGENT",
+    "AGENSIC_AI_SESSION_MODEL",
+    "AGENSIC_AI_SESSION_AGENT_NAME",
+    "AGENSIC_AI_SESSION_ID",
+    "AGENSIC_AI_SESSION_STARTED_TS",
+    "AGENSIC_AI_SESSION_EXPIRES_TS",
+    "AGENSIC_AI_SESSION_COUNTER",
+    "AGENSIC_AI_SESSION_TIMER_PID",
+)
+
+
+def _write_ai_session_state(values: dict[str, str]) -> None:
+    ensure_app_layout()
+    state_path = Path(APP_PATHS.ai_session_state_path)
+    state_path.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
+    lines = [f"{key}\t{str(values.get(key, '') or '')}" for key in AI_SESSION_ENV_KEYS]
+    payload = "\n".join(lines) + "\n"
+    tmp_path = state_path.with_suffix(f"{state_path.suffix}.tmp")
+    tmp_path.write_text(payload, encoding="utf-8")
+    os.chmod(tmp_path, 0o600)
+    os.replace(tmp_path, state_path)
+
+
+def _read_ai_session_state() -> dict[str, str]:
+    state_path = Path(APP_PATHS.ai_session_state_path)
+    if not state_path.exists():
+        return {}
+    values: dict[str, str] = {}
+    try:
+        for raw_line in state_path.read_text(encoding="utf-8").splitlines():
+            if not raw_line or "\t" not in raw_line:
+                continue
+            key, value = raw_line.split("\t", 1)
+            if key in AI_SESSION_ENV_KEYS:
+                values[key] = value
+    except Exception:
+        return {}
+    return values
+
+
+def _clear_ai_session_state() -> None:
+    try:
+        Path(APP_PATHS.ai_session_state_path).unlink()
+    except FileNotFoundError:
+        return
+
+
+def _resolve_ai_session_values() -> dict[str, str]:
+    values = {key: str(os.environ.get(key, "") or "") for key in AI_SESSION_ENV_KEYS}
+    if str(values.get("AGENSIC_AI_SESSION_ACTIVE", "") or "").strip() == "1":
+        return values
+    persisted = _read_ai_session_state()
+    return persisted if persisted else values
+
+
 def _normalize_signing_identity(agent: str, model: str) -> tuple[str, str, bool]:
     clean_agent = str(agent or "").strip().lower()
     clean_model = str(model or "").strip()
@@ -2953,57 +3016,52 @@ def ai_session_start(
     now_ts = int(time.time())
     expires_ts = now_ts + int(ttl_minutes) * 60
     session_id = uuid.uuid4().hex[:16]
-    lines = [
-        _shell_export_line("AGENSIC_AI_SESSION_ACTIVE", "1"),
-        _shell_export_line("AGENSIC_AI_SESSION_AGENT", clean_agent),
-        _shell_export_line("AGENSIC_AI_SESSION_MODEL", clean_model),
-        _shell_export_line("AGENSIC_AI_SESSION_AGENT_NAME", clean_agent_name),
-        _shell_export_line("AGENSIC_AI_SESSION_ID", session_id),
-        _shell_export_line("AGENSIC_AI_SESSION_STARTED_TS", str(now_ts)),
-        _shell_export_line("AGENSIC_AI_SESSION_EXPIRES_TS", str(expires_ts)),
-        _shell_export_line("AGENSIC_AI_SESSION_COUNTER", "0"),
-        _shell_export_line("AGENSIC_AI_SESSION_TIMER_PID", ""),
-    ]
+    values = {
+        "AGENSIC_AI_SESSION_ACTIVE": "1",
+        "AGENSIC_AI_SESSION_AGENT": clean_agent,
+        "AGENSIC_AI_SESSION_MODEL": clean_model,
+        "AGENSIC_AI_SESSION_AGENT_NAME": clean_agent_name,
+        "AGENSIC_AI_SESSION_ID": session_id,
+        "AGENSIC_AI_SESSION_STARTED_TS": str(now_ts),
+        "AGENSIC_AI_SESSION_EXPIRES_TS": str(expires_ts),
+        "AGENSIC_AI_SESSION_COUNTER": "0",
+        "AGENSIC_AI_SESSION_TIMER_PID": "",
+    }
+    _write_ai_session_state(values)
+    lines = [_shell_export_line(key, values.get(key, "")) for key in AI_SESSION_ENV_KEYS]
     console.print("\n".join(lines), highlight=False)
 
 
 @ai_session_app.command("stop")
 def ai_session_stop():
     """Emit shell unsets to stop AI session signing."""
-    names = [
-        "AGENSIC_AI_SESSION_ACTIVE",
-        "AGENSIC_AI_SESSION_AGENT",
-        "AGENSIC_AI_SESSION_MODEL",
-        "AGENSIC_AI_SESSION_AGENT_NAME",
-        "AGENSIC_AI_SESSION_ID",
-        "AGENSIC_AI_SESSION_STARTED_TS",
-        "AGENSIC_AI_SESSION_EXPIRES_TS",
-        "AGENSIC_AI_SESSION_COUNTER",
-        "AGENSIC_AI_SESSION_TIMER_PID",
-    ]
-    lines = [f"unset {name}" for name in names]
+    _clear_ai_session_state()
+    lines = [f"unset {name}" for name in AI_SESSION_ENV_KEYS]
     console.print("\n".join(lines), highlight=False)
 
 
 @ai_session_app.command("status")
 def ai_session_status():
     """Show AI session signing status from current shell environment."""
-    active = str(os.environ.get("AGENSIC_AI_SESSION_ACTIVE", "") or "").strip() == "1"
+    values = _resolve_ai_session_values()
+    active = str(values.get("AGENSIC_AI_SESSION_ACTIVE", "") or "").strip() == "1"
     if not active:
         console.print("inactive")
         raise typer.Exit(code=0)
 
     now_ts = int(time.time())
     try:
-        expires_ts = int(str(os.environ.get("AGENSIC_AI_SESSION_EXPIRES_TS", "0") or "0"))
+        expires_ts = int(str(values.get("AGENSIC_AI_SESSION_EXPIRES_TS", "0") or "0"))
     except Exception:
         expires_ts = 0
     remaining = max(0, expires_ts - now_ts) if expires_ts > 0 else 0
-    agent = str(os.environ.get("AGENSIC_AI_SESSION_AGENT", "") or "").strip()
-    model = str(os.environ.get("AGENSIC_AI_SESSION_MODEL", "") or "").strip()
-    session_id = str(os.environ.get("AGENSIC_AI_SESSION_ID", "") or "").strip()
-    name = str(os.environ.get("AGENSIC_AI_SESSION_AGENT_NAME", "") or "").strip()
+    agent = str(values.get("AGENSIC_AI_SESSION_AGENT", "") or "").strip()
+    model = str(values.get("AGENSIC_AI_SESSION_MODEL", "") or "").strip()
+    session_id = str(values.get("AGENSIC_AI_SESSION_ID", "") or "").strip()
+    name = str(values.get("AGENSIC_AI_SESSION_AGENT_NAME", "") or "").strip()
     state = "active" if remaining > 0 or expires_ts == 0 else "expired"
+    if state == "expired":
+        _clear_ai_session_state()
     console.print(
         f"{state} agent={agent} model={model} agent_name={name or '-'} session_id={session_id or '-'} remaining_seconds={remaining}"
     )

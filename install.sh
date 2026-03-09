@@ -140,13 +140,34 @@ else
     "$VENV_DIR/bin/python" -m pip install "$PWD"
 fi
 
-# 2e. Create stable PATH launchers for the CLI and helper.
+# 2e. Create stable PATH launchers for the CLI and session helpers.
 CLI_LAUNCHER="$USER_BIN_DIR/agensic"
 cat > "$CLI_LAUNCHER" <<EOF
 #!/bin/sh
 exec "$VENV_DIR/bin/agensic" "\$@"
 EOF
 chmod 700 "$CLI_LAUNCHER"
+
+SESSION_START_LAUNCHER="$USER_BIN_DIR/agensic_session_start"
+cat > "$SESSION_START_LAUNCHER" <<EOF
+#!/bin/sh
+exec "$VENV_DIR/bin/agensic" ai-session start "\$@"
+EOF
+chmod 700 "$SESSION_START_LAUNCHER"
+
+SESSION_STATUS_LAUNCHER="$USER_BIN_DIR/agensic_session_status"
+cat > "$SESSION_STATUS_LAUNCHER" <<EOF
+#!/bin/sh
+exec "$VENV_DIR/bin/agensic" ai-session status "\$@"
+EOF
+chmod 700 "$SESSION_STATUS_LAUNCHER"
+
+SESSION_STOP_LAUNCHER="$USER_BIN_DIR/agensic_session_stop"
+cat > "$SESSION_STOP_LAUNCHER" <<EOF
+#!/bin/sh
+exec "$VENV_DIR/bin/agensic" ai-session stop "\$@"
+EOF
+chmod 700 "$SESSION_STOP_LAUNCHER"
 
 # 3. Add Agensic to PATH and source shell integration (idempotent)
 SHELL_RC="$HOME/.zshrc"

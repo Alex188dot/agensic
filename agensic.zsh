@@ -113,11 +113,18 @@ typeset -g AGENSIC_HOME="${AGENSIC_STATE_HOME}/agensic"
 typeset -g AGENSIC_CONFIG_PATH="${AGENSIC_CONFIG_HOME}/agensic/config.json"
 typeset -g AGENSIC_AUTH_PATH="${AGENSIC_CONFIG_HOME}/agensic/auth.json"
 typeset -g AGENSIC_CLIENT_HELPER="${AGENSIC_SOURCE_DIR}/shell_client.py"
-typeset -g AGENSIC_RUNTIME_PYTHON="${AGENSIC_SOURCE_DIR}/.venv/bin/python"
+typeset -g AGENSIC_RUNTIME_PYTHON="${AGENSIC_RUNTIME_PYTHON:-}"
+if [[ -z "$AGENSIC_RUNTIME_PYTHON" ]]; then
+    AGENSIC_RUNTIME_PYTHON="${AGENSIC_HOME}/install/.venv/bin/python"
+fi
+if [[ ! -x "$AGENSIC_RUNTIME_PYTHON" ]]; then
+    AGENSIC_RUNTIME_PYTHON="${AGENSIC_SOURCE_DIR}/.venv/bin/python"
+fi
 if [[ ! -x "$AGENSIC_RUNTIME_PYTHON" ]]; then
     AGENSIC_RUNTIME_PYTHON="python3"
 fi
 typeset -g AGENSIC_PLUGIN_LOG="${AGENSIC_HOME}/plugin.log"
+typeset -g AGENSIC_AI_SESSION_STATE_PATH="${AGENSIC_HOME}/ai_session.env"
 typeset -g AGENSIC_UNINSTALL_SENTINEL="${TMPDIR:-/tmp}/agensic-shell-uninstalled-${UID:-${EUID:-0}}"
 typeset -g AGENSIC_SESSION_DISABLED=0
 typeset -g AGENSIC_CONFIG_MTIME=""
@@ -1385,6 +1392,9 @@ _agensic_pending_execution_has_provenance() {
 
 _agensic_clear_ai_session_env() {
     _agensic_stop_ai_session_timer
+    if [[ -n "${AGENSIC_AI_SESSION_STATE_PATH:-}" ]]; then
+        command rm -f -- "$AGENSIC_AI_SESSION_STATE_PATH" 2>/dev/null
+    fi
     unset AGENSIC_AI_SESSION_ACTIVE
     unset AGENSIC_AI_SESSION_AGENT
     unset AGENSIC_AI_SESSION_MODEL
@@ -1394,6 +1404,99 @@ _agensic_clear_ai_session_env() {
     unset AGENSIC_AI_SESSION_EXPIRES_TS
     unset AGENSIC_AI_SESSION_COUNTER
     unset AGENSIC_AI_SESSION_TIMER_PID
+}
+
+_agensic_write_ai_session_state_file() {
+    local state_path="${AGENSIC_AI_SESSION_STATE_PATH:-}"
+    if [[ -z "$state_path" ]]; then
+        return
+    fi
+
+    local state_dir="${state_path:h}"
+    command mkdir -p -- "$state_dir" 2>/dev/null || return
+
+    local tmp_path="${state_path}.tmp.$$"
+    {
+        print -r -- "AGENSIC_AI_SESSION_ACTIVE"$'\t'"${AGENSIC_AI_SESSION_ACTIVE:-0}"
+        print -r -- "AGENSIC_AI_SESSION_AGENT"$'\t'"${AGENSIC_AI_SESSION_AGENT:-}"
+        print -r -- "AGENSIC_AI_SESSION_MODEL"$'\t'"${AGENSIC_AI_SESSION_MODEL:-}"
+        print -r -- "AGENSIC_AI_SESSION_AGENT_NAME"$'\t'"${AGENSIC_AI_SESSION_AGENT_NAME:-}"
+        print -r -- "AGENSIC_AI_SESSION_ID"$'\t'"${AGENSIC_AI_SESSION_ID:-}"
+        print -r -- "AGENSIC_AI_SESSION_STARTED_TS"$'\t'"${AGENSIC_AI_SESSION_STARTED_TS:-}"
+        print -r -- "AGENSIC_AI_SESSION_EXPIRES_TS"$'\t'"${AGENSIC_AI_SESSION_EXPIRES_TS:-}"
+        print -r -- "AGENSIC_AI_SESSION_COUNTER"$'\t'"${AGENSIC_AI_SESSION_COUNTER:-0}"
+        print -r -- "AGENSIC_AI_SESSION_TIMER_PID"$'\t'
+    } >| "$tmp_path" || {
+        command rm -f -- "$tmp_path" 2>/dev/null
+        return
+    }
+
+    command chmod 600 "$tmp_path" 2>/dev/null || true
+    command mv -f -- "$tmp_path" "$state_path" 2>/dev/null || {
+        command rm -f -- "$tmp_path" 2>/dev/null
+    }
+}
+
+_agensic_load_ai_session_state_file() {
+    local state_path="${AGENSIC_AI_SESSION_STATE_PATH:-}"
+    if [[ -z "$state_path" || ! -f "$state_path" ]]; then
+        return 1
+    fi
+
+    local active="" agent="" model="" agent_name="" session_id="" started_ts="" expires_ts="" counter=""
+    local key value
+    while IFS=$'\t' read -r key value || [[ -n "$key" ]]; do
+        case "$key" in
+            AGENSIC_AI_SESSION_ACTIVE) active="$value" ;;
+            AGENSIC_AI_SESSION_AGENT) agent="$value" ;;
+            AGENSIC_AI_SESSION_MODEL) model="$value" ;;
+            AGENSIC_AI_SESSION_AGENT_NAME) agent_name="$value" ;;
+            AGENSIC_AI_SESSION_ID) session_id="$value" ;;
+            AGENSIC_AI_SESSION_STARTED_TS) started_ts="$value" ;;
+            AGENSIC_AI_SESSION_EXPIRES_TS) expires_ts="$value" ;;
+            AGENSIC_AI_SESSION_COUNTER) counter="$value" ;;
+        esac
+    done < "$state_path"
+
+    if [[ "$active" != "1" ]]; then
+        return 1
+    fi
+
+    export AGENSIC_AI_SESSION_ACTIVE="$active"
+    export AGENSIC_AI_SESSION_AGENT="$agent"
+    export AGENSIC_AI_SESSION_MODEL="$model"
+    export AGENSIC_AI_SESSION_AGENT_NAME="$agent_name"
+    export AGENSIC_AI_SESSION_ID="$session_id"
+    export AGENSIC_AI_SESSION_STARTED_TS="$started_ts"
+    export AGENSIC_AI_SESSION_EXPIRES_TS="$expires_ts"
+    export AGENSIC_AI_SESSION_COUNTER="${counter:-0}"
+    return 0
+}
+
+_agensic_sync_ai_session_from_state_file() {
+    local state_path="${AGENSIC_AI_SESSION_STATE_PATH:-}"
+    local had_active="${AGENSIC_AI_SESSION_ACTIVE:-0}"
+    local previous_session_id="${AGENSIC_AI_SESSION_ID:-}"
+
+    if [[ -z "$state_path" || ! -f "$state_path" ]]; then
+        if [[ "$had_active" == "1" ]]; then
+            _agensic_clear_ai_session_env
+        fi
+        return
+    fi
+
+    if ! _agensic_load_ai_session_state_file; then
+        _agensic_clear_ai_session_env
+        return
+    fi
+
+    if _agensic_enforce_ai_session_expiry; then
+        return
+    fi
+
+    if [[ "$had_active" != "1" || "$previous_session_id" != "${AGENSIC_AI_SESSION_ID:-}" ]]; then
+        _agensic_stop_ai_session_timer
+    fi
 }
 
 _agensic_pid_is_alive() {
@@ -1475,7 +1578,7 @@ _agensic_schedule_ai_session_expiry_timer() {
     (
         sleep "$wait_seconds"
         kill -USR2 $$ 2>/dev/null
-    ) &!
+    ) >/dev/null 2>&1 < /dev/null &!
     AGENSIC_AI_SESSION_TIMER_PID="$!"
 }
 
@@ -1488,6 +1591,7 @@ _agensic_enforce_ai_session_expiry() {
 }
 
 _agensic_ensure_ai_session_timer() {
+    _agensic_sync_ai_session_from_state_file
     if [[ "${AGENSIC_AI_SESSION_ACTIVE:-0}" != "1" ]]; then
         _agensic_stop_ai_session_timer
         return
@@ -1578,6 +1682,7 @@ PY
     export AGENSIC_AI_SESSION_EXPIRES_TS="$expires_ts"
     export AGENSIC_AI_SESSION_COUNTER="0"
     AGENSIC_AI_SESSION_TIMER_PID=""
+    _agensic_write_ai_session_state_file
     _agensic_schedule_ai_session_expiry_timer
 }
 
@@ -1586,6 +1691,7 @@ agensic_session_stop() {
 }
 
 agensic_session_status() {
+    _agensic_sync_ai_session_from_state_file
     if [[ "${AGENSIC_AI_SESSION_ACTIVE:-0}" != "1" ]]; then
         print -r -- "inactive"
         return 0
@@ -1625,7 +1731,7 @@ _agensic_generate_ai_proof() {
     AGENSIC_PROOF_MODEL="$model" \
     AGENSIC_PROOF_TRACE="$trace" \
     AGENSIC_PROOF_TS="$timestamp" \
-    python3 - <<'PY' 2>/dev/null
+    "$AGENSIC_RUNTIME_PYTHON" - <<'PY' 2>/dev/null
 import os
 import sys
 
@@ -1681,6 +1787,7 @@ _agensic_session_sign_if_active() {
         AGENSIC_AI_SESSION_COUNTER=0
     fi
     AGENSIC_AI_SESSION_COUNTER=$(( AGENSIC_AI_SESSION_COUNTER + 1 ))
+    _agensic_write_ai_session_state_file
     local time_component
     time_component="$(_agensic_now_time_component)"
     local trace="session:${session_id}:${AGENSIC_AI_SESSION_COUNTER}:${time_component}"

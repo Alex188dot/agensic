@@ -26,7 +26,7 @@ class CliUninstallTests(unittest.TestCase):
             ) as scrub_mock, patch.object(
                 cli_app, "_remove_tree_if_exists", side_effect=[True, True, True, True, True]
             ) as remove_tree_mock, patch.object(
-                cli_app, "_remove_file_if_exists", side_effect=[True, False, True]
+                cli_app, "_remove_file_if_exists", side_effect=[True, False, True, True, True, True]
             ) as remove_file_mock, patch.object(
                 cli_app, "UNINSTALL_SENTINEL", str(sentinel)
             ):
@@ -43,12 +43,15 @@ class CliUninstallTests(unittest.TestCase):
         self.assertIn(cli_app.CACHE_DIR, result.stdout)
         self.assertIn(cli_app.INSTALL_DIR, result.stdout)
         self.assertIn(cli_app.APP_PATHS.launcher_path, result.stdout)
+        self.assertIn(cli_app.APP_PATHS.session_start_launcher_path, result.stdout)
+        self.assertIn(cli_app.APP_PATHS.session_status_launcher_path, result.stdout)
+        self.assertIn(cli_app.APP_PATHS.session_stop_launcher_path, result.stdout)
         self.assertIn(cli_app.LEGACY_CONFIG_DIR, result.stdout)
         self.assertEqual(sentinel_contents, "disabled\n")
         stop_mock.assert_called_once()
         self.assertEqual(scrub_mock.call_count, 2)
         self.assertEqual(remove_tree_mock.call_count, 5)
-        self.assertEqual(remove_file_mock.call_count, 3)
+        self.assertEqual(remove_file_mock.call_count, 6)
 
     def test_uninstall_keep_data_skips_state_deletion(self):
         with patch.object(cli_app, "stop"), patch.object(

@@ -1,5 +1,6 @@
 import os
 import subprocess
+import sys
 import tempfile
 import textwrap
 import unittest
@@ -8,6 +9,8 @@ from pathlib import Path
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
 AGENSIC_ZSH = REPO_ROOT / "agensic.zsh"
+CLI_PATH = REPO_ROOT / "cli.py"
+PYTHON_BIN = Path(sys.executable)
 
 
 class AgensicSessionShellTests(unittest.TestCase):
@@ -21,6 +24,7 @@ class AgensicSessionShellTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as temp_home:
             env = dict(os.environ)
             env["HOME"] = temp_home
+            env["AGENSIC_RUNTIME_PYTHON"] = str(PYTHON_BIN)
             return subprocess.run(
                 ["zsh", "-c", script],
                 capture_output=True,
@@ -100,6 +104,34 @@ class AgensicSessionShellTests(unittest.TestCase):
         traces = [line.strip() for line in result.stdout.splitlines() if line.strip()]
         self.assertGreaterEqual(len(traces), 2)
         self.assertNotEqual(traces[-2], traces[-1])
+
+    def test_shell_syncs_session_started_by_cli_wrapper_path(self):
+        result = self._run_zsh(
+            f"""
+            {PYTHON_BIN} {CLI_PATH} ai-session start --agent codex --model gpt-5.3 --agent-name "Planner A" >/dev/null
+            agensic_session_status
+            _agensic_session_sign_if_active
+            print -r -- "${{AGENSIC_NEXT_PROOF_LABEL:-}}|${{AGENSIC_NEXT_PROOF_AGENT:-}}|${{AGENSIC_NEXT_PROOF_MODEL:-}}"
+            """
+        )
+        self.assertEqual(result.returncode, 0, msg=result.stderr)
+        lines = [line.strip() for line in result.stdout.splitlines() if line.strip()]
+        self.assertTrue(any(line.startswith("active agent=codex model=gpt-5.3") for line in lines), msg=lines)
+        self.assertIn("AI_EXECUTED|codex|gpt-5.3", lines)
+
+    def test_shell_syncs_cli_stop_and_clears_existing_session(self):
+        result = self._run_zsh(
+            f"""
+            agensic_session_start --agent codex --model gpt-5.3 >/dev/null
+            {PYTHON_BIN} {CLI_PATH} ai-session stop >/dev/null
+            agensic_session_status
+            print -r -- "${{AGENSIC_AI_SESSION_ACTIVE:-0}}"
+            """
+        )
+        self.assertEqual(result.returncode, 0, msg=result.stderr)
+        lines = [line.strip() for line in result.stdout.splitlines() if line.strip()]
+        self.assertIn("inactive", lines)
+        self.assertIn("0", lines)
 
     def test_preexec_preserves_human_edit_pending_state(self):
         result = self._run_zsh(
