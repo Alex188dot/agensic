@@ -26,6 +26,7 @@ try:
 except Exception:
     termios = None
 from rich.console import Console
+from rich.markdown import Markdown
 from rich.panel import Panel
 from rich.table import Table
 from prompt_toolkit.application import Application
@@ -487,6 +488,84 @@ def _daemon_request(method: str, path: str, timeout: float, **kwargs):
 
 def _print_daemon_auth_hint() -> None:
     console.print("[yellow]Daemon auth failed.[/yellow] Run `agensic setup`, reload your shell, and retry.")
+
+
+def _default_shell_name() -> str:
+    shell_path = str(os.environ.get("SHELL", "") or "").strip()
+    shell_name = os.path.basename(shell_path).strip()
+    return shell_name or "zsh"
+
+
+def _decode_common_escapes(text: str) -> str:
+    decoded = str(text or "")
+    previous = decoded
+    for _ in range(2):
+        if "\\n" not in decoded and "\\r" not in decoded and "\\t" not in decoded:
+            break
+        decoded = decoded.replace("\\r\\n", "\n")
+        decoded = decoded.replace("\\n", "\n")
+        decoded = decoded.replace("\\r", "\n")
+        decoded = decoded.replace("\\t", "\t")
+        if decoded == previous:
+            break
+        previous = decoded
+    return decoded
+
+
+def _render_markdown_or_plain(text: str) -> None:
+    rendered = _decode_common_escapes(text)
+    try:
+        console.print(Markdown(rendered))
+    except Exception:
+        console.print(rendered, highlight=False)
+
+
+def _explain_command_or_exit(command_text: str) -> None:
+    command = str(command_text or "").strip()
+    if not command:
+        console.print("[red]Missing command to explain.[/red]")
+        raise typer.Exit(code=2)
+
+    prompt = (
+        "Explain this shell command for a developer. "
+        "Describe what it does, what the main flags or segments mean, and any meaningful risks or side effects. "
+        "Keep the answer concise and practical.\n\n"
+        f"Command:\n{command}"
+    )
+    payload = {
+        "prompt_text": prompt,
+        "working_directory": os.getcwd(),
+        "shell": _default_shell_name(),
+        "terminal": str(os.environ.get("TERM", "") or "").strip() or None,
+        "platform": sys.platform,
+    }
+    try:
+        response = _daemon_request("POST", "/assist", timeout=15, json=payload)
+    except Exception as exc:
+        console.print(f"[red]Failed to reach daemon:[/red] {exc}")
+        raise typer.Exit(code=1)
+
+    if response.status_code != 200:
+        if response.status_code == 401:
+            _print_daemon_auth_hint()
+        body = response.text.strip()
+        if body:
+            console.print(f"[red]Explain request failed ({response.status_code}):[/red] {body}")
+        else:
+            console.print(f"[red]Explain request failed ({response.status_code}).[/red]")
+        raise typer.Exit(code=1)
+
+    try:
+        response_payload = response.json()
+    except ValueError:
+        console.print("[red]Invalid JSON response from explain endpoint.[/red]")
+        raise typer.Exit(code=1)
+
+    answer = str(response_payload.get("answer", "") or "").strip() if isinstance(response_payload, dict) else ""
+    if not answer:
+        console.print("[red]No explanation returned.[/red]")
+        raise typer.Exit(code=1)
+    _render_markdown_or_plain(answer)
 
 
 def _file_sha256(path: str) -> str:
@@ -3448,10 +3527,19 @@ def main(
         help="Show Agensic version and exit",
         is_eager=True,
     ),
+    explain: str = typer.Option(
+        "",
+        "--explain",
+        metavar="COMMAND",
+        help="Explain a shell command and exit",
+    ),
 ):
     """Agensic: AI-powered terminal autocomplete."""
     if version:
         console.print(f"Agensic {__version__}", highlight=False)
+        raise typer.Exit()
+    if explain:
+        _explain_command_or_exit(explain)
         raise typer.Exit()
     _run_storage_preflight_if_enabled(ctx.invoked_subcommand)
     if ctx.invoked_subcommand is None:

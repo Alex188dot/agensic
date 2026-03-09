@@ -34,6 +34,7 @@ Examples:
 ```bash
 agensic setup
 agensic provenance --tui
+agensic --explain "tar -czf backup.tgz src"
 ```
 
 Natural-language flows:
