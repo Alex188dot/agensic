@@ -4,6 +4,7 @@ from unittest.mock import patch
 from typer.testing import CliRunner
 
 from agensic.cli.app import app
+import agensic.cli.app as app_module
 
 
 class CliProvenanceTuiTests(unittest.TestCase):
@@ -44,6 +45,33 @@ class CliProvenanceTuiTests(unittest.TestCase):
             )
         self.assertEqual(result.exit_code, 0)
         fallback.assert_called_once()
+
+    def test_run_provenance_tui_passes_dash_prefixed_auth_token_safely(self):
+        class Result:
+            returncode = 0
+
+        with patch("agensic.cli.app._ensure_provenance_tui_binary", return_value="/tmp/agensic-provenance-tui"), patch(
+            "agensic.cli.app._reset_terminal_mouse_reporting"
+        ), patch.object(app_module._DAEMON_AUTH_CACHE, "get_token", return_value="-Ctoken"), patch(
+            "agensic.cli.app.subprocess.run", return_value=Result()
+        ) as run_cmd:
+            ok = app_module._run_provenance_tui(
+                limit=5,
+                label="",
+                contains="",
+                since_ts=0,
+                tier="",
+                agent="",
+                agent_name="",
+                provider="",
+                export_format="",
+                out_path="",
+            )
+
+        self.assertTrue(ok)
+        cmd = run_cmd.call_args.args[0]
+        self.assertIn("--auth-token=-Ctoken", cmd)
+        self.assertNotIn("--auth-token", cmd)
 
 
 if __name__ == "__main__":

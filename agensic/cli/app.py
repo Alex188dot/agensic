@@ -841,7 +841,8 @@ def _run_provenance_tui(
         str(max(1, min(500, int(limit or 50)))),
     ]
     if token:
-        cmd.extend(["--auth-token", token])
+        # Keep auth tokens that begin with "-" from being parsed as a new flag.
+        cmd.append(f"--auth-token={token}")
     if label:
         cmd.extend(["--label", label])
     if contains:
