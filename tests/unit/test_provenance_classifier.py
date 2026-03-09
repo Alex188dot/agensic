@@ -8,6 +8,7 @@ from agensic.engine.provenance import (
     PROOF_MAX_AGE_SECONDS,
     build_local_proof_metadata,
     classify_command_run,
+    ensure_provenance_keypair,
     sign_proof_payload,
     verify_signed_proof,
 )
@@ -300,6 +301,62 @@ class ProvenanceClassifierTests(unittest.TestCase):
 
         self.assertFalse(ok)
         self.assertEqual(reason, "proof_timestamp_stale")
+
+    def test_ensure_provenance_keypair_repairs_mismatched_public_key(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            private_path = os.path.join(tmpdir, "provenance_ed25519.pem")
+            public_path = os.path.join(tmpdir, "provenance_ed25519.pub.pem")
+
+            sign_proof_payload(
+                "AI_EXECUTED",
+                "codex",
+                "gpt-5.3",
+                "trace-repair-init",
+                int(time.time()),
+                private_path=private_path,
+                public_path=public_path,
+            )
+
+            # Simulate a stale or copied public key file from another keypair.
+            other_private = os.path.join(tmpdir, "other_provenance_ed25519.pem")
+            other_public = os.path.join(tmpdir, "other_provenance_ed25519.pub.pem")
+            sign_proof_payload(
+                "AI_EXECUTED",
+                "codex",
+                "gpt-5.3",
+                "trace-repair-other",
+                int(time.time()),
+                private_path=other_private,
+                public_path=other_public,
+            )
+            with open(other_public, "rb") as src, open(public_path, "wb") as dst:
+                dst.write(src.read())
+
+            ensure_provenance_keypair(private_path=private_path, public_path=public_path)
+
+            timestamp = int(time.time())
+            signature = sign_proof_payload(
+                "AI_EXECUTED",
+                "codex",
+                "gpt-5.3",
+                "trace-repair-final",
+                timestamp,
+                private_path=private_path,
+                public_path=public_path,
+            )
+            ok, reason = verify_signed_proof(
+                "AI_EXECUTED",
+                "codex",
+                "gpt-5.3",
+                "trace-repair-final",
+                timestamp,
+                signature,
+                now_ts=timestamp,
+                public_path=public_path,
+            )
+
+        self.assertTrue(ok)
+        self.assertEqual(reason, "proof_valid")
 
 
 if __name__ == "__main__":

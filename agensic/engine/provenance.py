@@ -117,26 +117,34 @@ def ensure_provenance_keypair(
                     encryption_algorithm=serialization.NoEncryption(),
                 )
             )
+    elif private_key is None:
+        with open(private_target, "rb") as private_file:
+            loaded_private = serialization.load_pem_private_key(
+                private_file.read(),
+                password=None,
+            )
+        if not isinstance(loaded_private, Ed25519PrivateKey):
+            raise RuntimeError("provenance private key is not Ed25519")
+        private_key = loaded_private
     os.chmod(private_target, 0o600)
 
-    if not os.path.exists(public_target):
-        if private_key is None:
-            with open(private_target, "rb") as private_file:
-                loaded_private = serialization.load_pem_private_key(
-                    private_file.read(),
-                    password=None,
-                )
-            if not isinstance(loaded_private, Ed25519PrivateKey):
-                raise RuntimeError("provenance private key is not Ed25519")
-            private_key = loaded_private
-        public_key = private_key.public_key()
+    public_key = private_key.public_key()
+    expected_public_bytes = public_key.public_bytes(
+        encoding=serialization.Encoding.PEM,
+        format=serialization.PublicFormat.SubjectPublicKeyInfo,
+    )
+
+    existing_public_bytes = b""
+    if os.path.exists(public_target):
+        try:
+            with open(public_target, "rb") as public_file:
+                existing_public_bytes = public_file.read()
+        except Exception:
+            existing_public_bytes = b""
+
+    if existing_public_bytes != expected_public_bytes:
         with open(public_target, "wb") as public_file:
-            public_file.write(
-                public_key.public_bytes(
-                    encoding=serialization.Encoding.PEM,
-                    format=serialization.PublicFormat.SubjectPublicKeyInfo,
-                )
-            )
+            public_file.write(expected_public_bytes)
     os.chmod(public_target, 0o600)
     return (private_target, public_target)
 
@@ -203,6 +211,7 @@ def verify_signed_proof(
     clean_signature = _normalize(signature)
     ts_value = _safe_int(timestamp)
     current_ts = int(now_ts or time.time())
+    public_key_path = os.path.expanduser(public_path)
 
     if clean_label != "AI_EXECUTED":
         return (False, "proof_label_invalid")
@@ -213,9 +222,7 @@ def verify_signed_proof(
     if not clean_signature:
         return (False, "proof_signature_missing")
 
-    try:
-        _, public_key_path = ensure_provenance_keypair(public_path=public_path)
-    except Exception:
+    if not os.path.exists(public_key_path):
         return (False, "proof_public_key_unavailable")
 
     try:
