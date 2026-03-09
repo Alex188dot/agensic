@@ -1367,6 +1367,18 @@ _agensic_refresh_pending_proof_fields() {
     AGENSIC_NEXT_PROOF_HOST_FINGERPRINT=""
 }
 
+_agensic_clear_next_proof_fields() {
+    AGENSIC_NEXT_PROOF_LABEL=""
+    AGENSIC_NEXT_PROOF_AGENT=""
+    AGENSIC_NEXT_PROOF_MODEL=""
+    AGENSIC_NEXT_PROOF_TRACE=""
+    AGENSIC_NEXT_PROOF_TIMESTAMP=0
+    AGENSIC_NEXT_PROOF_SIGNATURE=""
+    AGENSIC_NEXT_PROOF_SIGNER_SCOPE=""
+    AGENSIC_NEXT_PROOF_KEY_FINGERPRINT=""
+    AGENSIC_NEXT_PROOF_HOST_FINGERPRINT=""
+}
+
 _agensic_snapshot_pending_execution() {
     AGENSIC_PENDING_LAST_ACTION="$AGENSIC_LINE_LAST_ACTION"
     AGENSIC_PENDING_ACCEPTED_ORIGIN="$AGENSIC_LINE_ACCEPTED_ORIGIN"
@@ -2404,15 +2416,55 @@ _agensic_is_blocked_runtime_command() {
     return 1
 }
 
+_agensic_command_is_track_launcher() {
+    local command="$1"
+    local -a tokens
+    local token=""
+    local idx=1
+
+    tokens=("${(z)command}")
+    if (( ${#tokens[@]} == 0 )); then
+        return 1
+    fi
+
+    while (( idx <= ${#tokens[@]} )); do
+        token="${tokens[$idx]}"
+        if [[ "$token" == [A-Za-z_][A-Za-z0-9_]*=* ]]; then
+            (( idx += 1 ))
+            continue
+        fi
+        break
+    done
+
+    if (( idx > ${#tokens[@]} )); then
+        return 1
+    fi
+    if [[ "${tokens[$idx]##*/}" != "agensic" ]]; then
+        return 1
+    fi
+
+    (( idx += 1 ))
+    if (( idx > ${#tokens[@]} )); then
+        return 1
+    fi
+
+    [[ "${tokens[$idx]}" == "track" ]]
+}
+
 _agensic_preexec_hook() {
     if _agensic_session_is_disabled; then
         return
     fi
-    _agensic_session_sign_if_active
-    if _agensic_pending_execution_has_provenance; then
-        _agensic_refresh_pending_proof_fields
+    if _agensic_command_is_track_launcher "$1"; then
+        _agensic_clear_pending_execution
+        _agensic_clear_next_proof_fields
     else
-        _agensic_snapshot_pending_execution
+        _agensic_session_sign_if_active
+        if _agensic_pending_execution_has_provenance; then
+            _agensic_refresh_pending_proof_fields
+        else
+            _agensic_snapshot_pending_execution
+        fi
     fi
     AGENSIC_LAST_EXECUTED_CMD="$1"
     AGENSIC_LAST_EXECUTED_STARTED_AT_MS="$(_agensic_now_epoch_ms)"

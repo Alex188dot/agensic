@@ -3518,6 +3518,47 @@ def shortcuts_command():
     """Show keyboard shortcuts."""
     show_shortcuts()
 
+
+@app.command("track", context_settings={"allow_extra_args": True, "ignore_unknown_options": True})
+def track_command(
+    ctx: typer.Context,
+    agent: str = typer.Option("", "--agent", help="Override tracked agent identifier"),
+    model: str = typer.Option("", "--model", help="Explicit tracked model identifier for any provider"),
+    agent_name: str = typer.Option("", "--agent-name", help="Override tracked agent display name"),
+):
+    """Launch and supervise a tracked CLI session."""
+    from . import track as track_runtime
+
+    args = list(ctx.args or [])
+    try:
+        track_runtime.ensure_track_supported()
+    except RuntimeError as exc:
+        console.print(f"[red]{exc}[/red]")
+        raise typer.Exit(code=1)
+
+    if not args:
+        console.print("[red]No tracked app or command provided.[/red]")
+        raise typer.Exit(code=2)
+
+    if args[0] == "status" and len(args) == 1:
+        raise typer.Exit(code=track_runtime.print_track_status())
+    if args[0] == "stop" and len(args) == 1:
+        raise typer.Exit(code=track_runtime.stop_active_track_session())
+
+    try:
+        launch = track_runtime.prepare_track_launch(
+            args,
+            agent_override=agent,
+            model_override=model,
+            agent_name_override=agent_name,
+        )
+    except ValueError as exc:
+        console.print(f"[red]{exc}[/red]")
+        raise typer.Exit(code=2)
+
+    raise typer.Exit(code=track_runtime.run_tracked_command(launch))
+
+
 @app.callback(invoke_without_command=True)
 def main(
     ctx: typer.Context,

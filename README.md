@@ -44,57 +44,6 @@ Natural-language flows:
 ## explain how to set up a local k3d cluster for testing a Kubernetes app
 ```
 
-## For Agents
-
-Agensic is not just an AI terminal UX layer. It is also a forensic layer for agent execution.
-
-The repo publishes a `terminal-commands` skill for agentic tools that need deterministic provenance for shell activity. When an agent uses the skill, commands are signed so they can be registered and later verified as AI-executed actions.
-
-How the proof works, briefly:
-
-- Each AI-executed command is signed locally with an Ed25519 keypair stored under the app config directory (`$XDG_CONFIG_HOME/agensic` on macOS/Linux by default).
-- The daemon verifies that signature before assigning the `AI_EXECUTED` label.
-- Incomplete, malformed, stale, or invalid proofs are recorded as `INVALID_PROOF`, not silently upgraded to success.
-- The provenance TUI and CLI read those stored records from SQLite so you can review them later.
-
-You can install this skill from GitHub, in one of the following ways:
-
-```bash
-npx skills add Alex188dot/agensic
-
-npx ctx7 skills install Alex188dot/agensic
-```
-
-Repo: [github.com/Alex188dot/agensic](https://github.com/Alex188dot/agensic)
-
-That means you can answer questions like:
-
-- What command ran?
-- Which agent produced it?
-- Which model was used?
-- Was it signed and verified correctly?
-- What was the exit code and the error message?
-
-Preferred one-off flow:
-
-```bash
-agensic ai-exec --agent <agent_id> --model <model_id> --agent-name '<agent_name>' -- <command...>
-```
-
-Preferred session flow:
-
-```bash
-agensic session start --agent <agent_id> --model <model_id> --agent-name '<agent_name>' --ttl-minutes 120
-# run commands normally while the session is active
-agensic session stop
-```
-
-Verification:
-
-```bash
-agensic provenance --contains "<token>" --limit 5
-```
-
 ## What Makes It Different
 
 - It improves your existing terminal instead of replacing it.

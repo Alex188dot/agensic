@@ -128,6 +128,28 @@ class SQLiteStateStore:
                 CREATE INDEX IF NOT EXISTS idx_command_runs_label_ts ON command_runs(label, ts DESC);
                 CREATE INDEX IF NOT EXISTS idx_command_runs_command_ts ON command_runs(command, ts DESC);
 
+                CREATE TABLE IF NOT EXISTS tracked_sessions (
+                    session_id TEXT PRIMARY KEY,
+                    status TEXT NOT NULL DEFAULT '',
+                    launch_mode TEXT NOT NULL DEFAULT '',
+                    agent TEXT NOT NULL DEFAULT '',
+                    model TEXT NOT NULL DEFAULT '',
+                    agent_name TEXT NOT NULL DEFAULT '',
+                    working_directory TEXT NOT NULL DEFAULT '',
+                    root_command TEXT NOT NULL DEFAULT '',
+                    transcript_path TEXT NOT NULL DEFAULT '',
+                    controller_pid INTEGER,
+                    root_pid INTEGER,
+                    started_at INTEGER NOT NULL DEFAULT 0,
+                    ended_at INTEGER NOT NULL DEFAULT 0,
+                    updated_at INTEGER NOT NULL DEFAULT 0,
+                    violation_code TEXT NOT NULL DEFAULT '',
+                    exit_code INTEGER
+                );
+
+                CREATE INDEX IF NOT EXISTS idx_tracked_sessions_status_updated
+                ON tracked_sessions(status, updated_at DESC);
+
                 CREATE TABLE IF NOT EXISTS history_index_state (
                     history_file TEXT PRIMARY KEY,
                     inode INTEGER NOT NULL,
@@ -685,6 +707,114 @@ class SQLiteStateStore:
             "ts": now_ts,
         }
         return self.apply_event(event, append_to_journal=True)
+
+    def upsert_tracked_session(
+        self,
+        session_id: str,
+        status: str,
+        launch_mode: str = "",
+        agent: str = "",
+        model: str = "",
+        agent_name: str = "",
+        working_directory: str = "",
+        root_command: str = "",
+        transcript_path: str = "",
+        controller_pid: Optional[int] = None,
+        root_pid: Optional[int] = None,
+        started_at: Optional[int] = None,
+        ended_at: Optional[int] = None,
+        updated_at: Optional[int] = None,
+        violation_code: str = "",
+        exit_code: Optional[int] = None,
+    ) -> bool:
+        clean_session_id = str(session_id or "").strip()
+        clean_status = str(status or "").strip().lower()
+        if not clean_session_id or not clean_status:
+            return False
+        now_ts = int(updated_at or time.time())
+        with self._lock, self._conn() as conn:
+            conn.execute(
+                """
+                INSERT INTO tracked_sessions(
+                    session_id, status, launch_mode, agent, model, agent_name, working_directory,
+                    root_command, transcript_path, controller_pid, root_pid, started_at, ended_at,
+                    updated_at, violation_code, exit_code
+                )
+                VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                ON CONFLICT(session_id) DO UPDATE SET
+                    status = excluded.status,
+                    launch_mode = excluded.launch_mode,
+                    agent = excluded.agent,
+                    model = excluded.model,
+                    agent_name = excluded.agent_name,
+                    working_directory = excluded.working_directory,
+                    root_command = excluded.root_command,
+                    transcript_path = excluded.transcript_path,
+                    controller_pid = excluded.controller_pid,
+                    root_pid = excluded.root_pid,
+                    started_at = CASE
+                        WHEN tracked_sessions.started_at > 0 THEN tracked_sessions.started_at
+                        ELSE excluded.started_at
+                    END,
+                    ended_at = CASE
+                        WHEN excluded.ended_at > 0 THEN excluded.ended_at
+                        ELSE tracked_sessions.ended_at
+                    END,
+                    updated_at = excluded.updated_at,
+                    violation_code = CASE
+                        WHEN excluded.violation_code != '' THEN excluded.violation_code
+                        ELSE tracked_sessions.violation_code
+                    END,
+                    exit_code = CASE
+                        WHEN excluded.exit_code IS NOT NULL THEN excluded.exit_code
+                        ELSE tracked_sessions.exit_code
+                    END
+                """,
+                (
+                    clean_session_id,
+                    clean_status,
+                    str(launch_mode or "").strip().lower(),
+                    str(agent or "").strip().lower(),
+                    str(model or "").strip(),
+                    str(agent_name or "").strip(),
+                    str(working_directory or "").strip(),
+                    str(root_command or "").strip(),
+                    str(transcript_path or "").strip(),
+                    (int(controller_pid) if controller_pid is not None else None),
+                    (int(root_pid) if root_pid is not None else None),
+                    int(started_at or now_ts),
+                    int(ended_at or 0),
+                    now_ts,
+                    str(violation_code or "").strip().lower(),
+                    (int(exit_code) if exit_code is not None else None),
+                ),
+            )
+            conn.commit()
+        return True
+
+    def get_tracked_session(self, session_id: str) -> Optional[Dict[str, object]]:
+        clean_session_id = str(session_id or "").strip()
+        if not clean_session_id:
+            return None
+        with self._lock, self._conn() as conn:
+            row = conn.execute(
+                "SELECT * FROM tracked_sessions WHERE session_id = ? LIMIT 1",
+                (clean_session_id,),
+            ).fetchone()
+        return dict(row) if row is not None else None
+
+    def get_active_tracked_session(self) -> Optional[Dict[str, object]]:
+        with self._lock, self._conn() as conn:
+            row = conn.execute(
+                """
+                SELECT *
+                FROM tracked_sessions
+                WHERE status IN ('active', 'stopping')
+                ORDER BY updated_at DESC
+                LIMIT 1
+                """
+            ).fetchone()
+        return dict(row) if row is not None else None
 
     def apply_history_counts(self, command_counts: Dict[str, int], ts: Optional[int] = None) -> int:
         now_ts = int(ts or time.time())

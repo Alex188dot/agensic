@@ -200,6 +200,50 @@ class StateBackendTests(unittest.TestCase):
             self.assertEqual(len(second), 2)
             self.assertNotEqual(first[0]["run_id"], second[0]["run_id"])
 
+    def test_tracked_session_roundtrip(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            db_path = os.path.join(tmp, "state.sqlite")
+            store = SQLiteStateStore(db_path, journal=None)
+
+            recorded = store.upsert_tracked_session(
+                session_id="sess-1",
+                status="active",
+                launch_mode="registry_alias",
+                agent="codex",
+                model="unknown-model",
+                agent_name="OpenAI Codex",
+                working_directory="/tmp/project",
+                root_command="codex",
+                transcript_path="/tmp/transcript.jsonl",
+                controller_pid=321,
+                root_pid=654,
+                started_at=1700000000,
+            )
+
+            self.assertTrue(recorded)
+            active = store.get_active_tracked_session()
+            self.assertIsNotNone(active)
+            self.assertEqual(active["session_id"], "sess-1")
+            self.assertEqual(active["agent"], "codex")
+
+            store.upsert_tracked_session(
+                session_id="sess-1",
+                status="exited",
+                agent="codex",
+                model="unknown-model",
+                root_command="codex",
+                transcript_path="/tmp/transcript.jsonl",
+                started_at=1700000000,
+                ended_at=1700000005,
+                exit_code=0,
+            )
+
+            self.assertIsNone(store.get_active_tracked_session())
+            session = store.get_tracked_session("sess-1")
+            self.assertIsNotNone(session)
+            self.assertEqual(session["status"], "exited")
+            self.assertEqual(session["exit_code"], 0)
+
     def test_event_idempotency_with_applied_events(self):
         with tempfile.TemporaryDirectory() as tmp:
             db_path = os.path.join(tmp, "state.sqlite")
