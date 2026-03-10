@@ -93,6 +93,109 @@ class CliTrackTests(unittest.TestCase):
         launch = run_mock.call_args.args[0]
         self.assertEqual(launch.model, "gpt-5.4")
 
+    def test_track_alias_launch_infers_gemini_model_from_settings_json(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            home_dir = Path(temp_dir)
+            gemini_dir = home_dir / ".gemini"
+            gemini_dir.mkdir()
+            (gemini_dir / "settings.json").write_text(
+                json.dumps({"model": {"name": "gemini-2.5-pro"}}),
+                encoding="utf-8",
+            )
+            with patch.object(cli_app, "_run_storage_preflight_if_enabled"), patch.object(
+                track_module,
+                "run_tracked_command",
+                return_value=0,
+            ) as run_mock, patch.dict(os.environ, {"HOME": str(home_dir)}, clear=False):
+                result = self.runner.invoke(app, ["track", "gemini"])
+
+        self.assertEqual(result.exit_code, 0)
+        launch = run_mock.call_args.args[0]
+        self.assertEqual(launch.model, "gemini-2.5-pro")
+
+    def test_track_raw_launch_infers_claude_model_from_workspace_settings_local_json(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            workspace_dir = Path(temp_dir)
+            claude_dir = workspace_dir / ".claude"
+            claude_dir.mkdir()
+            (claude_dir / "settings.local.json").write_text(
+                json.dumps({"model": "claude-sonnet-4-5"}),
+                encoding="utf-8",
+            )
+            with patch.object(cli_app, "_run_storage_preflight_if_enabled"), patch.object(
+                track_module,
+                "run_tracked_command",
+                return_value=0,
+            ) as run_mock, patch("os.getcwd", return_value=str(workspace_dir)):
+                result = self.runner.invoke(app, ["track", "--", "claude"])
+
+        self.assertEqual(result.exit_code, 0)
+        launch = run_mock.call_args.args[0]
+        self.assertEqual(launch.agent, "claude_code")
+        self.assertEqual(launch.model, "claude-sonnet-4-5")
+
+    def test_track_raw_launch_infers_ollama_model_from_run_subcommand(self):
+        with patch.object(cli_app, "_run_storage_preflight_if_enabled"), patch.object(
+            track_module,
+            "run_tracked_command",
+            return_value=0,
+        ) as run_mock:
+            result = self.runner.invoke(app, ["track", "--", "ollama", "run", "llama3.2"])
+
+        self.assertEqual(result.exit_code, 0)
+        launch = run_mock.call_args.args[0]
+        self.assertEqual(launch.model, "llama3.2")
+
+    def test_track_raw_launch_infers_openclaw_model_from_openclaw_config(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            home_dir = Path(temp_dir)
+            openclaw_dir = home_dir / ".openclaw"
+            openclaw_dir.mkdir()
+            (openclaw_dir / "openclaw.json").write_text(
+                json.dumps({"agents": {"defaults": {"model": {"primary": "anthropic/claude-sonnet-4-5"}}}}),
+                encoding="utf-8",
+            )
+            with patch.object(cli_app, "_run_storage_preflight_if_enabled"), patch.object(
+                track_module,
+                "run_tracked_command",
+                return_value=0,
+            ) as run_mock, patch.dict(os.environ, {"HOME": str(home_dir)}, clear=False):
+                result = self.runner.invoke(app, ["track", "--agent", "openclaw", "--", "openclaw"])
+
+        self.assertEqual(result.exit_code, 0)
+        launch = run_mock.call_args.args[0]
+        self.assertEqual(launch.model, "anthropic/claude-sonnet-4-5")
+
+    def test_track_raw_launch_infers_openclaw_model_from_models_json_fallback(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            home_dir = Path(temp_dir)
+            agent_dir = home_dir / ".openclaw" / "agents" / "main" / "agent"
+            agent_dir.mkdir(parents=True)
+            (agent_dir / "models.json").write_text(
+                json.dumps(
+                    {
+                        "providers": {
+                            "qwen-portal": {
+                                "models": [
+                                    {"id": "coder-model"},
+                                ]
+                            }
+                        }
+                    }
+                ),
+                encoding="utf-8",
+            )
+            with patch.object(cli_app, "_run_storage_preflight_if_enabled"), patch.object(
+                track_module,
+                "run_tracked_command",
+                return_value=0,
+            ) as run_mock, patch.dict(os.environ, {"HOME": str(home_dir)}, clear=False):
+                result = self.runner.invoke(app, ["track", "--agent", "openclaw", "--", "openclaw"])
+
+        self.assertEqual(result.exit_code, 0)
+        launch = run_mock.call_args.args[0]
+        self.assertEqual(launch.model, "qwen-portal/coder-model")
+
     def test_track_raw_launch_supports_double_dash(self):
         with patch.object(cli_app, "_run_storage_preflight_if_enabled"), patch.object(
             track_module,

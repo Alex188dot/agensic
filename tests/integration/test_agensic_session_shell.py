@@ -199,12 +199,24 @@ class AgensicSessionShellTests(unittest.TestCase):
             """
             agensic_session_start --agent codex --model gpt-5.3 --agent-name "Planner A" >/dev/null
             _agensic_preexec_hook "agensic track codex"
-            print -r -- "${AGENSIC_PENDING_PROOF_LABEL:-}|${AGENSIC_PENDING_ACCEPTED_ORIGIN:-}|${AGENSIC_NEXT_PROOF_LABEL:-}"
+            print -r -- "${AGENSIC_PENDING_LAST_ACTION:-}|${AGENSIC_PENDING_PROOF_LABEL:-}|${AGENSIC_PENDING_ACCEPTED_ORIGIN:-}|${AGENSIC_NEXT_PROOF_LABEL:-}"
             """
         )
         self.assertEqual(result.returncode, 0, msg=result.stderr)
         lines = [line.strip() for line in result.stdout.splitlines() if line.strip()]
-        self.assertIn("||", lines)
+        self.assertIn("human_typed|||", lines)
+
+    def test_preexec_forces_provenance_launcher_to_human_even_with_active_ai_session(self):
+        result = self._run_zsh(
+            """
+            agensic_session_start --agent codex --model gpt-5.3 --agent-name "Planner A" >/dev/null
+            _agensic_preexec_hook "agensic provenance --tui"
+            print -r -- "${AGENSIC_PENDING_LAST_ACTION:-}|${AGENSIC_PENDING_PROOF_LABEL:-}|${AGENSIC_PENDING_ACCEPTED_ORIGIN:-}|${AGENSIC_NEXT_PROOF_LABEL:-}"
+            """
+        )
+        self.assertEqual(result.returncode, 0, msg=result.stderr)
+        lines = [line.strip() for line in result.stdout.splitlines() if line.strip()]
+        self.assertIn("human_typed|||", lines)
 
     def test_decode_common_escapes_turns_backslash_n_into_newlines(self):
         result = self._run_zsh(

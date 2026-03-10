@@ -2416,11 +2416,12 @@ _agensic_is_blocked_runtime_command() {
     return 1
 }
 
-_agensic_command_is_track_launcher() {
+_agensic_command_forces_human_provenance() {
     local command="$1"
     local -a tokens
     local token=""
     local idx=1
+    local subcmd=""
 
     tokens=("${(z)command}")
     if (( ${#tokens[@]} == 0 )); then
@@ -2448,16 +2449,23 @@ _agensic_command_is_track_launcher() {
         return 1
     fi
 
-    [[ "${tokens[$idx]}" == "track" ]]
+    subcmd="${tokens[$idx]}"
+    [[ "$subcmd" == "track" || "$subcmd" == "provenance" ]]
+}
+
+_agensic_force_pending_human_typed_command() {
+    _agensic_clear_pending_execution
+    AGENSIC_PENDING_LAST_ACTION="human_typed"
+    AGENSIC_PENDING_MANUAL_EDIT_AFTER_ACCEPT=0
+    _agensic_clear_next_proof_fields
 }
 
 _agensic_preexec_hook() {
     if _agensic_session_is_disabled; then
         return
     fi
-    if _agensic_command_is_track_launcher "$1"; then
-        _agensic_clear_pending_execution
-        _agensic_clear_next_proof_fields
+    if _agensic_command_forces_human_provenance "$1"; then
+        _agensic_force_pending_human_typed_command
     else
         _agensic_session_sign_if_active
         if _agensic_pending_execution_has_provenance; then

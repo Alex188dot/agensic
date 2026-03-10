@@ -209,6 +209,55 @@ def _resolve_codex_home(env: dict[str, str] | None = None) -> Path:
     return Path.home() / ".codex"
 
 
+def _resolve_home(env: dict[str, str] | None = None) -> Path:
+    source_env = env or os.environ
+    raw = str(source_env.get("HOME", "") or "").strip()
+    if raw:
+        return Path(raw).expanduser()
+    return Path.home()
+
+
+def _load_json_file(path: Path) -> Any:
+    try:
+        return json.loads(path.read_text(encoding="utf-8"))
+    except Exception:
+        return None
+
+
+def _read_string_path(payload: Any, *path: str) -> str:
+    current = payload
+    for key in path:
+        if not isinstance(current, dict):
+            return ""
+        current = current.get(key)
+    return str(current or "").strip() if isinstance(current, str) else ""
+
+
+def _first_string_in_collection(value: Any) -> str:
+    if isinstance(value, str):
+        return value.strip()
+    if isinstance(value, list):
+        for item in value:
+            found = _first_string_in_collection(item)
+            if found:
+                return found
+    if isinstance(value, dict):
+        for item in value.values():
+            found = _first_string_in_collection(item)
+            if found:
+                return found
+    return ""
+
+
+def _find_upward(start_dir: Path, *parts: str) -> Path | None:
+    current = start_dir.expanduser().resolve()
+    for candidate_root in (current, *current.parents):
+        candidate = candidate_root.joinpath(*parts)
+        if candidate.is_file():
+            return candidate
+    return None
+
+
 def _infer_codex_model(env: dict[str, str] | None = None) -> str:
     config_path = _resolve_codex_home(env) / "config.toml"
     if not config_path.is_file():
@@ -221,9 +270,145 @@ def _infer_codex_model(env: dict[str, str] | None = None) -> str:
     return str(model or "").strip()
 
 
+def _infer_gemini_model(env: dict[str, str] | None = None, cwd: str | None = None) -> str:
+    search_root = Path(cwd or os.getcwd())
+    candidates: list[Path] = []
+    workspace_path = _find_upward(search_root, ".gemini", "settings.json")
+    if workspace_path is not None:
+        candidates.append(workspace_path)
+    candidates.append(_resolve_home(env) / ".gemini" / "settings.json")
+
+    for path in candidates:
+        if not path.is_file():
+            continue
+        payload = _load_json_file(path)
+        model = _read_string_path(payload, "model", "name") or _read_string_path(payload, "model")
+        if model:
+            return model
+    return ""
+
+
+def _infer_claude_code_model(env: dict[str, str] | None = None, cwd: str | None = None) -> str:
+    search_root = Path(cwd or os.getcwd())
+    candidates: list[Path] = []
+    for filename in ("settings.local.json", "settings.json"):
+        workspace_path = _find_upward(search_root, ".claude", filename)
+        if workspace_path is not None:
+            candidates.append(workspace_path)
+    home_dir = _resolve_home(env) / ".claude"
+    candidates.extend([home_dir / "settings.local.json", home_dir / "settings.json"])
+
+    for path in candidates:
+        if not path.is_file():
+            continue
+        payload = _load_json_file(path)
+        model = (
+            _read_string_path(payload, "model")
+            or _read_string_path(payload, "model", "name")
+            or _read_string_path(payload, "env", "ANTHROPIC_MODEL")
+            or _read_string_path(payload, "env", "CLAUDE_CODE_MODEL")
+        )
+        if model:
+            return model
+    return ""
+
+
+def _infer_ollama_model(env: dict[str, str] | None = None) -> str:
+    config_path = _resolve_home(env) / ".ollama" / "config" / "config.json"
+    if not config_path.is_file():
+        return ""
+    payload = _load_json_file(config_path)
+    return (
+        _read_string_path(payload, "model")
+        or _read_string_path(payload, "defaultModel")
+        or _read_string_path(payload, "cli", "model")
+        or _read_string_path(payload, "cli", "defaultModel")
+        or _read_string_path(payload, "default", "model")
+        or _first_string_in_collection(payload)
+    )
+
+
+def _resolve_openclaw_state_dir(env: dict[str, str] | None = None) -> Path:
+    source_env = env or os.environ
+    explicit_state_dir = str(source_env.get("OPENCLAW_STATE_DIR", "") or "").strip()
+    if explicit_state_dir:
+        return Path(explicit_state_dir).expanduser()
+    explicit_config_path = str(source_env.get("OPENCLAW_CONFIG_PATH", "") or "").strip()
+    if explicit_config_path:
+        return Path(explicit_config_path).expanduser().parent
+    return _resolve_home(env) / ".openclaw"
+
+
+def _infer_openclaw_model(env: dict[str, str] | None = None) -> str:
+    state_dir = _resolve_openclaw_state_dir(env)
+    config_path = state_dir / "openclaw.json"
+    if config_path.is_file():
+        payload = _load_json_file(config_path)
+        model = (
+            _read_string_path(payload, "agents", "defaults", "model", "primary")
+            or _read_string_path(payload, "agents", "defaults", "model")
+        )
+        if model:
+            return model
+
+    agent_models_path = state_dir / "agents" / "main" / "agent" / "models.json"
+    if not agent_models_path.is_file():
+        return ""
+    payload = _load_json_file(agent_models_path)
+    providers = payload.get("providers", {}) if isinstance(payload, dict) else {}
+    if not isinstance(providers, dict):
+        return ""
+    for provider_id, provider_payload in providers.items():
+        if not isinstance(provider_payload, dict):
+            continue
+        models = provider_payload.get("models", [])
+        if not isinstance(models, list):
+            continue
+        for model_entry in models:
+            if not isinstance(model_entry, dict):
+                continue
+            model_id = str(model_entry.get("id", "") or "").strip()
+            if model_id:
+                clean_provider = str(provider_id or "").strip()
+                return f"{clean_provider}/{model_id}" if clean_provider else model_id
+    return ""
+
+
+def _infer_inline_track_model(command: list[str]) -> str:
+    if not command:
+        return ""
+    command_text = shlex.join(command)
+    registry = get_agent_registry(force_reload=False)
+    model_meta = registry.extract_model_provider_from_command(command_text)
+    inline_model = str(model_meta.get("model_raw", "") or "").strip()
+    if inline_model:
+        return inline_model
+
+    executable = os.path.basename(str(command[0] or "").strip()).lower()
+    if executable == "ollama" and len(command) >= 3:
+        subcommand = str(command[1] or "").strip().lower()
+        if subcommand in {"run", "chat", "show", "pull", "push", "create", "cp", "rm"}:
+            return str(command[2] or "").strip()
+    return ""
+
+
 def _infer_track_model(*, command: list[str], agent: str, env: dict[str, str] | None = None) -> str:
+    inline_model = _infer_inline_track_model(command)
+    if inline_model:
+        return inline_model
+
+    clean_agent = str(agent or "").strip().lower()
+    executable = os.path.basename(str((command or [""])[0] or "").strip()).lower()
     if _looks_like_codex_launch(command=command, agent=agent):
         return _infer_codex_model(env)
+    if clean_agent in {"gemini", "gemini_cli"} or executable == "gemini":
+        return _infer_gemini_model(env, cwd=os.getcwd())
+    if clean_agent in {"claude", "claude_code"} or executable == "claude":
+        return _infer_claude_code_model(env, cwd=os.getcwd())
+    if clean_agent == "openclaw" or executable == "openclaw":
+        return _infer_openclaw_model(env)
+    if clean_agent == "ollama" or executable == "ollama":
+        return _infer_ollama_model(env)
     return ""
 
 
