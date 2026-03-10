@@ -133,6 +133,60 @@ class AgensicSessionShellTests(unittest.TestCase):
         self.assertIn("inactive", lines)
         self.assertIn("0", lines)
 
+    def test_matching_agent_command_auto_stops_ai_session_on_return(self):
+        result = self._run_zsh(
+            """
+            agensic_session_start --agent codex --model gpt-5.3 >/dev/null
+            _agensic_preexec_hook "codex"
+            _agensic_precmd_hook
+            agensic_session_status
+            print -r -- "${AGENSIC_AI_SESSION_ACTIVE:-0}"
+            """
+        )
+        self.assertEqual(result.returncode, 0, msg=result.stderr)
+        lines = [line.strip() for line in result.stdout.splitlines() if line.strip()]
+        self.assertIn("inactive", lines)
+        self.assertIn("0", lines)
+
+    def test_non_matching_command_does_not_auto_stop_ai_session(self):
+        result = self._run_zsh(
+            """
+            agensic_session_start --agent codex --model gpt-5.3 >/dev/null
+            _agensic_preexec_hook "echo hi"
+            _agensic_precmd_hook
+            print -r -- "${AGENSIC_AI_SESSION_ACTIVE:-0}"
+            """
+        )
+        self.assertEqual(result.returncode, 0, msg=result.stderr)
+        lines = [line.strip() for line in result.stdout.splitlines() if line.strip()]
+        self.assertIn("1", lines)
+
+    def test_detached_nohup_launch_auto_stops_ai_session(self):
+        result = self._run_zsh(
+            """
+            agensic_session_start --agent codex --model gpt-5.3 >/dev/null
+            _agensic_preexec_hook "nohup codex >/tmp/codex.log 2>&1 & disown"
+            _agensic_precmd_hook
+            print -r -- "${AGENSIC_AI_SESSION_ACTIVE:-0}"
+            """
+        )
+        self.assertEqual(result.returncode, 0, msg=result.stderr)
+        lines = [line.strip() for line in result.stdout.splitlines() if line.strip()]
+        self.assertIn("0", lines)
+
+    def test_shell_c_wrapper_launch_auto_stops_ai_session(self):
+        result = self._run_zsh(
+            """
+            agensic_session_start --agent codex --model gpt-5.3 >/dev/null
+            _agensic_preexec_hook "setsid zsh -lc 'codex' >/tmp/codex.log 2>&1 &"
+            _agensic_precmd_hook
+            print -r -- "${AGENSIC_AI_SESSION_ACTIVE:-0}"
+            """
+        )
+        self.assertEqual(result.returncode, 0, msg=result.stderr)
+        lines = [line.strip() for line in result.stdout.splitlines() if line.strip()]
+        self.assertIn("0", lines)
+
     def test_preexec_preserves_human_edit_pending_state(self):
         result = self._run_zsh(
             """

@@ -3037,6 +3037,7 @@ AI_SESSION_ENV_KEYS = (
     "AGENSIC_AI_SESSION_EXPIRES_TS",
     "AGENSIC_AI_SESSION_COUNTER",
     "AGENSIC_AI_SESSION_TIMER_PID",
+    "AGENSIC_AI_SESSION_OWNER_SHELL_PID",
 )
 
 
@@ -3076,12 +3077,47 @@ def _clear_ai_session_state() -> None:
         return
 
 
+def _current_ai_session_owner_shell_pid() -> str:
+    raw = str(os.environ.get("AGENSIC_SHELL_PID", "") or "").strip()
+    if raw.isdigit():
+        return raw
+    parent_pid = int(os.getppid() or 0)
+    return str(parent_pid) if parent_pid > 0 else ""
+
+
+def _ai_session_pid_is_alive(raw_pid: str) -> bool:
+    clean = str(raw_pid or "").strip()
+    if not clean.isdigit():
+        return False
+    try:
+        os.kill(int(clean), 0)
+    except Exception:
+        return False
+    return True
+
+
+def _ai_session_owner_matches_current_shell(values: dict[str, str]) -> bool:
+    owner_pid = str(values.get("AGENSIC_AI_SESSION_OWNER_SHELL_PID", "") or "").strip()
+    if not owner_pid:
+        return True
+    return owner_pid == _current_ai_session_owner_shell_pid()
+
+
+def _read_live_ai_session_state() -> dict[str, str]:
+    values = _read_ai_session_state()
+    owner_pid = str(values.get("AGENSIC_AI_SESSION_OWNER_SHELL_PID", "") or "").strip()
+    if owner_pid and not _ai_session_pid_is_alive(owner_pid):
+        _clear_ai_session_state()
+        return {}
+    return values
+
+
 def _resolve_ai_session_values() -> dict[str, str]:
     values = {key: str(os.environ.get(key, "") or "") for key in AI_SESSION_ENV_KEYS}
-    if str(values.get("AGENSIC_AI_SESSION_ACTIVE", "") or "").strip() == "1":
+    if str(values.get("AGENSIC_AI_SESSION_ACTIVE", "") or "").strip() == "1" and _ai_session_owner_matches_current_shell(values):
         return values
-    persisted = _read_ai_session_state()
-    return persisted if persisted else values
+    persisted = _read_live_ai_session_state()
+    return persisted if persisted and _ai_session_owner_matches_current_shell(persisted) else values
 
 
 def _normalize_signing_identity(agent: str, model: str) -> tuple[str, str, bool]:
@@ -3131,6 +3167,7 @@ def ai_session_start(
         "AGENSIC_AI_SESSION_EXPIRES_TS": str(expires_ts),
         "AGENSIC_AI_SESSION_COUNTER": "0",
         "AGENSIC_AI_SESSION_TIMER_PID": "",
+        "AGENSIC_AI_SESSION_OWNER_SHELL_PID": _current_ai_session_owner_shell_pid(),
     }
     _write_ai_session_state(values)
     lines = [_shell_export_line(key, values.get(key, "")) for key in AI_SESSION_ENV_KEYS]

@@ -59,6 +59,7 @@ class CliAiSessionTests(unittest.TestCase):
         self.assertIn("export AGENSIC_AI_SESSION_EXPIRES_TS=", result.stdout)
         self.assertIn("export AGENSIC_AI_SESSION_COUNTER=0", result.stdout)
         self.assertIn("export AGENSIC_AI_SESSION_TIMER_PID=''", result.stdout)
+        self.assertIn("export AGENSIC_AI_SESSION_OWNER_SHELL_PID=", result.stdout)
 
     def test_ai_session_start_defaults_identity_when_missing(self):
         result = self.runner.invoke(
@@ -87,6 +88,7 @@ class CliAiSessionTests(unittest.TestCase):
             self.assertIn("AGENSIC_AI_SESSION_ACTIVE\t1", payload)
             self.assertIn("AGENSIC_AI_SESSION_AGENT\tcodex", payload)
             self.assertIn("AGENSIC_AI_SESSION_MODEL\tgpt-5.3", payload)
+            self.assertIn("AGENSIC_AI_SESSION_OWNER_SHELL_PID\t", payload)
 
     def test_ai_session_stop_emits_unsets(self):
         with self._temp_app_paths() as env:
@@ -110,6 +112,7 @@ class CliAiSessionTests(unittest.TestCase):
             self.assertIn("unset AGENSIC_AI_SESSION_EXPIRES_TS", result.stdout)
             self.assertIn("unset AGENSIC_AI_SESSION_COUNTER", result.stdout)
             self.assertIn("unset AGENSIC_AI_SESSION_TIMER_PID", result.stdout)
+            self.assertIn("unset AGENSIC_AI_SESSION_OWNER_SHELL_PID", result.stdout)
             self.assertFalse(state_path.exists())
 
     def test_ai_session_status_inactive(self):
@@ -154,6 +157,35 @@ class CliAiSessionTests(unittest.TestCase):
             self.assertIn("agent=codex", result.stdout)
             self.assertIn("model=gpt-5.3", result.stdout)
             self.assertIn("agent_name=Planner A", result.stdout)
+
+    def test_ai_session_status_clears_stale_dead_owner_state(self):
+        with self._temp_app_paths() as env:
+            state_path = Path(env["XDG_STATE_HOME"]) / "agensic" / "ai_session.env"
+            state_path.parent.mkdir(parents=True, exist_ok=True)
+            state_path.write_text(
+                "\n".join(
+                    [
+                        "AGENSIC_AI_SESSION_ACTIVE\t1",
+                        "AGENSIC_AI_SESSION_AGENT\tcodex",
+                        "AGENSIC_AI_SESSION_MODEL\tgpt-5.3",
+                        "AGENSIC_AI_SESSION_AGENT_NAME\tPlanner A",
+                        "AGENSIC_AI_SESSION_ID\tdeadbeef",
+                        "AGENSIC_AI_SESSION_STARTED_TS\t1",
+                        "AGENSIC_AI_SESSION_EXPIRES_TS\t4102444800",
+                        "AGENSIC_AI_SESSION_COUNTER\t0",
+                        "AGENSIC_AI_SESSION_TIMER_PID\t",
+                        "AGENSIC_AI_SESSION_OWNER_SHELL_PID\t999999",
+                    ]
+                )
+                + "\n",
+                encoding="utf-8",
+            )
+
+            result = self.runner.invoke(app, ["ai-session", "status"], env=env)
+
+        self.assertEqual(result.exit_code, 0)
+        self.assertIn("inactive", result.stdout)
+        self.assertFalse(state_path.exists())
 
 
 if __name__ == "__main__":

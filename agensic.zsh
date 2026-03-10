@@ -96,6 +96,8 @@ typeset -g AGENSIC_NEXT_PROOF_KEY_FINGERPRINT=""
 typeset -g AGENSIC_NEXT_PROOF_HOST_FINGERPRINT=""
 typeset -g AGENSIC_AI_SESSION_COUNTER=0
 typeset -g AGENSIC_AI_SESSION_TIMER_PID=""
+typeset -g AGENSIC_AI_SESSION_OWNER_SHELL_PID=""
+typeset -g AGENSIC_AI_SESSION_AUTO_STOP_ARMED=0
 typeset -g AGENSIC_HOOKS_REGISTERED=0
 typeset -gA AGENSIC_NATIVE_ESC_WIDGET
 AGENSIC_NATIVE_ESC_WIDGET=()
@@ -1416,6 +1418,8 @@ _agensic_clear_ai_session_env() {
     unset AGENSIC_AI_SESSION_EXPIRES_TS
     unset AGENSIC_AI_SESSION_COUNTER
     unset AGENSIC_AI_SESSION_TIMER_PID
+    unset AGENSIC_AI_SESSION_OWNER_SHELL_PID
+    AGENSIC_AI_SESSION_AUTO_STOP_ARMED=0
 }
 
 _agensic_write_ai_session_state_file() {
@@ -1438,6 +1442,7 @@ _agensic_write_ai_session_state_file() {
         print -r -- "AGENSIC_AI_SESSION_EXPIRES_TS"$'\t'"${AGENSIC_AI_SESSION_EXPIRES_TS:-}"
         print -r -- "AGENSIC_AI_SESSION_COUNTER"$'\t'"${AGENSIC_AI_SESSION_COUNTER:-0}"
         print -r -- "AGENSIC_AI_SESSION_TIMER_PID"$'\t'
+        print -r -- "AGENSIC_AI_SESSION_OWNER_SHELL_PID"$'\t'"${AGENSIC_AI_SESSION_OWNER_SHELL_PID:-}"
     } >| "$tmp_path" || {
         command rm -f -- "$tmp_path" 2>/dev/null
         return
@@ -1455,7 +1460,7 @@ _agensic_load_ai_session_state_file() {
         return 1
     fi
 
-    local active="" agent="" model="" agent_name="" session_id="" started_ts="" expires_ts="" counter=""
+    local active="" agent="" model="" agent_name="" session_id="" started_ts="" expires_ts="" counter="" owner_shell_pid=""
     local key value
     while IFS=$'\t' read -r key value || [[ -n "$key" ]]; do
         case "$key" in
@@ -1467,10 +1472,18 @@ _agensic_load_ai_session_state_file() {
             AGENSIC_AI_SESSION_STARTED_TS) started_ts="$value" ;;
             AGENSIC_AI_SESSION_EXPIRES_TS) expires_ts="$value" ;;
             AGENSIC_AI_SESSION_COUNTER) counter="$value" ;;
+            AGENSIC_AI_SESSION_OWNER_SHELL_PID) owner_shell_pid="$value" ;;
         esac
     done < "$state_path"
 
     if [[ "$active" != "1" ]]; then
+        return 1
+    fi
+    if [[ -n "$owner_shell_pid" ]] && ! kill -0 "$owner_shell_pid" 2>/dev/null; then
+        command rm -f -- "$state_path" 2>/dev/null
+        return 1
+    fi
+    if [[ -n "$owner_shell_pid" && "$owner_shell_pid" != "$$" ]]; then
         return 1
     fi
 
@@ -1482,6 +1495,7 @@ _agensic_load_ai_session_state_file() {
     export AGENSIC_AI_SESSION_STARTED_TS="$started_ts"
     export AGENSIC_AI_SESSION_EXPIRES_TS="$expires_ts"
     export AGENSIC_AI_SESSION_COUNTER="${counter:-0}"
+    export AGENSIC_AI_SESSION_OWNER_SHELL_PID="$owner_shell_pid"
     return 0
 }
 
@@ -1498,7 +1512,9 @@ _agensic_sync_ai_session_from_state_file() {
     fi
 
     if ! _agensic_load_ai_session_state_file; then
-        _agensic_clear_ai_session_env
+        if [[ "$had_active" == "1" ]]; then
+            _agensic_clear_ai_session_env
+        fi
         return
     fi
 
@@ -1693,7 +1709,9 @@ PY
     export AGENSIC_AI_SESSION_STARTED_TS="$now_ts"
     export AGENSIC_AI_SESSION_EXPIRES_TS="$expires_ts"
     export AGENSIC_AI_SESSION_COUNTER="0"
+    export AGENSIC_AI_SESSION_OWNER_SHELL_PID="$$"
     AGENSIC_AI_SESSION_TIMER_PID=""
+    AGENSIC_AI_SESSION_AUTO_STOP_ARMED=0
     _agensic_write_ai_session_state_file
     _agensic_schedule_ai_session_expiry_timer
 }
@@ -2453,6 +2471,103 @@ _agensic_command_forces_human_provenance() {
     [[ "$subcmd" == "track" || "$subcmd" == "provenance" ]]
 }
 
+_agensic_ai_session_agent_matches_executable() {
+    local executable="${1:l}"
+    local session_agent="${2:l}"
+    if [[ -z "$executable" || -z "$session_agent" ]]; then
+        return 1
+    fi
+
+    case "$session_agent" in
+        codex) [[ "$executable" == "codex" || "$executable" == "codex-agent" ]] ;;
+        claude|claude_code) [[ "$executable" == "claude" ]] ;;
+        gemini|gemini_cli) [[ "$executable" == "gemini" ]] ;;
+        cursor) [[ "$executable" == "cursor" || "$executable" == "cursor-agent" ]] ;;
+        openclaw|opencode|windsurf|kiro|antigravity|aider|continue|ollama) [[ "$executable" == "$session_agent" ]] ;;
+        *) [[ "$executable" == "$session_agent" ]] ;;
+    esac
+}
+
+_agensic_command_matches_ai_session_agent_inner() {
+    local command="$1"
+    local session_agent="$2"
+    local depth="${3:-0}"
+    local -a tokens
+    local token=""
+    local executable=""
+    local idx=1
+    local shell_script=""
+    local shell_token=""
+
+    if [[ -z "$session_agent" || "$depth" != <-> || "$depth" -gt 4 ]]; then
+        return 1
+    fi
+
+    tokens=("${(z)command}")
+    if (( ${#tokens[@]} == 0 )); then
+        return 1
+    fi
+
+    while (( idx <= ${#tokens[@]} )); do
+        token="${tokens[$idx]}"
+        if [[ "$token" == [A-Za-z_][A-Za-z0-9_]*=* ]]; then
+            (( idx += 1 ))
+            continue
+        fi
+        if [[ "$token" == "env" || "$token" == "command" || "$token" == "builtin" || "$token" == "noglob" || "$token" == "nocorrect" || "$token" == "nohup" ]]; then
+            (( idx += 1 ))
+            continue
+        fi
+        if [[ "$token" == "setsid" ]]; then
+            (( idx += 1 ))
+            while (( idx <= ${#tokens[@]} )) && [[ "${tokens[$idx]}" == -* ]]; do
+                (( idx += 1 ))
+            done
+            continue
+        fi
+        break
+    done
+
+    if (( idx > ${#tokens[@]} )); then
+        return 1
+    fi
+
+    executable="${tokens[$idx]##*/}"
+    if _agensic_ai_session_agent_matches_executable "$executable" "$session_agent"; then
+        return 0
+    fi
+
+    case "${executable:l}" in
+        sh|bash|zsh|fish)
+            (( idx += 1 ))
+            while (( idx <= ${#tokens[@]} )); do
+                shell_token="${tokens[$idx]}"
+                if [[ "$shell_token" == "-c" || "$shell_token" == "-lc" || "$shell_token" == "-ic" || "$shell_token" == "-lic" || "$shell_token" == "-ci" ]]; then
+                    shell_script="${tokens[$(( idx + 1 ))]:-}"
+                    break
+                fi
+                (( idx += 1 ))
+            done
+            if [[ -n "$shell_script" ]]; then
+                shell_script="${(Q)shell_script}"
+                _agensic_command_matches_ai_session_agent_inner "$shell_script" "$session_agent" "$(( depth + 1 ))"
+                return $?
+            fi
+            ;;
+    esac
+    return 1
+}
+
+_agensic_command_matches_ai_session_agent() {
+    local command="$1"
+    local session_agent="${AGENSIC_AI_SESSION_AGENT:-}"
+
+    if [[ "${AGENSIC_AI_SESSION_ACTIVE:-0}" != "1" || -z "$session_agent" ]]; then
+        return 1
+    fi
+    _agensic_command_matches_ai_session_agent_inner "$command" "$session_agent" 0
+}
+
 _agensic_force_pending_human_typed_command() {
     _agensic_clear_pending_execution
     AGENSIC_PENDING_LAST_ACTION="human_typed"
@@ -2464,10 +2579,14 @@ _agensic_preexec_hook() {
     if _agensic_session_is_disabled; then
         return
     fi
+    AGENSIC_AI_SESSION_AUTO_STOP_ARMED=0
     if _agensic_command_forces_human_provenance "$1"; then
         _agensic_force_pending_human_typed_command
     else
         _agensic_session_sign_if_active
+        if _agensic_command_matches_ai_session_agent "$1"; then
+            AGENSIC_AI_SESSION_AUTO_STOP_ARMED=1
+        fi
         if _agensic_pending_execution_has_provenance; then
             _agensic_refresh_pending_proof_fields
         else
@@ -2488,8 +2607,10 @@ _agensic_precmd_hook() {
     local started_at_ms="$AGENSIC_LAST_EXECUTED_STARTED_AT_MS"
     local finished_at_ms=""
     local duration_ms=""
+    local auto_stop_armed="${AGENSIC_AI_SESSION_AUTO_STOP_ARMED:-0}"
     AGENSIC_LAST_EXECUTED_CMD=""
     AGENSIC_LAST_EXECUTED_STARTED_AT_MS=0
+    AGENSIC_AI_SESSION_AUTO_STOP_ARMED=0
     _agensic_ensure_ai_session_timer
     _agensic_reload_disabled_patterns_if_needed
 
@@ -2512,15 +2633,24 @@ _agensic_precmd_hook() {
     if _agensic_is_blocked_runtime_command "$cmd"; then
         _agensic_clear_pending_execution
         _agensic_reset_provenance_line_state
+        if [[ "$auto_stop_armed" == "1" ]]; then
+            _agensic_clear_ai_session_env
+        fi
         return
     fi
     if _agensic_matches_disabled_pattern "$cmd"; then
         _agensic_clear_pending_execution
         _agensic_reset_provenance_line_state
+        if [[ "$auto_stop_armed" == "1" ]]; then
+            _agensic_clear_ai_session_env
+        fi
         return
     fi
 
     _agensic_log_command "$cmd" "$exit_code" "runtime" "$duration_ms"
+    if [[ "$auto_stop_armed" == "1" ]]; then
+        _agensic_clear_ai_session_env
+    fi
     _agensic_clear_pending_execution
     _agensic_reset_provenance_line_state
 }
