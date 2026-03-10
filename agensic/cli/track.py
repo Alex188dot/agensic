@@ -53,6 +53,7 @@ TRACK_ESCAPE_PRIMITIVE_TOKENS = (
     " disown;",
     " disown&",
     "setsid ",
+    "launchctl ",
 )
 TRACK_TTY_RESET_SEQ = "\x1b[?1000l\x1b[?1002l\x1b[?1003l\x1b[?1004l\x1b[?1006l\x1b[?1015l"
 
@@ -75,7 +76,10 @@ class ObservedProcess:
     command: str
     working_directory: str
     started_at: float
+    session_id: int = 0
+    process_group_id: int = 0
     detached: bool = False
+    session_escape: bool = False
     finalized: bool = False
 
 
@@ -109,6 +113,8 @@ def _policy_violation_message(code: str) -> str:
         return "agensic track policy: blocked escape attempt; offending process terminated."
     if clean == "unmanaged_child_launch":
         return "agensic track policy: blocked unmanaged terminal launch."
+    if clean == "session_boundary_escape":
+        return "agensic track policy: blocked child process that left the tracked session boundary."
     if clean == "detached_descendants":
         return "agensic track policy: blocked detached child process."
     return "agensic track policy: blocked policy violation."
@@ -131,6 +137,26 @@ def _is_pid_alive(pid: int) -> bool:
         return True
     except Exception:
         return False
+
+
+def _safe_getsid(pid: int) -> int:
+    target_pid = int(pid or 0)
+    if target_pid <= 0:
+        return 0
+    try:
+        return int(os.getsid(target_pid))
+    except Exception:
+        return 0
+
+
+def _safe_getpgid(pid: int) -> int:
+    target_pid = int(pid or 0)
+    if target_pid <= 0:
+        return 0
+    try:
+        return int(os.getpgid(target_pid))
+    except Exception:
+        return 0
 
 
 def _load_track_state() -> dict[str, Any]:
@@ -617,6 +643,9 @@ osascript() {
   fi
   command osascript "$@"
 }
+launchctl() {
+  _agensic_track_deny "launchctl is blocked inside agensic track"
+}
 """,
         encoding="utf-8",
     )
@@ -647,6 +676,9 @@ osascript() {
     return 126
   fi
   command osascript "$@"
+}
+launchctl() {
+  _agensic_track_deny "launchctl is blocked inside agensic track"
 }
 """,
         encoding="utf-8",
@@ -1036,6 +1068,8 @@ def _read_live_process_tree(root_pid: int) -> dict[int, dict[str, Any]]:
                     "args": command,
                     "working_directory": cwd,
                     "started_at": started_at,
+                    "session_id": _safe_getsid(pid),
+                    "process_group_id": _safe_getpgid(pid),
                 }
         except (psutil.NoSuchProcess, psutil.ZombieProcess):
             continue
@@ -1078,11 +1112,20 @@ def _looks_like_escape_primitive(row: dict[str, Any]) -> bool:
     return False
 
 
+def _leaves_allowed_session(row: dict[str, Any], *, root_session_id: int) -> bool:
+    session_id = int(row.get("session_id", 0) or 0)
+    if root_session_id <= 0 or session_id <= 0:
+        return False
+    return session_id != root_session_id
+
+
 class TrackRuntime:
     def __init__(self, launch: TrackLaunch, session_id: str, root_pid: int, transcript_path: str, state_store: SQLiteStateStore):
         self.launch = launch
         self.session_id = session_id
         self.root_pid = int(root_pid)
+        self.root_session_id = _safe_getsid(root_pid) or int(root_pid)
+        self.root_process_group_id = _safe_getpgid(root_pid) or int(root_pid)
         self.controller_pid = int(os.getpid())
         self.transcript_path = transcript_path
         self.state_store = state_store
@@ -1103,6 +1146,8 @@ class TrackRuntime:
                 command=self.launch.root_command,
                 working_directory=self.launch.working_directory,
                 started_at=time.time(),
+                session_id=self.root_session_id,
+                process_group_id=self.root_process_group_id,
             )
         }
 
@@ -1220,7 +1265,7 @@ class TrackRuntime:
         killed = True
         if pid > 0:
             killed = self.kill_process(pid)
-        if code == "unmanaged_child_launch" or not killed:
+        if code in {"unmanaged_child_launch", "session_boundary_escape", "detached_descendants"} or not killed:
             self.request_root_termination(code)
 
     def finalize_process(self, proc: ObservedProcess, *, exit_code: int | None = None) -> None:
@@ -1277,6 +1322,12 @@ class TrackRuntime:
             payload["track_violation_code"] = self.violation_code
         if proc.detached:
             payload["track_process_detached"] = True
+        if proc.session_escape:
+            payload["track_process_session_escape"] = True
+            payload["track_root_session_id"] = self.root_session_id
+            payload["track_process_session_id"] = proc.session_id
+            payload["track_root_process_group_id"] = self.root_process_group_id
+            payload["track_process_group_id"] = proc.process_group_id
         if exit_code is None:
             payload["track_exit_code_unavailable"] = True
 
@@ -1327,7 +1378,10 @@ def _watch_tracked_process_tree(runtime: TrackRuntime) -> None:
                     command=str(row.get("args", "") or "").strip() or str(row.get("comm", "") or "").strip(),
                     working_directory=str(row.get("working_directory", "") or "").strip() or _best_effort_cwd(pid),
                     started_at=float(row.get("started_at", 0.0) or time.time()),
+                    session_id=int(row.get("session_id", 0) or 0),
+                    process_group_id=int(row.get("process_group_id", 0) or 0),
                 )
+                existing = runtime.processes[pid]
             else:
                 command = str(row.get("args", "") or "").strip() or str(row.get("comm", "") or "").strip()
                 if command and (not existing.command or existing.command.startswith("(")):
@@ -1336,6 +1390,11 @@ def _watch_tracked_process_tree(runtime: TrackRuntime) -> None:
                 if working_directory:
                     existing.working_directory = working_directory
                 existing.ppid = int(row.get("ppid", 0) or existing.ppid or 0)
+                existing.session_id = int(row.get("session_id", 0) or existing.session_id or 0)
+                existing.process_group_id = int(row.get("process_group_id", 0) or existing.process_group_id or 0)
+            if pid != runtime.root_pid and _leaves_allowed_session(row, root_session_id=runtime.root_session_id):
+                existing.session_escape = True
+                runtime.terminate_session_for_violation("session_boundary_escape", pid=pid)
             if _looks_like_escape_primitive(row):
                 runtime.terminate_session_for_violation("escape_primitive_blocked", pid=pid)
             if _looks_like_unmanaged_terminal_launch(row):

@@ -269,6 +269,8 @@ class CliTrackTests(unittest.TestCase):
             self.assertTrue((policy_dir / "bash_env.sh").is_file())
             self.assertEqual(child_env["ZDOTDIR"], str(policy_dir))
             self.assertEqual(child_env["BASH_ENV"], str(policy_dir / "bash_env.sh"))
+            self.assertIn("launchctl is blocked inside agensic track", (policy_dir / ".zshenv").read_text(encoding="utf-8"))
+            self.assertIn("launchctl is blocked inside agensic track", (policy_dir / "bash_env.sh").read_text(encoding="utf-8"))
 
     def test_escape_primitive_detector_matches_nohup_and_terminal_automation(self):
         self.assertTrue(
@@ -281,6 +283,7 @@ class CliTrackTests(unittest.TestCase):
                 {"comm": "osascript", "args": 'osascript -e \'tell application "Terminal" to do script "sleep 600"\''}
             )
         )
+        self.assertTrue(track_module._looks_like_escape_primitive({"comm": "launchctl", "args": "launchctl submit -l demo -- sleep 60"}))
 
     def test_run_tracked_command_records_transcript_and_provenance(self):
         with self._temp_app_paths() as (_, temp_paths):
@@ -370,7 +373,7 @@ class CliTrackTests(unittest.TestCase):
             commands = [str(row.get("command", "") or "") for row in store.list_command_runs(limit=20)]
             self.assertTrue(any(command.startswith("sleep 0.05") for command in commands), msg=commands)
 
-    def test_run_tracked_command_marks_detached_descendants(self):
+    def test_run_tracked_command_blocks_session_boundary_escape(self):
         with self._temp_app_paths() as (_, temp_paths):
             daemonize = (
                 "python3 -c \"import os,time;"
@@ -384,14 +387,14 @@ class CliTrackTests(unittest.TestCase):
             launch = track_module.prepare_track_launch(["--", "zsh", "-lc", daemonize])
             code = track_module.run_tracked_command(launch)
 
-            self.assertEqual(code, 0)
+            self.assertIn(code, (0, 143))
             store = SQLiteStateStore(temp_paths.state_sqlite_path, journal=None)
             rows = store.list_command_runs(limit=20)
             payloads = [dict(row.get("payload", {}) or {}) for row in rows]
-            self.assertTrue(any(payload.get("track_process_detached") for payload in payloads), msg=payloads)
+            self.assertTrue(any(payload.get("track_process_session_escape") for payload in payloads), msg=payloads)
             session = store.get_latest_tracked_session()
             self.assertIsNotNone(session)
-            self.assertIn("detached_descendants", str(session.get("violation_code", "") or ""))
+            self.assertIn("session_boundary_escape", str(session.get("violation_code", "") or ""))
 
     def test_run_tracked_command_blocks_escape_primitives(self):
         with self._temp_app_paths() as (_, temp_paths):
