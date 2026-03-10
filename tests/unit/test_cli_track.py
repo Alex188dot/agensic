@@ -65,6 +65,21 @@ class CliTrackTests(unittest.TestCase):
             time.sleep(0.02)
         return None
 
+    def _wait_for_active_sessions(
+        self,
+        temp_paths: ag_paths.AppPaths,
+        count: int,
+        timeout: float = 8.0,
+    ) -> list[dict[str, object]]:
+        deadline = time.time() + timeout
+        store = SQLiteStateStore(temp_paths.state_sqlite_path, journal=None)
+        while time.time() < deadline:
+            active = store.list_active_tracked_sessions(limit=200)
+            if len(active) >= count:
+                return active
+            time.sleep(0.02)
+        return []
+
     def test_track_status_inactive(self):
         with self._temp_app_paths() as (env, _), patch.object(
             cli_app, "_run_storage_preflight_if_enabled"
@@ -80,6 +95,91 @@ class CliTrackTests(unittest.TestCase):
             result = self.runner.invoke(app, ["track", "stop"], env=env)
         self.assertEqual(result.exit_code, 0)
         self.assertIn("inactive", result.stdout)
+
+    def test_track_status_lists_multiple_active_sessions(self):
+        with self._temp_app_paths() as (env, temp_paths), patch.object(
+            cli_app, "_run_storage_preflight_if_enabled"
+        ):
+            ctx = multiprocessing.get_context("spawn")
+            queue_one = ctx.Queue()
+            queue_two = ctx.Queue()
+            worker_one = ctx.Process(
+                target=_run_tracked_command_in_child,
+                args=(env, ["--", "zsh", "-lc", "sleep 30"], queue_one),
+            )
+            worker_two = ctx.Process(
+                target=_run_tracked_command_in_child,
+                args=(env, ["--", "zsh", "-lc", "sleep 30"], queue_two),
+            )
+            worker_one.start()
+            worker_two.start()
+            active = self._wait_for_active_sessions(temp_paths, 2)
+            self.assertGreaterEqual(len(active), 2)
+
+            result = self.runner.invoke(app, ["track", "status"], env=env)
+            self.assertEqual(result.exit_code, 0)
+            self.assertIn("active_sessions=2", result.stdout)
+            for row in active[:2]:
+                self.assertIn(str(row["session_id"]), result.stdout)
+
+            stop_result = self.runner.invoke(app, ["track", "stop", "--all"], env=env)
+            worker_one.join(timeout=10.0)
+            worker_two.join(timeout=10.0)
+
+        self.assertEqual(stop_result.exit_code, 0)
+        self.assertFalse(worker_one.is_alive())
+        self.assertFalse(worker_two.is_alive())
+        self.assertEqual(worker_one.exitcode, 0)
+        self.assertEqual(worker_two.exitcode, 0)
+        self.assertEqual(queue_one.get(timeout=1.0), 143)
+        self.assertEqual(queue_two.get(timeout=1.0), 143)
+
+    def test_track_stop_requires_session_id_when_multiple_active(self):
+        with self._temp_app_paths() as (env, temp_paths), patch.object(
+            cli_app, "_run_storage_preflight_if_enabled"
+        ):
+            ctx = multiprocessing.get_context("spawn")
+            queue_one = ctx.Queue()
+            queue_two = ctx.Queue()
+            worker_one = ctx.Process(
+                target=_run_tracked_command_in_child,
+                args=(env, ["--", "zsh", "-lc", "sleep 30"], queue_one),
+            )
+            worker_two = ctx.Process(
+                target=_run_tracked_command_in_child,
+                args=(env, ["--", "zsh", "-lc", "sleep 30"], queue_two),
+            )
+            worker_one.start()
+            worker_two.start()
+            active = self._wait_for_active_sessions(temp_paths, 2)
+            self.assertGreaterEqual(len(active), 2)
+
+            result = self.runner.invoke(app, ["track", "stop"], env=env)
+            self.assertEqual(result.exit_code, 2)
+            self.assertIn("Multiple tracked sessions are active", result.stdout)
+
+            cleanup = self.runner.invoke(app, ["track", "stop", "--all"], env=env)
+            worker_one.join(timeout=10.0)
+            worker_two.join(timeout=10.0)
+
+        self.assertEqual(cleanup.exit_code, 0)
+        self.assertFalse(worker_one.is_alive())
+        self.assertFalse(worker_two.is_alive())
+        self.assertEqual(queue_one.get(timeout=1.0), 143)
+        self.assertEqual(queue_two.get(timeout=1.0), 143)
+
+    def test_stop_track_sessions_targets_selected_session_id(self):
+        states = [
+            {"session_id": "session-a", "root_pid": 101, "status": "active"},
+            {"session_id": "session-b", "root_pid": 202, "status": "active"},
+        ]
+        with patch.object(track_module, "list_active_track_states", return_value=states), patch.object(
+            track_module, "_request_track_session_stop", return_value=0
+        ) as stop_mock, patch.object(track_module, "_refresh_track_state_cache"):
+            code = track_module.stop_track_sessions("session-b")
+
+        self.assertEqual(code, 0)
+        stop_mock.assert_called_once_with(states[1])
 
     def test_track_alias_launch_resolves_registry_agent(self):
         with tempfile.TemporaryDirectory() as temp_dir, patch.object(
@@ -422,7 +522,7 @@ class CliTrackTests(unittest.TestCase):
             self.assertIsNotNone(active)
             Path(temp_paths.state_dir, "track_session.json").unlink()
 
-            stop_code = track_module.stop_active_track_session()
+            stop_code = track_module.stop_track_sessions()
             worker.join(timeout=10.0)
 
             self.assertEqual(stop_code, 0)

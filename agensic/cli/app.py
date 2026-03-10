@@ -3570,8 +3570,26 @@ def track_command(
 
     if args[0] == "status" and len(args) == 1:
         raise typer.Exit(code=track_runtime.print_track_status())
-    if args[0] == "stop" and len(args) == 1:
-        raise typer.Exit(code=track_runtime.stop_active_track_session())
+    if args[0] == "stop":
+        stop_args = args[1:]
+        stop_all = False
+        session_id = ""
+        for raw_arg in stop_args:
+            clean_arg = str(raw_arg or "").strip()
+            if clean_arg == "--all":
+                stop_all = True
+                continue
+            if clean_arg.startswith("-"):
+                console.print(f"[red]Unknown track stop option:[/red] {clean_arg}")
+                raise typer.Exit(code=2)
+            if session_id:
+                console.print("[red]Usage: agensic track stop [<session_id>] [--all][/red]")
+                raise typer.Exit(code=2)
+            session_id = clean_arg
+        if stop_all and session_id:
+            console.print("[red]Use either a session_id or --all for 'track stop', not both.[/red]")
+            raise typer.Exit(code=2)
+        raise typer.Exit(code=track_runtime.stop_track_sessions(session_id, stop_all=stop_all))
     if args[0] == "inspect" and len(args) <= 2:
         raise typer.Exit(code=track_runtime.inspect_track_session(args[1] if len(args) == 2 else "", replay=replay, tail_events=tail))
 

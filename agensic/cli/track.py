@@ -321,32 +321,47 @@ def _mark_tracked_session_errored(state: dict[str, Any], violation_code: str) ->
         return
 
 
-def _cleanup_stale_track_state() -> dict[str, Any]:
-    cached_state = _load_track_state()
-    active = _state_store().get_active_tracked_session()
-    if active is None:
-        if cached_state:
-            _clear_track_state()
-        return {}
-
-    state = _session_cache_payload(active)
+def _tracked_state_looks_live(state: dict[str, Any]) -> bool:
     status = str(state.get("status", "") or "").strip().lower()
+    if status not in {"active", "stopping"}:
+        return False
     controller_pid = int(state.get("controller_pid", 0) or 0)
     root_pid = int(state.get("root_pid", 0) or 0)
     controller_alive = controller_pid > 0 and _is_pid_alive(controller_pid)
     root_alive = root_pid > 0 and _is_pid_alive(root_pid)
-    if status in {"active", "stopping"} and (controller_alive or root_alive):
-        if cached_state != state:
-            _write_track_state(state)
-        return state
+    return controller_alive or root_alive
 
-    _mark_tracked_session_errored(state, str(state.get("violation_code", "") or "stale_session"))
-    _clear_track_state()
-    return {}
+
+def _refresh_track_state_cache(active_states: list[dict[str, Any]] | None = None) -> None:
+    states = active_states if active_states is not None else list_active_track_states(refresh_cache=False)
+    if states:
+        _write_track_state(states[0])
+    else:
+        _clear_track_state()
+
+
+def list_active_track_states(*, refresh_cache: bool = True) -> list[dict[str, Any]]:
+    cached_state = _load_track_state()
+    states: list[dict[str, Any]] = []
+    for row in _state_store().list_active_tracked_sessions(limit=200):
+        state = _session_cache_payload(row)
+        if _tracked_state_looks_live(state):
+            states.append(state)
+            continue
+        _mark_tracked_session_errored(state, str(state.get("violation_code", "") or "stale_session"))
+
+    if refresh_cache:
+        if states:
+            if cached_state != states[0]:
+                _write_track_state(states[0])
+        elif cached_state:
+            _clear_track_state()
+    return states
 
 
 def get_active_track_state() -> dict[str, Any]:
-    return _cleanup_stale_track_state()
+    active_states = list_active_track_states()
+    return active_states[0] if active_states else {}
 
 
 def get_latest_track_session(session_id: str = "") -> dict[str, Any]:
@@ -354,7 +369,8 @@ def get_latest_track_session(session_id: str = "") -> dict[str, Any]:
     if clean_session_id:
         row = _state_store().get_tracked_session(clean_session_id)
     else:
-        row = get_active_track_state() or _state_store().get_latest_tracked_session()
+        active_states = list_active_track_states()
+        row = active_states[0] if active_states else _state_store().get_latest_tracked_session()
     return _session_cache_payload(dict(row or {})) if row else {}
 
 
@@ -814,42 +830,38 @@ def _find_session_runs(session_id: str, limit: int = 12) -> list[dict[str, Any]]
 
 
 def print_track_status() -> int:
-    state = get_active_track_state()
-    if not state:
+    active_states = list_active_track_states()
+    if not active_states:
         console.print("inactive")
         return 0
-    console.print(
-        "status={status} session_id={session_id} agent={agent} model={model} "
-        "agent_name={agent_name} root_pid={root_pid} controller_pid={controller_pid} "
-        "started_at={started_at} violation={violation}".format(
-            status=str(state.get("status", "") or "inactive"),
-            session_id=str(state.get("session_id", "") or "-"),
-            agent=str(state.get("agent", "") or "-"),
-            model=str(state.get("model", "") or "-"),
-            agent_name=str(state.get("agent_name", "") or "-") or "-",
-            root_pid=str(state.get("root_pid", "") or "-"),
-            controller_pid=str(state.get("controller_pid", "") or "-"),
-            started_at=_format_ts(int(state.get("started_at", 0) or 0)),
-            violation=str(state.get("violation_code", "") or "-"),
-        ),
-        highlight=False,
-    )
-    transcript_path = str(state.get("transcript_path", "") or "").strip()
-    if transcript_path:
-        console.print(f"transcript={transcript_path}", highlight=False)
+    console.print(f"active_sessions={len(active_states)}", highlight=False)
+    for state in active_states:
+        console.print(
+            "status={status} session_id={session_id} agent={agent} model={model} "
+            "agent_name={agent_name} root_pid={root_pid} controller_pid={controller_pid} "
+            "started_at={started_at} violation={violation}".format(
+                status=str(state.get("status", "") or "inactive"),
+                session_id=str(state.get("session_id", "") or "-"),
+                agent=str(state.get("agent", "") or "-"),
+                model=str(state.get("model", "") or "-"),
+                agent_name=str(state.get("agent_name", "") or "-") or "-",
+                root_pid=str(state.get("root_pid", "") or "-"),
+                controller_pid=str(state.get("controller_pid", "") or "-"),
+                started_at=_format_ts(int(state.get("started_at", 0) or 0)),
+                violation=str(state.get("violation_code", "") or "-"),
+            ),
+            highlight=False,
+        )
+        transcript_path = str(state.get("transcript_path", "") or "").strip()
+        if transcript_path:
+            console.print(f"transcript={transcript_path}", highlight=False)
     return 0
 
 
-def stop_active_track_session() -> int:
-    state = get_active_track_state()
-    if not state:
-        console.print("inactive")
-        return 0
-
+def _request_track_session_stop(state: dict[str, Any]) -> int:
     session_id = str(state.get("session_id", "") or "").strip()
     root_pid = int(state.get("root_pid", 0) or 0)
     updated = _session_status_payload(state, status="stopping")
-    _write_track_state(updated)
     if session_id:
         _state_store().upsert_tracked_session(
             session_id=session_id,
@@ -875,7 +887,9 @@ def stop_active_track_session() -> int:
         except ProcessLookupError:
             pass
         except Exception as exc:
-            console.print(f"[red]Failed to stop tracked session:[/red] {exc}")
+            console.print(
+                f"[red]Failed to stop tracked session {session_id or '-'}:[/red] {exc}"
+            )
             return 1
 
         deadline = time.monotonic() + TRACK_STOP_GRACE_SECONDS
@@ -888,9 +902,40 @@ def stop_active_track_session() -> int:
                 os.killpg(root_pid, signal.SIGKILL)
             except Exception:
                 pass
-
-    console.print(f"stop_requested session_id={session_id or '-'}", highlight=False)
     return 0
+
+
+def stop_track_sessions(session_id: str = "", *, stop_all: bool = False) -> int:
+    active_states = list_active_track_states()
+    if not active_states:
+        console.print("inactive")
+        return 0
+
+    clean_session_id = str(session_id or "").strip()
+    targets: list[dict[str, Any]]
+    if stop_all:
+        targets = active_states
+    elif clean_session_id:
+        targets = [state for state in active_states if str(state.get("session_id", "") or "").strip() == clean_session_id]
+        if not targets:
+            console.print(f"[red]No active tracked session found for session_id={clean_session_id}[/red]")
+            return 1
+    elif len(active_states) == 1:
+        targets = [active_states[0]]
+    else:
+        console.print(
+            "[red]Multiple tracked sessions are active. Use 'agensic track stop <session_id>' or 'agensic track stop --all'.[/red]"
+        )
+        return 2
+
+    exit_code = 0
+    for state in targets:
+        exit_code = max(exit_code, _request_track_session_stop(state))
+    _refresh_track_state_cache()
+
+    session_ids = ",".join(str(state.get("session_id", "") or "-") for state in targets)
+    console.print(f"stop_requested sessions={len(targets)} session_ids={session_ids}", highlight=False)
+    return exit_code
 
 
 def inspect_track_session(session_id: str = "", *, replay: bool = False, tail_events: int = TRACK_INSPECT_TAIL_EVENTS) -> int:
@@ -1194,7 +1239,10 @@ class TrackRuntime:
             violation_code=self.violation_code,
             exit_code=exit_code,
         )
-        _write_track_state(payload)
+        if payload["status"] in {"active", "stopping"}:
+            _write_track_state(payload)
+        else:
+            _refresh_track_state_cache()
 
     def note_violation(self, code: str) -> None:
         clean = str(code or "").strip().lower()
@@ -1471,10 +1519,6 @@ def run_tracked_command(launch: TrackLaunch) -> int:
     ensure_track_supported()
     _ensure_track_layout()
     _prune_tracked_transcripts()
-    active = get_active_track_state()
-    if active:
-        console.print("[red]A tracked session is already active.[/red]")
-        return 1
 
     transcript_path = os.path.join(_track_transcripts_dir(), f"{uuid.uuid4().hex}.jsonl")
     state_store = _state_store()
@@ -1619,5 +1663,5 @@ def run_tracked_command(launch: TrackLaunch) -> int:
     final_status = "stopped" if str(final_state.get("status", "") or "").strip().lower() == "stopping" else "exited"
     runtime.persist_state(final_status, exit_code=runtime.root_exit_code if runtime.root_exit_code is not None else 1)
     _prune_tracked_transcripts(exclude_paths={transcript_path})
-    _clear_track_state()
+    _refresh_track_state_cache()
     return int(runtime.root_exit_code if runtime.root_exit_code is not None else 1)

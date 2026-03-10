@@ -804,17 +804,23 @@ class SQLiteStateStore:
         return dict(row) if row is not None else None
 
     def get_active_tracked_session(self) -> Optional[Dict[str, object]]:
+        rows = self.list_active_tracked_sessions(limit=1)
+        return rows[0] if rows else None
+
+    def list_active_tracked_sessions(self, limit: int = 200) -> List[Dict[str, object]]:
+        row_limit = max(1, min(200, int(limit or 200)))
         with self._lock, self._conn() as conn:
-            row = conn.execute(
+            rows = conn.execute(
                 """
                 SELECT *
                 FROM tracked_sessions
                 WHERE status IN ('active', 'stopping')
-                ORDER BY updated_at DESC
-                LIMIT 1
-                """
-            ).fetchone()
-        return dict(row) if row is not None else None
+                ORDER BY updated_at DESC, session_id DESC
+                LIMIT ?
+                """,
+                (row_limit,),
+            ).fetchall()
+        return [dict(row) for row in rows]
 
     def get_latest_tracked_session(self, status: str = "") -> Optional[Dict[str, object]]:
         clean_status = str(status or "").strip().lower()
