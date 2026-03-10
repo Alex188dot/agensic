@@ -3551,6 +3551,8 @@ def track_command(
     agent: str = typer.Option("", "--agent", help="Override tracked agent identifier"),
     model: str = typer.Option("", "--model", help="Explicit tracked model identifier for any provider"),
     agent_name: str = typer.Option("", "--agent-name", help="Override tracked agent display name"),
+    replay: bool = typer.Option(False, "--replay", help="Replay the decoded transcript when using 'track inspect'"),
+    tail: int = typer.Option(8, "--tail", min=1, max=100, help="Tail event count for 'track inspect'"),
 ):
     """Launch and supervise a tracked CLI session."""
     from . import track as track_runtime
@@ -3570,6 +3572,8 @@ def track_command(
         raise typer.Exit(code=track_runtime.print_track_status())
     if args[0] == "stop" and len(args) == 1:
         raise typer.Exit(code=track_runtime.stop_active_track_session())
+    if args[0] == "inspect" and len(args) <= 2:
+        raise typer.Exit(code=track_runtime.inspect_track_session(args[1] if len(args) == 2 else "", replay=replay, tail_events=tail))
 
     try:
         launch = track_runtime.prepare_track_launch(

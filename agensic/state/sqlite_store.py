@@ -816,6 +816,48 @@ class SQLiteStateStore:
             ).fetchone()
         return dict(row) if row is not None else None
 
+    def get_latest_tracked_session(self, status: str = "") -> Optional[Dict[str, object]]:
+        clean_status = str(status or "").strip().lower()
+        query = [
+            "SELECT *",
+            "FROM tracked_sessions",
+        ]
+        params: list[object] = []
+        if clean_status:
+            query.append("WHERE status = ?")
+            params.append(clean_status)
+        query.extend(
+            [
+                "ORDER BY updated_at DESC, session_id DESC",
+                "LIMIT 1",
+            ]
+        )
+        with self._lock, self._conn() as conn:
+            row = conn.execute("\n".join(query), tuple(params)).fetchone()
+        return dict(row) if row is not None else None
+
+    def list_tracked_sessions(self, limit: int = 20, status: str = "") -> List[Dict[str, object]]:
+        row_limit = max(1, min(200, int(limit or 20)))
+        clean_status = str(status or "").strip().lower()
+        query = [
+            "SELECT *",
+            "FROM tracked_sessions",
+        ]
+        params: list[object] = []
+        if clean_status:
+            query.append("WHERE status = ?")
+            params.append(clean_status)
+        query.extend(
+            [
+                "ORDER BY updated_at DESC, session_id DESC",
+                "LIMIT ?",
+            ]
+        )
+        params.append(row_limit)
+        with self._lock, self._conn() as conn:
+            rows = conn.execute("\n".join(query), tuple(params)).fetchall()
+        return [dict(row) for row in rows]
+
     def apply_history_counts(self, command_counts: Dict[str, int], ts: Optional[int] = None) -> int:
         now_ts = int(ts or time.time())
         events: List[Dict[str, object]] = []

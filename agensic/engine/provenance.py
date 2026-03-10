@@ -404,7 +404,12 @@ def inspect_process_lineage(shell_pid: int, max_depth: int = 12) -> dict[str, An
     }
 
 
-def classify_command_run(command: str, payload: dict[str, Any]) -> dict[str, Any]:
+def classify_command_run(
+    command: str,
+    payload: dict[str, Any],
+    *,
+    proof_public_path: str = DEFAULT_PUBLIC_KEY_PATH,
+) -> dict[str, Any]:
     data = payload if isinstance(payload, dict) else {}
     evidence: list[str] = []
 
@@ -456,6 +461,7 @@ def classify_command_run(command: str, payload: dict[str, Any]) -> dict[str, Any
             proof_trace,
             proof_timestamp,
             proof_signature,
+            public_path=proof_public_path,
         )
     elif proof_payload_present:
         proof_valid, proof_reason = (False, proof_field_issues[0])

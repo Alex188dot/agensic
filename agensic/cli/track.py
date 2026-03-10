@@ -19,6 +19,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
+import psutil
 from rich.console import Console
 
 from agensic.engine.provenance import (
@@ -33,8 +34,12 @@ from agensic.utils import atomic_write_json_private
 
 
 console = Console()
-TRACK_POLL_INTERVAL_SECONDS = 0.15
+TRACK_POLL_INTERVAL_SECONDS = 0.01
+TRACK_FINAL_POLL_GRACE_SECONDS = 0.25
 TRACK_STOP_GRACE_SECONDS = 2.0
+TRACK_INSPECT_TAIL_EVENTS = 8
+TRACK_TRANSCRIPT_RETENTION_SECONDS = 7 * 24 * 3600
+TRACK_TRANSCRIPT_MAX_TOTAL_BYTES = 1024 * 1024 * 1024
 TRACK_UNMANAGED_WINDOW_TOKENS = (
     "terminal.app",
     "iterm.app",
@@ -75,6 +80,14 @@ def _track_transcripts_dir() -> str:
 
 def _state_store() -> SQLiteStateStore:
     return SQLiteStateStore(APP_PATHS.state_sqlite_path, journal=None)
+
+
+def _track_private_key_path() -> str:
+    return APP_PATHS.provenance_private_key_path
+
+
+def _track_public_key_path() -> str:
+    return APP_PATHS.provenance_public_key_path
 
 
 def ensure_track_supported() -> None:
@@ -123,6 +136,101 @@ def _clear_track_state() -> None:
         return
 
 
+def _prune_tracked_transcripts(*, exclude_paths: set[str] | None = None) -> dict[str, int]:
+    transcript_dir = Path(_track_transcripts_dir())
+    if not transcript_dir.exists() or not transcript_dir.is_dir():
+        return {"removed_files": 0, "removed_bytes": 0}
+
+    excluded = {
+        str(Path(path).expanduser().resolve(strict=False))
+        for path in (exclude_paths or set())
+        if str(path or "").strip()
+    }
+    now = int(time.time())
+    removed = 0
+    removed_bytes = 0
+
+    candidates: list[tuple[float, Path]] = []
+    for transcript_path in transcript_dir.glob("*.jsonl"):
+        if not transcript_path.is_file():
+            continue
+        try:
+            stat = transcript_path.stat()
+        except OSError:
+            continue
+        candidates.append((float(stat.st_mtime), transcript_path))
+
+    candidates.sort(key=lambda item: (item[0], item[1].name))
+
+    for _, transcript_path in candidates:
+        resolved = str(transcript_path.resolve(strict=False))
+        if resolved in excluded:
+            continue
+        try:
+            stat = transcript_path.stat()
+        except OSError:
+            continue
+        if now - int(stat.st_mtime) <= TRACK_TRANSCRIPT_RETENTION_SECONDS:
+            continue
+        try:
+            transcript_path.unlink(missing_ok=True)
+            removed += 1
+            removed_bytes += int(stat.st_size)
+        except OSError:
+            continue
+
+    remaining: list[tuple[float, Path, int]] = []
+    total_size = 0
+    for transcript_path in transcript_dir.glob("*.jsonl"):
+        if not transcript_path.is_file():
+            continue
+        resolved = str(transcript_path.resolve(strict=False))
+        if resolved in excluded:
+            continue
+        try:
+            stat = transcript_path.stat()
+        except OSError:
+            continue
+        size = int(stat.st_size)
+        total_size += size
+        remaining.append((float(stat.st_mtime), transcript_path, size))
+
+    remaining.sort(key=lambda item: (item[0], item[1].name))
+    for _, transcript_path, size in remaining:
+        if total_size <= TRACK_TRANSCRIPT_MAX_TOTAL_BYTES:
+            break
+        try:
+            transcript_path.unlink(missing_ok=True)
+            removed += 1
+            removed_bytes += size
+            total_size -= size
+        except OSError:
+            continue
+
+    return {"removed_files": removed, "removed_bytes": removed_bytes}
+
+
+def _session_cache_payload(row: dict[str, Any]) -> dict[str, Any]:
+    return {
+        "session_id": str(row.get("session_id", "") or "").strip(),
+        "status": str(row.get("status", "") or "").strip().lower(),
+        "launch_mode": str(row.get("launch_mode", "") or "").strip().lower(),
+        "agent": str(row.get("agent", "") or "").strip().lower(),
+        "model": str(row.get("model", "") or "").strip(),
+        "agent_name": str(row.get("agent_name", "") or "").strip(),
+        "working_directory": str(row.get("working_directory", "") or "").strip(),
+        "root_command": str(row.get("root_command", "") or "").strip(),
+        "transcript_path": str(row.get("transcript_path", "") or "").strip(),
+        "controller_pid": int(row.get("controller_pid", 0) or 0),
+        "root_pid": int(row.get("root_pid", 0) or 0),
+        "started_at": int(row.get("started_at", 0) or 0),
+        "ended_at": int(row.get("ended_at", 0) or 0),
+        "updated_at": int(row.get("updated_at", 0) or 0),
+        "violation_code": str(row.get("violation_code", "") or "").strip().lower(),
+        "exit_code": row.get("exit_code"),
+    }
+
+
 def _session_status_payload(payload: dict[str, Any], *, status: str, violation_code: str = "", exit_code: int | None = None) -> dict[str, Any]:
     out = dict(payload)
     out["status"] = str(status or "").strip().lower()
@@ -136,48 +244,68 @@ def _session_status_payload(payload: dict[str, Any], *, status: str, violation_c
     return out
 
 
+def _mark_tracked_session_errored(state: dict[str, Any], violation_code: str) -> None:
+    session_id = str(state.get("session_id", "") or "").strip()
+    if not session_id:
+        return
+    try:
+        _state_store().upsert_tracked_session(
+            session_id=session_id,
+            status="errored",
+            launch_mode=str(state.get("launch_mode", "") or ""),
+            agent=str(state.get("agent", "") or ""),
+            model=str(state.get("model", "") or ""),
+            agent_name=str(state.get("agent_name", "") or ""),
+            working_directory=str(state.get("working_directory", "") or ""),
+            root_command=str(state.get("root_command", "") or ""),
+            transcript_path=str(state.get("transcript_path", "") or ""),
+            controller_pid=int(state.get("controller_pid", 0) or 0) or None,
+            root_pid=int(state.get("root_pid", 0) or 0) or None,
+            started_at=int(state.get("started_at", 0) or 0),
+            ended_at=int(time.time()),
+            updated_at=int(time.time()),
+            violation_code=str(violation_code or "stale_session"),
+            exit_code=state.get("exit_code"),
+        )
+    except Exception:
+        return
+
+
 def _cleanup_stale_track_state() -> dict[str, Any]:
-    state = _load_track_state()
-    if not state:
+    cached_state = _load_track_state()
+    active = _state_store().get_active_tracked_session()
+    if active is None:
+        if cached_state:
+            _clear_track_state()
         return {}
 
+    state = _session_cache_payload(active)
     status = str(state.get("status", "") or "").strip().lower()
     controller_pid = int(state.get("controller_pid", 0) or 0)
     root_pid = int(state.get("root_pid", 0) or 0)
     controller_alive = controller_pid > 0 and _is_pid_alive(controller_pid)
     root_alive = root_pid > 0 and _is_pid_alive(root_pid)
     if status in {"active", "stopping"} and (controller_alive or root_alive):
+        if cached_state != state:
+            _write_track_state(state)
         return state
 
-    session_id = str(state.get("session_id", "") or "").strip()
-    if session_id:
-        try:
-            _state_store().upsert_tracked_session(
-                session_id=session_id,
-                status="errored",
-                launch_mode=str(state.get("launch_mode", "") or ""),
-                agent=str(state.get("agent", "") or ""),
-                model=str(state.get("model", "") or ""),
-                agent_name=str(state.get("agent_name", "") or ""),
-                working_directory=str(state.get("working_directory", "") or ""),
-                root_command=str(state.get("root_command", "") or ""),
-                transcript_path=str(state.get("transcript_path", "") or ""),
-                controller_pid=controller_pid or None,
-                root_pid=root_pid or None,
-                started_at=int(state.get("started_at", 0) or 0),
-                ended_at=int(time.time()),
-                updated_at=int(time.time()),
-                violation_code=str(state.get("violation_code", "") or "stale_session"),
-                exit_code=state.get("exit_code"),
-            )
-        except Exception:
-            pass
+    _mark_tracked_session_errored(state, str(state.get("violation_code", "") or "stale_session"))
     _clear_track_state()
     return {}
 
 
 def get_active_track_state() -> dict[str, Any]:
     return _cleanup_stale_track_state()
+
+
+def get_latest_track_session(session_id: str = "") -> dict[str, Any]:
+    clean_session_id = str(session_id or "").strip()
+    if clean_session_id:
+        row = _state_store().get_tracked_session(clean_session_id)
+    else:
+        row = get_active_track_state() or _state_store().get_latest_tracked_session()
+    return _session_cache_payload(dict(row or {})) if row else {}
 
 
 def _find_registry_descriptor(token: str) -> dict[str, Any] | None:
@@ -495,6 +623,59 @@ def _format_ts(ts_value: int) -> str:
     return time.strftime("%Y-%m-%d %H:%M:%S", time.localtime(ts))
 
 
+def _format_debug_preview(data: bytes, limit: int = 120) -> str:
+    text = data.decode("utf-8", errors="replace").replace("\r", "\\r").replace("\n", "\\n")
+    return text[:limit] + ("..." if len(text) > limit else "")
+
+
+def _load_transcript_events(path: str) -> list[dict[str, Any]]:
+    target = Path(path).expanduser()
+    if not target.is_file():
+        return []
+    events: list[dict[str, Any]] = []
+    try:
+        lines = target.read_text(encoding="utf-8").splitlines()
+    except Exception:
+        return []
+    for line in lines:
+        try:
+            payload = json.loads(line)
+        except Exception:
+            continue
+        if not isinstance(payload, dict):
+            continue
+        direction = str(payload.get("direction", "") or "").strip()
+        data_b64 = str(payload.get("data_b64", "") or "").strip()
+        try:
+            data = base64.b64decode(data_b64.encode("ascii"), validate=True)
+        except Exception:
+            data = b""
+        events.append(
+            {
+                "ts": float(payload.get("ts", 0.0) or 0.0),
+                "direction": direction,
+                "data": data,
+            }
+        )
+    return events
+
+
+def _find_session_runs(session_id: str, limit: int = 12) -> list[dict[str, Any]]:
+    clean_session_id = str(session_id or "").strip()
+    if not clean_session_id:
+        return []
+    rows = _state_store().list_command_runs(limit=200)
+    out: list[dict[str, Any]] = []
+    for row in rows:
+        payload = dict(row.get("payload", {}) or {})
+        if str(payload.get("track_session_id", "") or "").strip() != clean_session_id:
+            continue
+        out.append(row)
+        if len(out) >= max(1, int(limit or 12)):
+            break
+    return out
+
+
 def print_track_status() -> int:
     state = get_active_track_state()
     if not state:
@@ -575,6 +756,83 @@ def stop_active_track_session() -> int:
     return 0
 
 
+def inspect_track_session(session_id: str = "", *, replay: bool = False, tail_events: int = TRACK_INSPECT_TAIL_EVENTS) -> int:
+    state = get_latest_track_session(session_id)
+    if not state:
+        console.print("[red]No tracked session found.[/red]")
+        return 1
+
+    console.print(
+        "session_id={session_id} status={status} agent={agent} model={model} launch_mode={launch_mode} "
+        "root_pid={root_pid} controller_pid={controller_pid}".format(
+            session_id=str(state.get("session_id", "") or "-"),
+            status=str(state.get("status", "") or "-"),
+            agent=str(state.get("agent", "") or "-"),
+            model=str(state.get("model", "") or "-"),
+            launch_mode=str(state.get("launch_mode", "") or "-"),
+            root_pid=str(state.get("root_pid", "") or "-"),
+            controller_pid=str(state.get("controller_pid", "") or "-"),
+        ),
+        highlight=False,
+    )
+    console.print(
+        "started_at={started_at} ended_at={ended_at} exit_code={exit_code} violation={violation}".format(
+            started_at=_format_ts(int(state.get("started_at", 0) or 0)),
+            ended_at=_format_ts(int(state.get("ended_at", 0) or 0)),
+            exit_code=str(state.get("exit_code", "-") if state.get("exit_code") is not None else "-"),
+            violation=str(state.get("violation_code", "") or "-"),
+        ),
+        highlight=False,
+    )
+    console.print(f"command={str(state.get('root_command', '') or '-')}", highlight=False)
+    transcript_path = str(state.get("transcript_path", "") or "").strip()
+    if transcript_path:
+        console.print(f"transcript={transcript_path}", highlight=False)
+
+    events = _load_transcript_events(transcript_path) if transcript_path else []
+    if replay:
+        if not events:
+            console.print("transcript_replay=unavailable", highlight=False)
+        else:
+            console.print(f"transcript_replay_events={len(events)}", highlight=False)
+            chunks = [event["data"].decode("utf-8", errors="replace") for event in events if bytes(event.get("data", b""))]
+            console.print("".join(chunks), highlight=False, soft_wrap=True)
+    else:
+        pty_events = [event for event in events if str(event.get("direction", "") or "") == "pty"]
+        stdin_events = [event for event in events if str(event.get("direction", "") or "") == "stdin"]
+        console.print(
+            "transcript_events={total} pty_events={pty_count} stdin_events={stdin_count}".format(
+                total=len(events),
+                pty_count=len(pty_events),
+                stdin_count=len(stdin_events),
+            ),
+            highlight=False,
+        )
+        tail = events[-max(1, int(tail_events or TRACK_INSPECT_TAIL_EVENTS)) :] if events else []
+        for idx, event in enumerate(tail, start=1):
+            preview = _format_debug_preview(bytes(event.get("data", b"")))
+            console.print(
+                f"tail[{idx}] direction={str(event.get('direction', '') or '-')} ts={float(event.get('ts', 0.0) or 0.0):.6f} data={preview}",
+                highlight=False,
+            )
+
+    runs = _find_session_runs(str(state.get("session_id", "") or ""))
+    if runs:
+        console.print(f"recorded_runs={len(runs)}", highlight=False)
+        for row in runs:
+            payload = dict(row.get("payload", {}) or {})
+            console.print(
+                "run label={label} exit={exit_code} detached={detached} command={command}".format(
+                    label=str(row.get("label", "") or "-"),
+                    exit_code=str(row.get("exit_code", "-") if row.get("exit_code") is not None else "-"),
+                    detached="1" if payload.get("track_process_detached") else "0",
+                    command=str(row.get("command", "") or "-"),
+                ),
+                highlight=False,
+            )
+    return 0
+
+
 def _write_transcript_event(handle: Any, direction: str, data: bytes) -> None:
     event = {
         "ts": round(time.time(), 6),
@@ -606,62 +864,78 @@ def _best_effort_cwd(pid: int) -> str:
     return ""
 
 
-def _read_process_snapshot() -> dict[int, dict[str, Any]]:
+def _process_command(proc: psutil.Process) -> str:
     try:
-        run = subprocess.run(
-            ["ps", "-axo", "pid=,ppid=,pgid=,stat=,comm=,args="],
-            capture_output=True,
-            text=True,
-            check=False,
-            timeout=1.2,
-        )
+        cmdline = proc.cmdline()
+    except (psutil.AccessDenied, psutil.NoSuchProcess, psutil.ZombieProcess):
+        cmdline = []
+    except Exception:
+        cmdline = []
+    if cmdline:
+        return shlex.join([str(part) for part in cmdline if str(part)])
+
+    try:
+        name = str(proc.name() or "").strip()
+    except Exception:
+        name = ""
+    if name:
+        return name
+    return ""
+
+
+def _read_live_process_tree(root_pid: int) -> dict[int, dict[str, Any]]:
+    if root_pid <= 0:
+        return {}
+    try:
+        root_proc = psutil.Process(root_pid)
+    except (psutil.NoSuchProcess, psutil.ZombieProcess):
+        return {}
     except Exception:
         return {}
 
     out: dict[int, dict[str, Any]] = {}
-    for raw_line in (run.stdout or "").splitlines():
-        line = str(raw_line or "").strip()
-        if not line:
-            continue
-        parts = line.split(None, 5)
-        if len(parts) < 6:
-            continue
+    processes: list[psutil.Process] = [root_proc]
+    try:
+        processes.extend(root_proc.children(recursive=True))
+    except (psutil.NoSuchProcess, psutil.ZombieProcess):
+        pass
+    except Exception:
+        pass
+
+    for proc in processes:
         try:
-            pid = int(parts[0])
-            ppid = int(parts[1])
-            pgid = int(parts[2])
-        except ValueError:
+            with proc.oneshot():
+                pid = int(proc.pid)
+                ppid = int(proc.ppid())
+                command = _process_command(proc)
+                cwd = ""
+                try:
+                    cwd = str(proc.cwd() or "").strip()
+                except (psutil.AccessDenied, psutil.NoSuchProcess, psutil.ZombieProcess):
+                    cwd = ""
+                except Exception:
+                    cwd = ""
+                if not cwd:
+                    cwd = _best_effort_cwd(pid)
+                started_at = 0.0
+                try:
+                    started_at = float(proc.create_time() or 0.0)
+                except (psutil.AccessDenied, psutil.NoSuchProcess, psutil.ZombieProcess):
+                    started_at = 0.0
+                except Exception:
+                    started_at = 0.0
+                out[pid] = {
+                    "pid": pid,
+                    "ppid": ppid,
+                    "comm": str(proc.name() or "").strip(),
+                    "args": command,
+                    "working_directory": cwd,
+                    "started_at": started_at,
+                }
+        except (psutil.NoSuchProcess, psutil.ZombieProcess):
             continue
-        out[pid] = {
-            "pid": pid,
-            "ppid": ppid,
-            "pgid": pgid,
-            "stat": str(parts[3] or "").strip(),
-            "comm": str(parts[4] or "").strip(),
-            "args": str(parts[5] or "").strip(),
-        }
-    return out
-
-
-def _descendant_rows(snapshot: dict[int, dict[str, Any]], root_pid: int) -> dict[int, dict[str, Any]]:
-    if root_pid <= 0 or root_pid not in snapshot:
-        return {}
-    children: dict[int, list[int]] = {}
-    for pid, row in snapshot.items():
-        parent = int(row.get("ppid", 0) or 0)
-        children.setdefault(parent, []).append(pid)
-
-    out: dict[int, dict[str, Any]] = {}
-    stack = [root_pid]
-    while stack:
-        current = stack.pop()
-        if current in out:
+        except Exception:
             continue
-        row = snapshot.get(current)
-        if row is None:
-            continue
-        out[current] = row
-        stack.extend(children.get(current, []))
     return out
 
 
@@ -691,6 +965,8 @@ class TrackRuntime:
         self._lock = threading.Lock()
         self.root_exit_code: int | None = None
         self.violation_code = ""
+        self.private_key_path = _track_private_key_path()
+        self.public_key_path = _track_public_key_path()
         self.processes: dict[int, ObservedProcess] = {
             self.root_pid: ObservedProcess(
                 pid=self.root_pid,
@@ -726,7 +1002,6 @@ class TrackRuntime:
 
     def persist_state(self, status: str, *, exit_code: int | None = None) -> None:
         payload = self.session_payload(status, exit_code=exit_code)
-        _write_track_state(payload)
         self.state_store.upsert_tracked_session(
             session_id=self.session_id,
             status=payload["status"],
@@ -745,6 +1020,7 @@ class TrackRuntime:
             violation_code=self.violation_code,
             exit_code=exit_code,
         )
+        _write_track_state(payload)
 
     def note_violation(self, code: str) -> None:
         clean = str(code or "").strip().lower()
@@ -757,7 +1033,9 @@ class TrackRuntime:
                 self.violation_code = f"{self.violation_code},{clean}"
             else:
                 self.violation_code = clean
-        self.persist_state(_load_track_state().get("status", "active") or "active")
+        state = self.state_store.get_tracked_session(self.session_id) or {}
+        current_status = str(state.get("status", "") or "active").strip().lower() or "active"
+        self.persist_state(current_status)
 
     def finalize_process(self, proc: ObservedProcess, *, exit_code: int | None = None) -> None:
         if proc.finalized:
@@ -767,8 +1045,19 @@ class TrackRuntime:
         working_directory = proc.working_directory or self.launch.working_directory
         trace_id = f"track-{self.session_id}-{proc.pid}"
         ts = int(time.time())
-        signature = sign_proof_payload("AI_EXECUTED", self.launch.agent, self.launch.model, trace_id, ts)
-        proof_metadata = build_local_proof_metadata()
+        signature = sign_proof_payload(
+            "AI_EXECUTED",
+            self.launch.agent,
+            self.launch.model,
+            trace_id,
+            ts,
+            private_path=self.private_key_path,
+            public_path=self.public_key_path,
+        )
+        proof_metadata = build_local_proof_metadata(
+            private_path=self.private_key_path,
+            public_path=self.public_key_path,
+        )
         payload = {
             "shell_pid": int(proc.pid),
             "provenance_last_action": "track_session",
@@ -805,7 +1094,11 @@ class TrackRuntime:
         if exit_code is None:
             payload["track_exit_code_unavailable"] = True
 
-        classification = classify_command_run(proc.command, payload)
+        classification = classify_command_run(
+            proc.command,
+            payload,
+            proof_public_path=self.public_key_path,
+        )
         self.state_store.record_command_provenance(
             command=proc.command,
             label=str(classification.get("label", "UNKNOWN") or "UNKNOWN"),
@@ -834,32 +1127,45 @@ class TrackRuntime:
 
 
 def _watch_tracked_process_tree(runtime: TrackRuntime) -> None:
+    detached_finalize_deadline = 0.0
     while True:
-        snapshot = _read_process_snapshot()
-        descendants = _descendant_rows(snapshot, runtime.root_pid)
+        descendants = _read_live_process_tree(runtime.root_pid)
         descendant_ids = set(descendants.keys())
-        live_ids = set(snapshot.keys())
 
         for pid, row in descendants.items():
-            if pid not in runtime.processes:
+            existing = runtime.processes.get(pid)
+            if existing is None:
                 runtime.processes[pid] = ObservedProcess(
                     pid=pid,
                     ppid=int(row.get("ppid", 0) or 0),
                     command=str(row.get("args", "") or "").strip() or str(row.get("comm", "") or "").strip(),
-                    working_directory=_best_effort_cwd(pid),
-                    started_at=time.time(),
+                    working_directory=str(row.get("working_directory", "") or "").strip() or _best_effort_cwd(pid),
+                    started_at=float(row.get("started_at", 0.0) or time.time()),
                 )
+            else:
+                command = str(row.get("args", "") or "").strip() or str(row.get("comm", "") or "").strip()
+                if command and (not existing.command or existing.command.startswith("(")):
+                    existing.command = command
+                working_directory = str(row.get("working_directory", "") or "").strip()
+                if working_directory:
+                    existing.working_directory = working_directory
+                existing.ppid = int(row.get("ppid", 0) or existing.ppid or 0)
             if _looks_like_unmanaged_terminal_launch(row):
                 runtime.note_violation("unmanaged_child_launch")
+
+        if runtime.root_exit_code is not None and detached_finalize_deadline <= 0:
+            detached_finalize_deadline = time.monotonic() + TRACK_FINAL_POLL_GRACE_SECONDS
 
         for pid, proc in list(runtime.processes.items()):
             if proc.finalized:
                 continue
             if pid in descendant_ids:
                 continue
-            if pid in live_ids:
+            if _is_pid_alive(pid):
                 proc.detached = True
                 runtime.note_violation("detached_descendants")
+                if detached_finalize_deadline > 0 and time.monotonic() >= detached_finalize_deadline:
+                    runtime.finalize_process(proc, exit_code=None)
                 continue
             exit_code = runtime.root_exit_code if pid == runtime.root_pid else None
             runtime.finalize_process(proc, exit_code=exit_code)
@@ -883,6 +1189,7 @@ def _apply_winsize(master_fd: int, stdin_fd: int) -> None:
 def run_tracked_command(launch: TrackLaunch) -> int:
     ensure_track_supported()
     _ensure_track_layout()
+    _prune_tracked_transcripts()
     active = get_active_track_state()
     if active:
         console.print("[red]A tracked session is already active.[/red]")
@@ -999,8 +1306,9 @@ def run_tracked_command(launch: TrackLaunch) -> int:
             except Exception:
                 pass
 
-    final_state = _load_track_state()
+    final_state = state_store.get_tracked_session(session_id) or _load_track_state()
     final_status = "stopped" if str(final_state.get("status", "") or "").strip().lower() == "stopping" else "exited"
     runtime.persist_state(final_status, exit_code=runtime.root_exit_code if runtime.root_exit_code is not None else 1)
+    _prune_tracked_transcripts(exclude_paths={transcript_path})
     _clear_track_state()
     return int(runtime.root_exit_code if runtime.root_exit_code is not None else 1)

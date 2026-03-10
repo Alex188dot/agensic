@@ -2,6 +2,8 @@ import importlib
 import json
 import os
 import tempfile
+import threading
+import time
 import unittest
 from contextlib import contextmanager
 from pathlib import Path
@@ -42,6 +44,16 @@ class CliTrackTests(unittest.TestCase):
                 temp_paths,
             ):
                 yield env, temp_paths
+
+    def _wait_for_active_session(self, temp_paths: ag_paths.AppPaths, timeout: float = 5.0) -> dict[str, object] | None:
+        deadline = time.time() + timeout
+        store = SQLiteStateStore(temp_paths.state_sqlite_path, journal=None)
+        while time.time() < deadline:
+            active = store.get_active_tracked_session()
+            if active is not None:
+                return active
+            time.sleep(0.02)
+        return None
 
     def test_track_status_inactive(self):
         with self._temp_app_paths() as (env, _), patch.object(
@@ -260,6 +272,136 @@ class CliTrackTests(unittest.TestCase):
             self.assertTrue(any(command.startswith("sleep 0.8") for command in commands))
             self.assertTrue(any(str(item.get("track_session_id", "") or "").strip() for item in payloads))
             self.assertTrue(any(item.get("track_launch_mode") == "raw_command" for item in payloads))
+
+    def test_prune_tracked_transcripts_removes_files_older_than_seven_days(self):
+        with self._temp_app_paths() as (_, temp_paths):
+            transcript_dir = Path(temp_paths.state_dir) / "tracked_sessions"
+            transcript_dir.mkdir(parents=True, exist_ok=True)
+            stale_path = transcript_dir / "stale.jsonl"
+            fresh_path = transcript_dir / "fresh.jsonl"
+            stale_path.write_text("old\n", encoding="utf-8")
+            fresh_path.write_text("new\n", encoding="utf-8")
+
+            stale_age = track_module.TRACK_TRANSCRIPT_RETENTION_SECONDS + 10
+            stale_mtime = time.time() - stale_age
+            os.utime(stale_path, (stale_mtime, stale_mtime))
+
+            result = track_module._prune_tracked_transcripts()
+
+            self.assertEqual(result["removed_files"], 1)
+            self.assertFalse(stale_path.exists())
+            self.assertTrue(fresh_path.exists())
+
+    def test_prune_tracked_transcripts_enforces_total_size_limit_oldest_first(self):
+        with self._temp_app_paths() as (_, temp_paths):
+            transcript_dir = Path(temp_paths.state_dir) / "tracked_sessions"
+            transcript_dir.mkdir(parents=True, exist_ok=True)
+            oldest_path = transcript_dir / "oldest.jsonl"
+            protected_path = transcript_dir / "protected.jsonl"
+            newest_path = transcript_dir / "newest.jsonl"
+
+            payload = "x" * 10
+            oldest_path.write_text(payload, encoding="utf-8")
+            protected_path.write_text(payload, encoding="utf-8")
+            newest_path.write_text(payload, encoding="utf-8")
+
+            base_time = time.time() - 60
+            os.utime(oldest_path, (base_time, base_time))
+            os.utime(protected_path, (base_time + 10, base_time + 10))
+            os.utime(newest_path, (base_time + 20, base_time + 20))
+
+            with patch.object(track_module, "TRACK_TRANSCRIPT_MAX_TOTAL_BYTES", 15):
+                result = track_module._prune_tracked_transcripts(exclude_paths={str(protected_path)})
+
+            self.assertEqual(result["removed_files"], 1)
+            self.assertFalse(oldest_path.exists())
+            self.assertTrue(protected_path.exists())
+            self.assertTrue(newest_path.exists())
+
+    def test_run_tracked_command_uses_app_scoped_provenance_keys(self):
+        with self._temp_app_paths() as (_, temp_paths):
+            launch = track_module.prepare_track_launch(["--", "zsh", "-lc", "true"])
+            code = track_module.run_tracked_command(launch)
+
+            self.assertEqual(code, 0)
+            self.assertTrue(Path(temp_paths.provenance_private_key_path).is_file())
+            self.assertTrue(Path(temp_paths.provenance_public_key_path).is_file())
+
+    def test_run_tracked_command_records_short_lived_child_process(self):
+        with self._temp_app_paths() as (_, temp_paths):
+            launch = track_module.prepare_track_launch(["--", "zsh", "-lc", "echo hi; sleep 0.05 & wait"])
+            code = track_module.run_tracked_command(launch)
+
+            self.assertEqual(code, 0)
+            store = SQLiteStateStore(temp_paths.state_sqlite_path, journal=None)
+            commands = [str(row.get("command", "") or "") for row in store.list_command_runs(limit=20)]
+            self.assertTrue(any(command.startswith("sleep 0.05") for command in commands), msg=commands)
+
+    def test_run_tracked_command_marks_detached_descendants(self):
+        with self._temp_app_paths() as (_, temp_paths):
+            daemonize = (
+                "python3 -c \"import os,time;"
+                "pid=os.fork();"
+                "import sys;"
+                "time.sleep(0.2) if pid else None;"
+                "sys.exit(0) if pid else None;"
+                "os.setsid();"
+                "time.sleep(1.5)\""
+            )
+            launch = track_module.prepare_track_launch(["--", "zsh", "-lc", daemonize])
+            code = track_module.run_tracked_command(launch)
+
+            self.assertEqual(code, 0)
+            store = SQLiteStateStore(temp_paths.state_sqlite_path, journal=None)
+            rows = store.list_command_runs(limit=20)
+            payloads = [dict(row.get("payload", {}) or {}) for row in rows]
+            self.assertTrue(any(payload.get("track_process_detached") for payload in payloads), msg=payloads)
+            session = store.get_latest_tracked_session()
+            self.assertIsNotNone(session)
+            self.assertIn("detached_descendants", str(session.get("violation_code", "") or ""))
+
+    def test_track_stop_uses_sqlite_when_cache_file_is_missing(self):
+        with self._temp_app_paths() as (_, temp_paths):
+            result_holder: dict[str, int] = {}
+
+            def _run() -> None:
+                launch = track_module.prepare_track_launch(["--", "zsh", "-lc", "sleep 30"])
+                result_holder["code"] = track_module.run_tracked_command(launch)
+
+            worker = threading.Thread(target=_run)
+            worker.start()
+            active = self._wait_for_active_session(temp_paths)
+            self.assertIsNotNone(active)
+            Path(temp_paths.state_dir, "track_session.json").unlink()
+
+            stop_code = track_module.stop_active_track_session()
+            worker.join(timeout=10.0)
+
+            self.assertEqual(stop_code, 0)
+            self.assertFalse(worker.is_alive())
+            self.assertEqual(result_holder.get("code"), 143)
+            store = SQLiteStateStore(temp_paths.state_sqlite_path, journal=None)
+            session = store.get_tracked_session(str(active.get("session_id", "") or ""))
+            self.assertIsNotNone(session)
+            self.assertEqual(session["status"], "stopped")
+
+    def test_track_inspect_reports_transcript_and_runs(self):
+        with self._temp_app_paths() as (env, temp_paths), patch.object(
+            cli_app, "_run_storage_preflight_if_enabled"
+        ):
+            launch = track_module.prepare_track_launch(["--", "zsh", "-lc", "echo hi"])
+            code = track_module.run_tracked_command(launch)
+            self.assertEqual(code, 0)
+
+            store = SQLiteStateStore(temp_paths.state_sqlite_path, journal=None)
+            session = store.get_latest_tracked_session()
+            self.assertIsNotNone(session)
+            result = self.runner.invoke(app, ["track", "inspect", str(session["session_id"])], env=env)
+
+        self.assertEqual(result.exit_code, 0)
+        self.assertIn("transcript_events=", result.stdout)
+        self.assertIn("recorded_runs=", result.stdout)
+        self.assertIn("command=", result.stdout)
 
 
 if __name__ == "__main__":
