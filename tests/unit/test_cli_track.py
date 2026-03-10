@@ -149,7 +149,12 @@ class CliTrackTests(unittest.TestCase):
             store = SQLiteStateStore(temp_paths.state_sqlite_path, journal=None)
             runs = store.list_command_runs(limit=20)
             self.assertGreaterEqual(len(runs), 1)
+            labels = [str(row.get("label", "") or "") for row in runs]
+            commands = [str(row.get("command", "") or "") for row in runs]
             payloads = [dict(row.get("payload", {}) or {}) for row in runs]
+            self.assertIn("AI_EXECUTED", labels)
+            self.assertTrue(any(command.startswith("zsh -lc ") for command in commands))
+            self.assertTrue(any(command.startswith("sleep 0.8") for command in commands))
             self.assertTrue(any(str(item.get("track_session_id", "") or "").strip() for item in payloads))
             self.assertTrue(any(item.get("track_launch_mode") == "raw_command" for item in payloads))
 

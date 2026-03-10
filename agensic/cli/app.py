@@ -947,6 +947,12 @@ def _run_provenance_tui(
         _reset_terminal_mouse_reporting()
 
 
+def _format_provenance_command_preview(command: object) -> str:
+    text = str(command or "")
+    text = text.replace("\r", " ").replace("\n", " ").replace("\t", " ")
+    return " ".join(part for part in text.split(" ") if part)
+
+
 def _rotate_auth_token_or_exit(context: str) -> None:
     try:
         rotate_auth_token()
@@ -2963,14 +2969,19 @@ def provenance(
         console.print("[yellow]No provenance rows found.[/yellow]")
         return
 
+    terminal_width = shutil.get_terminal_size(fallback=(160, 24)).columns
+    compact = terminal_width < 160
+
     table = Table(title="Agensic Command Provenance")
     table.add_column("TS", style="dim")
     table.add_column("Label")
-    table.add_column("Confidence", justify="right")
-    table.add_column("Tier")
+    if not compact:
+        table.add_column("Confidence", justify="right")
+        table.add_column("Tier")
     table.add_column("Agent")
-    table.add_column("Agent Name")
-    table.add_column("Provider")
+    if not compact:
+        table.add_column("Agent Name")
+        table.add_column("Provider")
     table.add_column("Model")
     table.add_column("Command", overflow="fold")
 
@@ -2983,17 +2994,32 @@ def provenance(
             if ts_value > 0
             else "-"
         )
-        table.add_row(
+        values = [
             ts_display,
             str(row.get("label", "") or ""),
-            f"{float(row.get('confidence', 0.0) or 0.0):.2f}",
-            str(row.get("evidence_tier", "") or ""),
-            str(row.get("agent", "") or ""),
-            str(row.get("agent_name", "") or ""),
-            str(row.get("provider", "") or ""),
-            str(row.get("model", "") or ""),
-            str(row.get("command", "") or ""),
+        ]
+        if not compact:
+            values.extend(
+                [
+                    f"{float(row.get('confidence', 0.0) or 0.0):.2f}",
+                    str(row.get("evidence_tier", "") or ""),
+                ]
+            )
+        values.append(str(row.get("agent", "") or ""))
+        if not compact:
+            values.extend(
+                [
+                    str(row.get("agent_name", "") or ""),
+                    str(row.get("provider", "") or ""),
+                ]
+            )
+        values.extend(
+            [
+                str(row.get("model", "") or ""),
+                _format_provenance_command_preview(row.get("command", "")),
+            ]
         )
+        table.add_row(*values)
     console.print(table)
 
 

@@ -3,8 +3,10 @@ from unittest.mock import patch
 
 from typer.testing import CliRunner
 
-from agensic.cli.app import app
-import agensic.cli.app as app_module
+import importlib
+
+app_module = importlib.import_module("agensic.cli.app")
+app = app_module.app
 
 
 class CliProvenanceTuiTests(unittest.TestCase):
