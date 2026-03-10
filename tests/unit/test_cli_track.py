@@ -1,8 +1,8 @@
 import importlib
 import json
+import multiprocessing
 import os
 import tempfile
-import threading
 import time
 import unittest
 from contextlib import contextmanager
@@ -17,6 +17,16 @@ from agensic.state.sqlite_store import SQLiteStateStore
 cli_app = importlib.import_module("agensic.cli.app")
 track_module = importlib.import_module("agensic.cli.track")
 app = cli_app.app
+
+
+def _run_tracked_command_in_child(env: dict[str, str], command: list[str], result_queue) -> None:
+    os.environ.update(env)
+    temp_paths = ag_paths.get_app_paths()
+    cli_app.APP_PATHS = temp_paths
+    ag_paths.APP_PATHS = temp_paths
+    track_module.APP_PATHS = temp_paths
+    launch = track_module.prepare_track_launch(command)
+    result_queue.put(track_module.run_tracked_command(launch))
 
 
 class CliTrackTests(unittest.TestCase):
@@ -249,6 +259,29 @@ class CliTrackTests(unittest.TestCase):
         self.assertEqual(launch.agent, "claude")
         self.assertEqual(launch.model, "claude-sonnet-4")
 
+    def test_build_tracked_child_env_injects_shell_policy_files(self):
+        with self._temp_app_paths():
+            launch = track_module.prepare_track_launch(["--", "zsh", "-lc", "echo hi"])
+            child_env = track_module._build_tracked_child_env(launch, "session-policy")
+
+            policy_dir = Path(child_env["AGENSIC_TRACK_POLICY_DIR"])
+            self.assertTrue((policy_dir / ".zshenv").is_file())
+            self.assertTrue((policy_dir / "bash_env.sh").is_file())
+            self.assertEqual(child_env["ZDOTDIR"], str(policy_dir))
+            self.assertEqual(child_env["BASH_ENV"], str(policy_dir / "bash_env.sh"))
+
+    def test_escape_primitive_detector_matches_nohup_and_terminal_automation(self):
+        self.assertTrue(
+            track_module._looks_like_escape_primitive(
+                {"comm": "zsh", "args": "zsh -ic 'nohup sleep 5 >/tmp/x 2>&1 & disown'"}
+            )
+        )
+        self.assertTrue(
+            track_module._looks_like_escape_primitive(
+                {"comm": "osascript", "args": 'osascript -e \'tell application "Terminal" to do script "sleep 600"\''}
+            )
+        )
+
     def test_run_tracked_command_records_transcript_and_provenance(self):
         with self._temp_app_paths() as (_, temp_paths):
             launch = track_module.prepare_track_launch(["--", "zsh", "-lc", "echo hi; sleep 0.8 & wait"])
@@ -360,15 +393,27 @@ class CliTrackTests(unittest.TestCase):
             self.assertIsNotNone(session)
             self.assertIn("detached_descendants", str(session.get("violation_code", "") or ""))
 
-    def test_track_stop_uses_sqlite_when_cache_file_is_missing(self):
+    def test_run_tracked_command_blocks_escape_primitives(self):
         with self._temp_app_paths() as (_, temp_paths):
-            result_holder: dict[str, int] = {}
+            launch = track_module.prepare_track_launch(
+                ["--", "zsh", "-ic", "nohup sleep 5 >/tmp/agensic-track-test.log 2>&1 & disown; echo should-not-print"]
+            )
+            code = track_module.run_tracked_command(launch)
 
-            def _run() -> None:
-                launch = track_module.prepare_track_launch(["--", "zsh", "-lc", "sleep 30"])
-                result_holder["code"] = track_module.run_tracked_command(launch)
+            self.assertIn(code, (0, 126, 143))
+            store = SQLiteStateStore(temp_paths.state_sqlite_path, journal=None)
+            session = store.get_latest_tracked_session()
+            self.assertIsNotNone(session)
+            self.assertIn("escape_primitive_blocked", str(session.get("violation_code", "") or ""))
 
-            worker = threading.Thread(target=_run)
+    def test_track_stop_uses_sqlite_when_cache_file_is_missing(self):
+        with self._temp_app_paths() as (env, temp_paths):
+            ctx = multiprocessing.get_context("spawn")
+            result_queue = ctx.Queue()
+            worker = ctx.Process(
+                target=_run_tracked_command_in_child,
+                args=(env, ["--", "zsh", "-lc", "sleep 30"], result_queue),
+            )
             worker.start()
             active = self._wait_for_active_session(temp_paths)
             self.assertIsNotNone(active)
@@ -379,7 +424,8 @@ class CliTrackTests(unittest.TestCase):
 
             self.assertEqual(stop_code, 0)
             self.assertFalse(worker.is_alive())
-            self.assertEqual(result_holder.get("code"), 143)
+            self.assertEqual(worker.exitcode, 0)
+            self.assertEqual(result_queue.get(timeout=1.0), 143)
             store = SQLiteStateStore(temp_paths.state_sqlite_path, journal=None)
             session = store.get_tracked_session(str(active.get("session_id", "") or ""))
             self.assertIsNotNone(session)

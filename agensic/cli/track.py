@@ -40,12 +40,21 @@ TRACK_STOP_GRACE_SECONDS = 2.0
 TRACK_INSPECT_TAIL_EVENTS = 8
 TRACK_TRANSCRIPT_RETENTION_SECONDS = 7 * 24 * 3600
 TRACK_TRANSCRIPT_MAX_TOTAL_BYTES = 1024 * 1024 * 1024
+TRACK_POLICY_CHILD_KILL_GRACE_SECONDS = 0.2
 TRACK_UNMANAGED_WINDOW_TOKENS = (
     "terminal.app",
     "iterm.app",
     "warp.app",
     "ghostty",
 )
+TRACK_ESCAPE_PRIMITIVE_TOKENS = (
+    "nohup ",
+    " disown",
+    " disown;",
+    " disown&",
+    "setsid ",
+)
+TRACK_TTY_RESET_SEQ = "\x1b[?1000l\x1b[?1002l\x1b[?1003l\x1b[?1004l\x1b[?1006l\x1b[?1015l"
 
 
 @dataclass
@@ -82,12 +91,27 @@ def _state_store() -> SQLiteStateStore:
     return SQLiteStateStore(APP_PATHS.state_sqlite_path, journal=None)
 
 
+def _track_policy_dir(session_id: str) -> str:
+    return os.path.join(APP_PATHS.state_dir, "track_policy", str(session_id or "").strip())
+
+
 def _track_private_key_path() -> str:
     return APP_PATHS.provenance_private_key_path
 
 
 def _track_public_key_path() -> str:
     return APP_PATHS.provenance_public_key_path
+
+
+def _policy_violation_message(code: str) -> str:
+    clean = str(code or "").strip().lower()
+    if clean == "escape_primitive_blocked":
+        return "agensic track policy: blocked escape attempt; offending process terminated."
+    if clean == "unmanaged_child_launch":
+        return "agensic track policy: blocked unmanaged terminal launch."
+    if clean == "detached_descendants":
+        return "agensic track policy: blocked detached child process."
+    return "agensic track policy: blocked policy violation."
 
 
 def ensure_track_supported() -> None:
@@ -542,13 +566,94 @@ def _infer_track_model(*, command: list[str], agent: str, env: dict[str, str] | 
 
 def _build_tracked_child_env(launch: TrackLaunch, session_id: str) -> dict[str, str]:
     env = os.environ.copy()
+    policy_dir = _write_track_policy_files(session_id)
     env["AGENSIC_TRACK_ACTIVE"] = "1"
     env["AGENSIC_TRACK_SESSION_ID"] = session_id
     env["AGENSIC_TRACK_AGENT"] = launch.agent
     env["AGENSIC_TRACK_MODEL"] = launch.model
     env["AGENSIC_TRACK_AGENT_NAME"] = launch.agent_name
     env["AGENSIC_TRACK_LAUNCH_MODE"] = launch.launch_mode
+    env["AGENSIC_TRACK_POLICY_DIR"] = policy_dir
+    env["BASH_ENV"] = os.path.join(policy_dir, "bash_env.sh")
+    env["ZDOTDIR"] = policy_dir
     return env
+
+
+def _write_track_policy_files(session_id: str) -> str:
+    policy_dir = Path(_track_policy_dir(session_id))
+    policy_dir.mkdir(parents=True, exist_ok=True)
+
+    zsh_policy = policy_dir / ".zshenv"
+    bash_policy = policy_dir / "bash_env.sh"
+
+    zsh_policy.write_text(
+        """#!/bin/zsh
+if [[ -r "$HOME/.zshenv" ]]; then
+  source "$HOME/.zshenv"
+fi
+_agensic_track_deny() {
+  print -u2 -- "agensic track policy: blocked: $1"
+  return 126
+}
+nohup() {
+  _agensic_track_deny "nohup is blocked inside agensic track"
+}
+disown() {
+  _agensic_track_deny "disown is blocked inside agensic track"
+}
+open() {
+  local joined="${(L)*}"
+  if [[ "$joined" == *"terminal"* || "$joined" == *"iterm"* || "$joined" == *"warp"* || "$joined" == *"ghostty"* ]]; then
+    _agensic_track_deny "terminal launch is blocked inside agensic track"
+    return 126
+  fi
+  command open "$@"
+}
+osascript() {
+  local joined="${(L)*}"
+  if [[ "$joined" == *"tell application \\"terminal\\""* || "$joined" == *"tell application \\"iterm\\""* || "$joined" == *"tell application \\"warp\\""* || "$joined" == *"do script"* ]]; then
+    _agensic_track_deny "terminal automation is blocked inside agensic track"
+    return 126
+  fi
+  command osascript "$@"
+}
+""",
+        encoding="utf-8",
+    )
+    bash_policy.write_text(
+        """#!/usr/bin/env bash
+_agensic_track_deny() {
+  printf '%s\\n' "agensic track policy: blocked: $1" >&2
+  return 126
+}
+nohup() {
+  _agensic_track_deny "nohup is blocked inside agensic track"
+}
+disown() {
+  _agensic_track_deny "disown is blocked inside agensic track"
+}
+open() {
+  local joined="${*,,}"
+  if [[ "$joined" == *terminal* || "$joined" == *iterm* || "$joined" == *warp* || "$joined" == *ghostty* ]]; then
+    _agensic_track_deny "terminal launch is blocked inside agensic track"
+    return 126
+  fi
+  command open "$@"
+}
+osascript() {
+  local joined="${*,,}"
+  if [[ "$joined" == *'tell application "terminal"'* || "$joined" == *'tell application "iterm"'* || "$joined" == *'tell application "warp"'* || "$joined" == *'do script'* ]]; then
+    _agensic_track_deny "terminal automation is blocked inside agensic track"
+    return 126
+  fi
+  command osascript "$@"
+}
+""",
+        encoding="utf-8",
+    )
+    zsh_policy.chmod(0o700)
+    bash_policy.chmod(0o700)
+    return str(policy_dir)
 
 
 def prepare_track_launch(
@@ -953,6 +1058,26 @@ def _looks_like_unmanaged_terminal_launch(row: dict[str, Any]) -> bool:
     return any(token in haystack for token in TRACK_UNMANAGED_WINDOW_TOKENS)
 
 
+def _looks_like_escape_primitive(row: dict[str, Any]) -> bool:
+    haystack = " ".join(
+        [
+            str(row.get("comm", "") or "").strip().lower(),
+            str(row.get("args", "") or "").strip().lower(),
+        ]
+    )
+    if not haystack:
+        return False
+    if any(token in haystack for token in TRACK_ESCAPE_PRIMITIVE_TOKENS):
+        return True
+    if "osascript" in haystack and "do script" in haystack and any(
+        token in haystack for token in (*TRACK_UNMANAGED_WINDOW_TOKENS, "terminal", "iterm", "warp", "ghostty")
+    ):
+        return True
+    if "open -a" in haystack and any(token in haystack for token in TRACK_UNMANAGED_WINDOW_TOKENS):
+        return True
+    return False
+
+
 class TrackRuntime:
     def __init__(self, launch: TrackLaunch, session_id: str, root_pid: int, transcript_path: str, state_store: SQLiteStateStore):
         self.launch = launch
@@ -967,6 +1092,10 @@ class TrackRuntime:
         self.violation_code = ""
         self.private_key_path = _track_private_key_path()
         self.public_key_path = _track_public_key_path()
+        self.blocked_pids: set[int] = set()
+        self.root_termination_requested = threading.Event()
+        self.policy_notice_message = ""
+        self.policy_notice_emitted = False
         self.processes: dict[int, ObservedProcess] = {
             self.root_pid: ObservedProcess(
                 pid=self.root_pid,
@@ -1036,6 +1165,63 @@ class TrackRuntime:
         state = self.state_store.get_tracked_session(self.session_id) or {}
         current_status = str(state.get("status", "") or "active").strip().lower() or "active"
         self.persist_state(current_status)
+
+    def kill_process(self, pid: int) -> bool:
+        target_pid = int(pid or 0)
+        if target_pid <= 0 or target_pid in self.blocked_pids:
+            return not _is_pid_alive(target_pid)
+        self.blocked_pids.add(target_pid)
+        try:
+            target = psutil.Process(target_pid)
+        except (psutil.NoSuchProcess, psutil.ZombieProcess):
+            return True
+        except Exception:
+            target = None
+
+        processes: list[psutil.Process] = []
+        if target is not None:
+            try:
+                processes = target.children(recursive=True)
+            except (psutil.NoSuchProcess, psutil.ZombieProcess):
+                processes = []
+            except Exception:
+                processes = []
+            processes.append(target)
+
+        for proc in reversed(processes):
+            try:
+                proc.terminate()
+            except (psutil.NoSuchProcess, psutil.ZombieProcess):
+                continue
+            except Exception:
+                continue
+
+        _, alive = psutil.wait_procs(processes, timeout=TRACK_POLICY_CHILD_KILL_GRACE_SECONDS)
+        for proc in alive:
+            try:
+                proc.kill()
+            except (psutil.NoSuchProcess, psutil.ZombieProcess):
+                continue
+            except Exception:
+                continue
+        _, alive = psutil.wait_procs(alive, timeout=TRACK_POLICY_CHILD_KILL_GRACE_SECONDS)
+        return not alive and not _is_pid_alive(target_pid)
+
+    def request_root_termination(self, code: str) -> None:
+        self.note_violation(code)
+        if not self.policy_notice_message:
+            self.policy_notice_message = _policy_violation_message(code)
+        self.root_termination_requested.set()
+
+    def terminate_session_for_violation(self, code: str, *, pid: int = 0) -> None:
+        self.note_violation(code)
+        if not self.policy_notice_message:
+            self.policy_notice_message = _policy_violation_message(code)
+        killed = True
+        if pid > 0:
+            killed = self.kill_process(pid)
+        if code == "unmanaged_child_launch" or not killed:
+            self.request_root_termination(code)
 
     def finalize_process(self, proc: ObservedProcess, *, exit_code: int | None = None) -> None:
         if proc.finalized:
@@ -1150,8 +1336,10 @@ def _watch_tracked_process_tree(runtime: TrackRuntime) -> None:
                 if working_directory:
                     existing.working_directory = working_directory
                 existing.ppid = int(row.get("ppid", 0) or existing.ppid or 0)
+            if _looks_like_escape_primitive(row):
+                runtime.terminate_session_for_violation("escape_primitive_blocked", pid=pid)
             if _looks_like_unmanaged_terminal_launch(row):
-                runtime.note_violation("unmanaged_child_launch")
+                runtime.terminate_session_for_violation("unmanaged_child_launch", pid=pid)
 
         if runtime.root_exit_code is not None and detached_finalize_deadline <= 0:
             detached_finalize_deadline = time.monotonic() + TRACK_FINAL_POLL_GRACE_SECONDS
@@ -1163,7 +1351,7 @@ def _watch_tracked_process_tree(runtime: TrackRuntime) -> None:
                 continue
             if _is_pid_alive(pid):
                 proc.detached = True
-                runtime.note_violation("detached_descendants")
+                runtime.terminate_session_for_violation("detached_descendants", pid=pid)
                 if detached_finalize_deadline > 0 and time.monotonic() >= detached_finalize_deadline:
                     runtime.finalize_process(proc, exit_code=None)
                 continue
@@ -1186,6 +1374,40 @@ def _apply_winsize(master_fd: int, stdin_fd: int) -> None:
         return
 
 
+def _drain_master_output(master_fd: int, transcript: Any, stdout_fd: int | None, *, timeout_seconds: float = 0.2) -> None:
+    deadline = time.monotonic() + max(0.0, float(timeout_seconds or 0.0))
+    while time.monotonic() < deadline:
+        try:
+            ready, _, _ = select.select([master_fd], [], [], 0.02)
+        except Exception:
+            return
+        if master_fd not in ready:
+            continue
+        try:
+            data = os.read(master_fd, 4096)
+        except OSError as exc:
+            if exc.errno == errno.EIO:
+                return
+            raise
+        if not data:
+            return
+        _write_transcript_event(transcript, "pty", data)
+        if stdout_fd is not None:
+            os.write(stdout_fd, data)
+        else:
+            sys.stdout.write(data.decode("utf-8", errors="replace"))
+            sys.stdout.flush()
+
+
+def _emit_terminal_reset(stdout_fd: int | None) -> None:
+    if stdout_fd is None:
+        return
+    try:
+        os.write(stdout_fd, TRACK_TTY_RESET_SEQ.encode("utf-8"))
+    except Exception:
+        return
+
+
 def run_tracked_command(launch: TrackLaunch) -> int:
     ensure_track_supported()
     _ensure_track_layout()
@@ -1200,31 +1422,47 @@ def run_tracked_command(launch: TrackLaunch) -> int:
     master_fd, slave_fd = os.openpty()
     session_id = uuid.uuid4().hex[:16]
     child_env = _build_tracked_child_env(launch, session_id)
-    pid = os.fork()
-
-    if pid == 0:
+    proc: subprocess.Popen[bytes] | None = None
+    try:
+        proc = subprocess.Popen(
+            launch.command,
+            stdin=slave_fd,
+            stdout=slave_fd,
+            stderr=slave_fd,
+            cwd=launch.working_directory,
+            env=child_env,
+            start_new_session=True,
+            close_fds=True,
+        )
+    except FileNotFoundError:
+        console.print(f"[red]agensic track: command not found:[/red] {launch.command[0]}")
         try:
-            os.setsid()
-            try:
-                fcntl.ioctl(slave_fd, termios.TIOCSCTTY, 0)
-            except Exception:
-                pass
-            os.dup2(slave_fd, 0)
-            os.dup2(slave_fd, 1)
-            os.dup2(slave_fd, 2)
             os.close(master_fd)
-            if slave_fd > 2:
-                os.close(slave_fd)
-            os.chdir(launch.working_directory)
-            os.execvpe(launch.command[0], launch.command, child_env)
-        except FileNotFoundError:
-            os.write(2, f"agensic track: command not found: {launch.command[0]}\n".encode("utf-8"))
-            os._exit(127)
-        except Exception as exc:
-            os.write(2, f"agensic track failed: {exc}\n".encode("utf-8"))
-            os._exit(1)
+        except Exception:
+            pass
+        try:
+            os.close(slave_fd)
+        except Exception:
+            pass
+        return 127
+    except Exception as exc:
+        console.print(f"[red]agensic track failed:[/red] {exc}")
+        try:
+            os.close(master_fd)
+        except Exception:
+            pass
+        try:
+            os.close(slave_fd)
+        except Exception:
+            pass
+        return 1
+    finally:
+        try:
+            os.close(slave_fd)
+        except Exception:
+            pass
 
-    os.close(slave_fd)
+    pid = int(proc.pid)
     runtime = TrackRuntime(launch=launch, session_id=session_id, root_pid=pid, transcript_path=transcript_path, state_store=state_store)
     runtime.persist_state("active")
 
@@ -1235,6 +1473,7 @@ def run_tracked_command(launch: TrackLaunch) -> int:
     stdin_fd = None
     stdout_fd = None
     resize_handler = None
+    policy_notice = ""
 
     try:
         if sys.stdin.isatty():
@@ -1279,32 +1518,43 @@ def run_tracked_command(launch: TrackLaunch) -> int:
                             sys.stdout.write(data.decode("utf-8", errors="replace"))
                             sys.stdout.flush()
 
-                ended_pid, wait_status = os.waitpid(pid, os.WNOHANG)
-                if ended_pid == pid:
-                    if os.WIFEXITED(wait_status):
-                        runtime.root_exit_code = int(os.WEXITSTATUS(wait_status))
-                    elif os.WIFSIGNALED(wait_status):
-                        runtime.root_exit_code = int(128 + os.WTERMSIG(wait_status))
-                    else:
-                        runtime.root_exit_code = 1
+                if runtime.root_termination_requested.is_set():
+                    try:
+                        os.killpg(runtime.root_pid, signal.SIGTERM)
+                    except Exception:
+                        pass
+
+                exit_code = proc.poll()
+                if exit_code is not None:
+                    runtime.root_exit_code = int(128 + abs(exit_code)) if exit_code < 0 else int(exit_code)
+                    _drain_master_output(master_fd, transcript, stdout_fd)
                     break
     finally:
+        policy_notice = runtime.policy_notice_message if runtime.violation_code else ""
         runtime.stop_event.set()
         watcher.join(timeout=5.0)
-        try:
-            os.close(master_fd)
-        except Exception:
-            pass
         if resize_handler is not None:
             try:
                 signal.signal(signal.SIGWINCH, resize_handler)
             except Exception:
                 pass
+        _emit_terminal_reset(stdout_fd)
         if old_tty is not None and stdin_fd is not None:
             try:
-                termios.tcsetattr(stdin_fd, termios.TCSADRAIN, old_tty)
+                termios.tcsetattr(stdin_fd, termios.TCSAFLUSH, old_tty)
             except Exception:
                 pass
+        try:
+            os.close(master_fd)
+        except Exception:
+            pass
+        if policy_notice and not runtime.policy_notice_emitted:
+            try:
+                sys.stderr.write(f"\n{policy_notice}\n")
+                sys.stderr.flush()
+            except Exception:
+                pass
+            runtime.policy_notice_emitted = True
 
     final_state = state_store.get_tracked_session(session_id) or _load_track_state()
     final_status = "stopped" if str(final_state.get("status", "") or "").strip().lower() == "stopping" else "exited"
