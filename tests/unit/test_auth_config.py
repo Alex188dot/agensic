@@ -3,7 +3,7 @@ import stat
 import tempfile
 import unittest
 
-from agensic.config.loader import save_config_file
+from agensic.config.loader import normalize_config_payload, save_config_file
 from agensic.config.auth import (
     AuthTokenCache,
     ensure_auth_token,
@@ -45,6 +45,18 @@ class AuthConfigTests(unittest.TestCase):
         self.assertEqual(mode, 0o600)
         parent_mode = stat.S_IMODE(os.stat(os.path.dirname(config_path)).st_mode)
         self.assertEqual(parent_mode, 0o700)
+
+    def test_normalize_config_payload_drops_dead_registry_keys(self):
+        normalized = normalize_config_payload(
+            {
+                "provenance_registry_url": "https://registry.agensic.ai/v1/agents.json",
+                "provenance_registry_pubkey": "pubkey",
+                "provenance_registry_refresh_hours": 24,
+            }
+        )
+        self.assertNotIn("provenance_registry_url", normalized)
+        self.assertNotIn("provenance_registry_pubkey", normalized)
+        self.assertNotIn("provenance_registry_refresh_hours", normalized)
 
     def test_rotate_replaces_existing_token(self):
         save_auth_token("old-token", path=self.auth_path)

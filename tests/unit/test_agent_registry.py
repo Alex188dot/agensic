@@ -1,4 +1,6 @@
 import unittest
+from pathlib import Path
+from tempfile import TemporaryDirectory
 
 from agensic.engine.agent_registry import AgentRegistry, build_model_fingerprint
 
@@ -59,6 +61,21 @@ class AgentRegistryTests(unittest.TestCase):
     def test_model_fingerprint_prefers_normalized(self):
         fp = build_model_fingerprint("codex", "gpt-5-codex", "gpt-5.3")
         self.assertEqual(fp, "codex_gpt-5-codex")
+
+    def test_summary_reports_local_override_without_remote_fields(self):
+        with TemporaryDirectory() as tmpdir:
+            override_path = Path(tmpdir) / "agent_registry.local.json"
+            override_path.write_text(
+                '{"version":"local-override","agents":[{"agent_id":"codex","display_name":"Local Codex","status":"verified"}]}',
+                encoding="utf-8",
+            )
+            registry = AgentRegistry(local_override_path=str(override_path))
+
+        summary = registry.summary()
+        self.assertEqual(summary["source"], "local_override")
+        self.assertEqual(summary["version"], "local-override")
+        self.assertNotIn("remote_loaded", summary)
+        self.assertNotIn("remote_cache_path", summary)
 
 
 if __name__ == "__main__":

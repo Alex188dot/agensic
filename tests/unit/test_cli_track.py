@@ -359,18 +359,18 @@ class CliTrackTests(unittest.TestCase):
         self.assertEqual(launch.agent, "claude")
         self.assertEqual(launch.model, "claude-sonnet-4")
 
-    def test_build_tracked_child_env_injects_shell_policy_files(self):
+    def test_build_tracked_child_env_only_injects_tracking_metadata(self):
         with self._temp_app_paths():
             launch = track_module.prepare_track_launch(["--", "zsh", "-lc", "echo hi"])
             child_env = track_module._build_tracked_child_env(launch, "session-policy")
 
-            policy_dir = Path(child_env["AGENSIC_TRACK_POLICY_DIR"])
-            self.assertTrue((policy_dir / ".zshenv").is_file())
-            self.assertTrue((policy_dir / "bash_env.sh").is_file())
-            self.assertEqual(child_env["ZDOTDIR"], str(policy_dir))
-            self.assertEqual(child_env["BASH_ENV"], str(policy_dir / "bash_env.sh"))
-            self.assertIn("launchctl is blocked inside agensic track", (policy_dir / ".zshenv").read_text(encoding="utf-8"))
-            self.assertIn("launchctl is blocked inside agensic track", (policy_dir / "bash_env.sh").read_text(encoding="utf-8"))
+            self.assertEqual(child_env["AGENSIC_TRACK_ACTIVE"], "1")
+            self.assertEqual(child_env["AGENSIC_TRACK_SESSION_ID"], "session-policy")
+            self.assertEqual(child_env["AGENSIC_TRACK_AGENT"], launch.agent)
+            self.assertEqual(child_env["AGENSIC_TRACK_MODEL"], launch.model)
+            self.assertNotIn("AGENSIC_TRACK_POLICY_DIR", child_env)
+            self.assertNotIn("ZDOTDIR", child_env)
+            self.assertNotIn("BASH_ENV", child_env)
 
     def test_escape_primitive_detector_matches_nohup_and_terminal_automation(self):
         self.assertTrue(
@@ -473,7 +473,7 @@ class CliTrackTests(unittest.TestCase):
             commands = [str(row.get("command", "") or "") for row in store.list_command_runs(limit=20)]
             self.assertTrue(any(command.startswith("sleep 0.05") for command in commands), msg=commands)
 
-    def test_run_tracked_command_blocks_session_boundary_escape(self):
+    def test_run_tracked_command_observes_session_boundary_escape(self):
         with self._temp_app_paths() as (_, temp_paths):
             daemonize = (
                 "python3 -c \"import os,time;"
@@ -487,7 +487,7 @@ class CliTrackTests(unittest.TestCase):
             launch = track_module.prepare_track_launch(["--", "zsh", "-lc", daemonize])
             code = track_module.run_tracked_command(launch)
 
-            self.assertIn(code, (0, 143))
+            self.assertEqual(code, 0)
             store = SQLiteStateStore(temp_paths.state_sqlite_path, journal=None)
             rows = store.list_command_runs(limit=20)
             payloads = [dict(row.get("payload", {}) or {}) for row in rows]
@@ -496,14 +496,14 @@ class CliTrackTests(unittest.TestCase):
             self.assertIsNotNone(session)
             self.assertIn("session_boundary_escape", str(session.get("violation_code", "") or ""))
 
-    def test_run_tracked_command_blocks_escape_primitives(self):
+    def test_run_tracked_command_observes_escape_primitives_without_blocking(self):
         with self._temp_app_paths() as (_, temp_paths):
             launch = track_module.prepare_track_launch(
                 ["--", "zsh", "-ic", "nohup sleep 5 >/tmp/agensic-track-test.log 2>&1 & disown; echo should-not-print"]
             )
             code = track_module.run_tracked_command(launch)
 
-            self.assertIn(code, (0, 126, 143))
+            self.assertEqual(code, 0)
             store = SQLiteStateStore(temp_paths.state_sqlite_path, journal=None)
             session = store.get_latest_tracked_session()
             self.assertIsNotNone(session)

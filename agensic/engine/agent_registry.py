@@ -8,8 +8,6 @@ from typing import Any
 
 from agensic.paths import APP_PATHS
 
-DEFAULT_REMOTE_CACHE_PATH = APP_PATHS.agent_registry_remote_cache_path
-DEFAULT_REMOTE_META_PATH = APP_PATHS.agent_registry_remote_meta_path
 DEFAULT_LOCAL_OVERRIDE_PATH = APP_PATHS.agent_registry_local_override_path
 
 
@@ -73,19 +71,14 @@ class AgentRegistry:
     def __init__(
         self,
         builtin_path: str | None = None,
-        remote_cache_path: str | None = None,
-        remote_meta_path: str | None = None,
         local_override_path: str | None = None,
     ) -> None:
         here = Path(__file__).resolve().parent
         self._builtin_path = str(builtin_path or (here / "data" / "agents_builtin.json"))
-        self._remote_cache_path = str(remote_cache_path or DEFAULT_REMOTE_CACHE_PATH)
-        self._remote_meta_path = str(remote_meta_path or DEFAULT_REMOTE_META_PATH)
         self._local_override_path = str(local_override_path or DEFAULT_LOCAL_OVERRIDE_PATH)
 
         self.registry_version = ""
         self.registry_source = "builtin"
-        self.remote_loaded = False
         self._agents: dict[str, AgentDescriptor] = {}
         self._aliases: dict[str, str] = {}
         self.reload()
@@ -125,10 +118,6 @@ class AgentRegistry:
             return data if isinstance(data, dict) else {}
         except Exception:
             return {}
-
-    def _remote_cache_is_verified(self) -> bool:
-        meta = self._load_json_file(self._remote_meta_path)
-        return bool(meta.get("signature_valid", False))
 
     def _doc_to_map(self, doc: dict[str, Any]) -> dict[str, dict[str, Any]]:
         out: dict[str, dict[str, Any]] = {}
@@ -180,16 +169,10 @@ class AgentRegistry:
 
     def reload(self) -> None:
         builtin = self._load_json_file(self._builtin_path)
-        remote = self._load_json_file(self._remote_cache_path) if self._remote_cache_is_verified() else {}
         local = self._load_json_file(self._local_override_path)
 
         merged: dict[str, dict[str, Any]] = {}
         merged.update(self._doc_to_map(builtin))
-
-        remote_used = False
-        if remote:
-            merged.update(self._doc_to_map(remote))
-            remote_used = True
 
         if local:
             merged.update(self._doc_to_map(local))
@@ -205,20 +188,15 @@ class AgentRegistry:
                 alias_map[alias] = descriptor.agent_id
 
         builtin_version = self._normalize(builtin.get("version")) or "builtin"
-        remote_version = self._normalize(remote.get("version"))
         local_version = self._normalize(local.get("version"))
 
         if local_version:
             self.registry_version = local_version
             self.registry_source = "local_override"
-        elif remote_used and remote_version:
-            self.registry_version = remote_version
-            self.registry_source = "remote"
         else:
             self.registry_version = builtin_version
             self.registry_source = "builtin"
 
-        self.remote_loaded = remote_used
         self._agents = agents
         self._aliases = alias_map
 
@@ -227,9 +205,7 @@ class AgentRegistry:
             "version": self.registry_version,
             "source": self.registry_source,
             "agent_count": len(self._agents),
-            "remote_loaded": bool(self.remote_loaded),
             "builtin_path": self._builtin_path,
-            "remote_cache_path": self._remote_cache_path,
             "local_override_path": self._local_override_path,
         }
 

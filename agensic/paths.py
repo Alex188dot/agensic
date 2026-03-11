@@ -56,8 +56,6 @@ class AppPaths:
     provenance_tui_bin: str
     provenance_private_key_path: str
     provenance_public_key_path: str
-    agent_registry_remote_cache_path: str
-    agent_registry_remote_meta_path: str
     agent_registry_local_override_path: str
 
 
@@ -119,8 +117,6 @@ def get_app_paths() -> AppPaths:
         provenance_tui_bin=os.path.join(install_bin_dir, "agensic-provenance-tui"),
         provenance_private_key_path=os.path.join(config_dir, "provenance_ed25519.pem"),
         provenance_public_key_path=os.path.join(config_dir, "provenance_ed25519.pub.pem"),
-        agent_registry_remote_cache_path=os.path.join(cache_dir, "agent_registry.remote.json"),
-        agent_registry_remote_meta_path=os.path.join(cache_dir, "agent_registry.remote.meta.json"),
         agent_registry_local_override_path=os.path.join(config_dir, "agent_registry.local.json"),
     )
 
@@ -156,8 +152,6 @@ def migrate_legacy_layout() -> None:
         (legacy_root / "plugin.log", Path(APP_PATHS.plugin_log_file)),
         (legacy_root / "provenance_ed25519.pem", Path(APP_PATHS.provenance_private_key_path)),
         (legacy_root / "provenance_ed25519.pub.pem", Path(APP_PATHS.provenance_public_key_path)),
-        (legacy_root / "agent_registry.remote.json", Path(APP_PATHS.agent_registry_remote_cache_path)),
-        (legacy_root / "agent_registry.remote.meta.json", Path(APP_PATHS.agent_registry_remote_meta_path)),
         (legacy_root / "agent_registry.local.json", Path(APP_PATHS.agent_registry_local_override_path)),
         (legacy_root / "last_indexed_line", Path(APP_PATHS.last_indexed_path)),
         (legacy_root / "agensic.zsh", Path(APP_PATHS.shell_integration_path)),
