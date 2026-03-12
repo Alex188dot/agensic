@@ -9,7 +9,7 @@ use ratatui::backend::CrosstermBackend;
 use ratatui::layout::{Constraint, Direction, Layout, Rect};
 use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span};
-use ratatui::widgets::{Block, Borders, Cell, Paragraph, Row, Table, TableState, Wrap};
+use ratatui::widgets::{Block, Borders, Cell, Clear, Paragraph, Row, Table, TableState, Wrap};
 use ratatui::Terminal;
 use reqwest::blocking::Client;
 use serde::Deserialize;
@@ -116,6 +116,10 @@ struct DetailState {
 
 impl DetailState {
     fn new(session: SessionSummary, events: Vec<SessionEvent>, autoplay: bool) -> Self {
+        let initial_event_index = events
+            .iter()
+            .position(|event| event.event_type == "command.recorded")
+            .unwrap_or(0);
         let replay_indices: Vec<usize> = events
             .iter()
             .enumerate()
@@ -131,7 +135,7 @@ impl DetailState {
             session,
             events,
             focus: if autoplay { FocusPane::Replay } else { FocusPane::Timeline },
-            event_index: 0,
+            event_index: initial_event_index,
             replay_indices,
             replay_step: 0,
             replay_text: String::new(),
@@ -157,7 +161,7 @@ impl DetailState {
         for idx in self.replay_indices.iter().take(self.replay_step + 1) {
             if let Some(event) = self.events.get(*idx) {
                 if let Some(chunk) = event.payload.get("data").and_then(Value::as_str) {
-                    text.push_str(chunk);
+                    text.push_str(&sanitize_terminal_output(chunk));
                 }
             }
         }
@@ -237,6 +241,7 @@ struct App {
     detail: Option<DetailState>,
     status: String,
     deep_link: bool,
+    needs_terminal_clear: bool,
 }
 
 impl App {
@@ -249,6 +254,7 @@ impl App {
             detail: None,
             status: "Ready".to_string(),
             deep_link: !args.session_id.trim().is_empty(),
+            needs_terminal_clear: true,
         };
         app.refresh_sessions()?;
         if !args.session_id.trim().is_empty() {
@@ -325,6 +331,7 @@ impl App {
 
         self.detail = Some(DetailState::new(session, events_payload.events, replay));
         self.status = format!("Opened session {}", session_id);
+        self.needs_terminal_clear = true;
         Ok(())
     }
 }
@@ -349,6 +356,10 @@ fn run(client: Client, args: SessionsArgs) -> Result<(), String> {
     let mut app = App::new(client, args)?;
 
     loop {
+        if app.needs_terminal_clear {
+            terminal.clear().map_err(|e| format!("terminal clear failed: {}", e))?;
+            app.needs_terminal_clear = false;
+        }
         if let Some(detail) = app.detail.as_mut() {
             detail.advance_autoplay();
         }
@@ -388,6 +399,7 @@ fn handle_key(app: &mut App, key: KeyEvent) -> Result<bool, String> {
                 }
                 app.detail = None;
                 app.status = "Back to sessions".to_string();
+                app.needs_terminal_clear = true;
             }
             KeyCode::Char('t') => detail.focus = FocusPane::Replay,
             KeyCode::Char('e') => detail.focus = FocusPane::Timeline,
@@ -465,9 +477,10 @@ fn draw_ui(frame: &mut ratatui::Frame<'_>, app: &App) {
 
 fn draw_browser(frame: &mut ratatui::Frame<'_>, app: &App) {
     let area = frame.area();
+    frame.render_widget(Clear, area);
     let chunks = Layout::default()
         .direction(Direction::Vertical)
-        .constraints([Constraint::Min(5), Constraint::Length(2)])
+        .constraints([Constraint::Min(5), Constraint::Length(2), Constraint::Length(1)])
         .split(area);
 
     let rows: Vec<Row> = app
@@ -501,9 +514,9 @@ fn draw_browser(frame: &mut ratatui::Frame<'_>, app: &App) {
             Constraint::Length(18),
             Constraint::Length(19),
             Constraint::Length(18),
-            Constraint::Length(18),
-            Constraint::Length(30),
             Constraint::Length(16),
+            Constraint::Length(30),
+            Constraint::Length(18),
             Constraint::Length(12),
             Constraint::Min(14),
         ],
@@ -527,62 +540,50 @@ fn draw_browser(frame: &mut ratatui::Frame<'_>, app: &App) {
     }
     frame.render_stateful_widget(table, chunks[0], &mut state);
     frame.render_widget(
-        Paragraph::new("↑↓ move  Enter open  r refresh  Esc quit")
+        Paragraph::new(format!(
+            "↑↓ move  Enter open  r refresh  Esc quit    {}",
+            app.status
+        ))
             .style(Style::default().fg(Color::White)),
         chunks[1],
+    );
+    frame.render_widget(
+        Paragraph::new(format!("sessions: {}", app.sessions.len()))
+            .style(Style::default().fg(Color::DarkGray)),
+        chunks[2],
     );
 }
 
 fn draw_detail(frame: &mut ratatui::Frame<'_>, app: &App, detail: &DetailState) {
     let area = frame.area();
+    frame.render_widget(Clear, area);
     let chunks = Layout::default()
         .direction(Direction::Vertical)
-        .constraints([Constraint::Length(4), Constraint::Percentage(45), Constraint::Min(10), Constraint::Length(2)])
+        .constraints([
+            Constraint::Length(5),
+            Constraint::Min(12),
+            Constraint::Length(2),
+        ])
         .split(area);
-    let top = Paragraph::new(vec![
-        Line::from(format!(
-            "{}  {}  repo={}  duration={}  outcome={}",
-            if detail.session.agent_name.trim().is_empty() {
-                detail.session.agent.as_str()
-            } else {
-                detail.session.agent_name.as_str()
-            },
-            detail.session.model,
-            if detail.session.repo_root.trim().is_empty() {
-                "-"
-            } else {
-                detail.session.repo_root.as_str()
-            },
-            format_duration(detail.session.started_at, detail.session.ended_at),
-            format_outcome(detail.session.exit_code, &detail.session.status, &detail.session.violation_code)
-        )),
-        Line::from(format!(
-            "session={}  branch {} -> {}  head {} -> {}",
-            detail.session.session_id,
-            fallback_text(&detail.session.branch_start),
-            fallback_text(&detail.session.branch_end),
-            truncate(&detail.session.head_start, 12),
-            truncate(&detail.session.head_end, 12),
-        )),
-    ])
-    .block(Block::default().borders(Borders::ALL).title("Header"))
-    .wrap(Wrap { trim: true });
-    frame.render_widget(top, chunks[0]);
+    frame.render_widget(build_header(detail), chunks[0]);
 
-    let upper = Layout::default()
+    let body = Layout::default()
         .direction(Direction::Horizontal)
-        .constraints([Constraint::Percentage(52), Constraint::Percentage(48)])
+        .constraints([Constraint::Percentage(46), Constraint::Percentage(54)])
         .split(chunks[1]);
-    frame.render_widget(build_timeline(detail), upper[0]);
-    frame.render_widget(build_changes(detail), upper[1]);
-
-    frame.render_widget(build_replay(detail), chunks[2]);
+    let right = Layout::default()
+        .direction(Direction::Vertical)
+        .constraints([Constraint::Percentage(42), Constraint::Percentage(58)])
+        .split(body[1]);
+    frame.render_widget(build_timeline(detail), body[0]);
+    frame.render_widget(build_changes(detail), right[0]);
+    frame.render_widget(build_replay(detail), right[1]);
     frame.render_widget(
         Paragraph::new(
             "↑↓ timeline  ←→ switch pane or seek replay  j/k move  h/l seek  space play/pause  1/2/3 jump  t/e/d focus  Esc back",
         )
         .style(Style::default().fg(Color::White)),
-        chunks[3],
+        chunks[2],
     );
 
     if app.deep_link && detail.session.session_id.is_empty() {
@@ -593,103 +594,181 @@ fn draw_detail(frame: &mut ratatui::Frame<'_>, app: &App, detail: &DetailState) 
     }
 }
 
+fn build_header(detail: &DetailState) -> Paragraph<'static> {
+    let actor = if detail.session.agent_name.trim().is_empty() {
+        detail.session.agent.as_str()
+    } else {
+        detail.session.agent_name.as_str()
+    };
+    let lines = vec![
+        Line::from(vec![
+            Span::styled(actor.to_string(), Style::default().fg(Color::LightGreen).add_modifier(Modifier::BOLD)),
+            Span::raw("  "),
+            Span::raw(sanitize_inline_text(&detail.session.model)),
+            Span::raw("  "),
+            Span::styled(
+                format_outcome(
+                    detail.session.exit_code,
+                    &detail.session.status,
+                    &detail.session.violation_code,
+                ),
+                Style::default().fg(Color::Yellow),
+            ),
+        ]),
+        Line::from(format!(
+            "session {}    duration {}    started {}",
+            detail.session.session_id,
+            format_duration(detail.session.started_at, detail.session.ended_at),
+            format_ts(detail.session.started_at),
+        )),
+        Line::from(format!(
+            "repo {}",
+            fallback_text(&sanitize_inline_text(&detail.session.repo_root))
+        )),
+        Line::from(format!(
+            "branch {} -> {}    head {} -> {}",
+            fallback_text(&sanitize_inline_text(&detail.session.branch_start)),
+            fallback_text(&sanitize_inline_text(&detail.session.branch_end)),
+            truncate(&sanitize_inline_text(&detail.session.head_start), 12),
+            truncate(&sanitize_inline_text(&detail.session.head_end), 12),
+        )),
+    ];
+    Paragraph::new(lines)
+        .block(pane_block("Header", false))
+        .wrap(Wrap { trim: true })
+}
+
 fn build_timeline(detail: &DetailState) -> Paragraph<'static> {
     let total = detail.events.len();
     let selected = min(detail.event_index, total.saturating_sub(1));
-    let start = selected.saturating_sub(8);
-    let end = min(total, start + 18);
+    let start = selected.saturating_sub(10);
+    let end = min(total, start + 22);
     let mut lines: Vec<Line<'static>> = Vec::new();
     for (idx, event) in detail.events.iter().enumerate().take(end).skip(start) {
         let marker = if idx == selected { ">>" } else { "  " };
         let style = if idx == selected && detail.focus == FocusPane::Timeline {
             Style::default().fg(Color::Black).bg(Color::LightGreen)
+        } else if idx == selected {
+            Style::default().fg(Color::Yellow).add_modifier(Modifier::BOLD)
         } else {
             Style::default()
         };
-        lines.push(Line::from(Span::styled(
-            format!(
-                "{} {:>4} {:<20} {}",
-                marker,
-                event.seq,
-                truncate(&event.event_type, 20),
-                event_summary(event),
-            ),
-            style,
-        )));
+        let line = format!(
+            "{} {:>4}  {:<18}  {}",
+            marker,
+            event.seq,
+            truncate(&sanitize_inline_text(&event.event_type), 18),
+            event_summary(event),
+        );
+        lines.push(Line::from(Span::styled(line, style)));
+    }
+    if lines.is_empty() {
+        lines.push(Line::from("(no recorded events)"));
     }
     Paragraph::new(lines)
-        .block(Block::default().borders(Borders::ALL).title("Timeline"))
+        .block(pane_block("Timeline", detail.focus == FocusPane::Timeline))
         .wrap(Wrap { trim: true })
 }
 
 fn build_changes(detail: &DetailState) -> Paragraph<'static> {
-    let focused = detail.focus == FocusPane::Changes;
-    let title_style = if focused {
-        Style::default().fg(Color::LightGreen).add_modifier(Modifier::BOLD)
-    } else {
-        Style::default()
-    };
-    let mut lines = vec![
-        Line::from(Span::styled("Files changed", title_style)),
-    ];
+    let mut lines = vec![Line::from(format!(
+        "commands {}    subprocesses {}    pushes {}    transcript events {}",
+        metric(detail.session.aggregate.get("command_count")),
+        metric(detail.session.aggregate.get("subprocess_count")),
+        metric(detail.session.aggregate.get("push_attempt_count")),
+        metric(detail.session.aggregate.get("event_count")),
+    ))];
+    lines.push(Line::from(format!(
+        "commits {}    violations {}",
+        metric(detail.session.aggregate.get("commit_count")),
+        if detail.session.violation_code.trim().is_empty() {
+            "-".to_string()
+        } else {
+            sanitize_inline_text(&detail.session.violation_code)
+        },
+    )));
+    lines.push(Line::from(""));
+    lines.push(Line::from(Span::styled(
+        "Files changed",
+        Style::default().fg(Color::Cyan).add_modifier(Modifier::BOLD),
+    )));
     if let Some(files) = detail.session.changes.get("files_changed").and_then(Value::as_array) {
         for value in files.iter().take(12) {
-            lines.push(Line::from(format!("- {}", value.as_str().unwrap_or_default())));
+            lines.push(Line::from(format!(
+                "- {}",
+                sanitize_inline_text(value.as_str().unwrap_or_default())
+            )));
         }
+    } else {
+        lines.push(Line::from("-"));
     }
     lines.push(Line::from(""));
-    lines.push(Line::from("Committed diff stat:"));
+    lines.push(Line::from(Span::styled(
+        "Committed diff stat",
+        Style::default().fg(Color::Cyan).add_modifier(Modifier::BOLD),
+    )));
     lines.push(Line::from(
-        detail
-            .session
-            .changes
-            .get("committed_diff_stat")
-            .and_then(Value::as_str)
-            .unwrap_or("-")
-            .to_string(),
+        sanitize_multiline_text(
+            detail
+                .session
+                .changes
+                .get("committed_diff_stat")
+                .and_then(Value::as_str)
+                .unwrap_or("-"),
+        ),
     ));
     lines.push(Line::from(""));
-    lines.push(Line::from("Worktree diff stat:"));
+    lines.push(Line::from(Span::styled(
+        "Worktree diff stat",
+        Style::default().fg(Color::Cyan).add_modifier(Modifier::BOLD),
+    )));
     lines.push(Line::from(
-        detail
-            .session
-            .changes
-            .get("worktree_diff_stat")
-            .and_then(Value::as_str)
-            .unwrap_or("-")
-            .to_string(),
+        sanitize_multiline_text(
+            detail
+                .session
+                .changes
+                .get("worktree_diff_stat")
+                .and_then(Value::as_str)
+                .unwrap_or("-"),
+        ),
     ));
     lines.push(Line::from(""));
-    lines.push(Line::from("Commits created:"));
+    lines.push(Line::from(Span::styled(
+        "Commits created",
+        Style::default().fg(Color::Cyan).add_modifier(Modifier::BOLD),
+    )));
     if let Some(commits) = detail.session.changes.get("commits_created").and_then(Value::as_array) {
         for commit in commits.iter().take(6) {
             let sha = commit.get("sha").and_then(Value::as_str).unwrap_or("-");
             let summary = commit.get("summary").and_then(Value::as_str).unwrap_or("-");
-            lines.push(Line::from(format!("{} {}", sha, summary)));
+            lines.push(Line::from(format!(
+                "{} {}",
+                sanitize_inline_text(sha),
+                sanitize_inline_text(summary)
+            )));
         }
+    } else {
+        lines.push(Line::from("-"));
     }
     Paragraph::new(lines)
-        .block(Block::default().borders(Borders::ALL).title("Changes"))
+        .block(pane_block("Changes", detail.focus == FocusPane::Changes))
         .wrap(Wrap { trim: true })
 }
 
 fn build_replay(detail: &DetailState) -> Paragraph<'static> {
     let focused = detail.focus == FocusPane::Replay;
-    let title = if focused {
-        Line::from(vec![
-            Span::styled("Replay ", Style::default().fg(Color::LightGreen).add_modifier(Modifier::BOLD)),
-            Span::raw(if detail.autoplay { "(playing)" } else { "(paused)" }),
-        ])
+    let title = if detail.autoplay {
+        "Replay (playing)"
     } else {
-        Line::from("Replay")
+        "Replay (paused)"
     };
     let display = if detail.replay_text.is_empty() {
         "(no terminal stdout recorded)".to_string()
     } else {
-        detail.replay_text.clone()
+        tail_lines(&detail.replay_text, 160)
     };
     Paragraph::new(display)
-        .block(Block::default().borders(Borders::ALL).title(title))
+        .block(pane_block(title, focused))
         .wrap(Wrap { trim: false })
 }
 
@@ -766,29 +845,182 @@ fn event_summary(event: &SessionEvent) -> String {
             .payload
             .get("command")
             .and_then(Value::as_str)
-            .map(|value| truncate(value, 48))
+            .map(|value| truncate(&sanitize_inline_text(value), 52))
             .unwrap_or_else(|| "-".to_string()),
         "violation.noted" => event
             .payload
             .get("code")
             .and_then(Value::as_str)
-            .unwrap_or("-")
-            .to_string(),
+            .map(sanitize_inline_text)
+            .unwrap_or_else(|| "-".to_string()),
         "git.commit.created" => format!(
             "{} {}",
-            event.payload.get("sha").and_then(Value::as_str).unwrap_or("-"),
-            event.payload.get("summary").and_then(Value::as_str).unwrap_or("-"),
+            sanitize_inline_text(event.payload.get("sha").and_then(Value::as_str).unwrap_or("-")),
+            sanitize_inline_text(
+                event
+                    .payload
+                    .get("summary")
+                    .and_then(Value::as_str)
+                    .unwrap_or("-"),
+            ),
         ),
         "terminal.stdin" | "terminal.stdout" => event
             .payload
             .get("data")
             .and_then(Value::as_str)
-            .map(|value| truncate(value.replace('\n', "\\n").replace('\r', "\\r").as_str(), 48))
+            .map(|value| truncate(&sanitize_inline_text(value), 52))
             .unwrap_or_else(|| "-".to_string()),
         _ => event
             .payload
             .as_object()
-            .map(|obj| truncate(&format!("{:?}", obj), 48))
+            .map(|obj| truncate(&sanitize_inline_text(&format!("{:?}", obj)), 52))
             .unwrap_or_else(|| "-".to_string()),
+    }
+}
+
+fn pane_block(title: &str, focused: bool) -> Block<'static> {
+    let border_style = if focused {
+        Style::default().fg(Color::LightGreen)
+    } else {
+        Style::default().fg(Color::DarkGray)
+    };
+    let title_style = if focused {
+        Style::default()
+            .fg(Color::LightGreen)
+            .add_modifier(Modifier::BOLD)
+    } else {
+        Style::default().fg(Color::White)
+    };
+    Block::default()
+        .borders(Borders::ALL)
+        .border_style(border_style)
+        .title(Line::from(Span::styled(title.to_string(), title_style)))
+}
+
+fn metric(value: Option<&Value>) -> String {
+    match value {
+        Some(Value::Number(number)) => number.to_string(),
+        Some(Value::String(text)) if !text.trim().is_empty() => sanitize_inline_text(text),
+        _ => "-".to_string(),
+    }
+}
+
+fn tail_lines(value: &str, max_lines: usize) -> String {
+    let lines: Vec<&str> = value.lines().collect();
+    if lines.len() <= max_lines {
+        return value.to_string();
+    }
+    lines[lines.len() - max_lines..].join("\n")
+}
+
+fn sanitize_inline_text(value: &str) -> String {
+    sanitize_terminal_output(value)
+        .replace('\n', " ")
+        .split_whitespace()
+        .collect::<Vec<_>>()
+        .join(" ")
+}
+
+fn sanitize_multiline_text(value: &str) -> String {
+    let text = sanitize_terminal_output(value);
+    if text.trim().is_empty() {
+        "-".to_string()
+    } else {
+        text
+    }
+}
+
+fn sanitize_terminal_output(value: &str) -> String {
+    #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+    enum EscapeState {
+        None,
+        Escape,
+        Csi,
+        Osc,
+        StringTerminator,
+    }
+
+    let mut output = String::with_capacity(value.len());
+    let mut state = EscapeState::None;
+    let mut previous_was_carriage_return = false;
+
+    for ch in value.chars() {
+        match state {
+            EscapeState::None => match ch {
+                '\u{1b}' => state = EscapeState::Escape,
+                '\r' => {
+                    output.push('\n');
+                    previous_was_carriage_return = true;
+                }
+                '\u{8}' => {
+                    output.pop();
+                    previous_was_carriage_return = false;
+                }
+                '\n' => {
+                    if !previous_was_carriage_return {
+                        output.push('\n');
+                    }
+                    previous_was_carriage_return = false;
+                }
+                '\t' => {
+                    output.push('\t');
+                    previous_was_carriage_return = false;
+                }
+                control if control.is_control() => {
+                    previous_was_carriage_return = false;
+                }
+                _ => {
+                    output.push(ch);
+                    previous_was_carriage_return = false;
+                }
+            },
+            EscapeState::Escape => match ch {
+                '[' => state = EscapeState::Csi,
+                ']' | 'P' | 'X' | '^' | '_' => state = EscapeState::Osc,
+                '\\' => state = EscapeState::None,
+                _ => state = EscapeState::None,
+            },
+            EscapeState::Csi => {
+                if ('@'..='~').contains(&ch) {
+                    state = EscapeState::None;
+                }
+            }
+            EscapeState::Osc => match ch {
+                '\u{7}' => state = EscapeState::None,
+                '\u{1b}' => state = EscapeState::StringTerminator,
+                _ => {}
+            },
+            EscapeState::StringTerminator => {
+                state = EscapeState::Osc;
+                if ch == '\\' {
+                    state = EscapeState::None;
+                }
+            }
+        }
+    }
+
+    output
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{sanitize_inline_text, sanitize_terminal_output, tail_lines};
+
+    #[test]
+    fn sanitize_terminal_output_strips_ansi_sequences() {
+        let input = "\u{1b}[32mgreen\u{1b}[0m text\r\nnext";
+        assert_eq!(sanitize_terminal_output(input), "green text\nnext");
+    }
+
+    #[test]
+    fn sanitize_inline_text_collapses_whitespace() {
+        let input = "hello\tthere\n\u{1b}[31mworld\u{1b}[0m";
+        assert_eq!(sanitize_inline_text(input), "hello there world");
+    }
+
+    #[test]
+    fn tail_lines_keeps_recent_lines() {
+        let input = "1\n2\n3\n4";
+        assert_eq!(tail_lines(input, 2), "3\n4");
     }
 }
