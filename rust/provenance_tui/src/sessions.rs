@@ -1,3 +1,5 @@
+use base64::engine::general_purpose::STANDARD as BASE64_STANDARD;
+use base64::Engine;
 use chrono::TimeZone;
 use clap::Parser;
 use crossterm::event::{
@@ -19,8 +21,10 @@ use reqwest::blocking::Client;
 use serde::Deserialize;
 use serde_json::Value;
 use std::cmp::{max, min};
+use std::fs;
 use std::io::{self, Write};
 use std::time::{Duration, Instant};
+use vt100::Parser as VtParser;
 
 const TIMELINE_PAGE_STEP: usize = 500;
 
@@ -108,6 +112,21 @@ enum FocusPane {
     Replay,
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum ReplayMode {
+    Terminal,
+    Text,
+}
+
+impl ReplayMode {
+    fn label(self) -> &'static str {
+        match self {
+            ReplayMode::Terminal => "terminal",
+            ReplayMode::Text => "text",
+        }
+    }
+}
+
 #[derive(Clone, Debug)]
 struct TimelineEntry {
     event_index: usize,
@@ -115,13 +134,31 @@ struct TimelineEntry {
     summary: String,
 }
 
+#[derive(Clone, Debug, Default, Deserialize)]
+struct TranscriptRecord {
+    #[serde(default)]
+    direction: String,
+    #[serde(default)]
+    data_b64: String,
+}
+
+#[derive(Clone, Debug, Default)]
+struct TranscriptChunk {
+    direction: String,
+    data: Vec<u8>,
+}
+
 struct DetailState {
     session: SessionSummary,
     events: Vec<SessionEvent>,
     timeline_entries: Vec<TimelineEntry>,
+    replay_mode: ReplayMode,
     focus: FocusPane,
     timeline_index: usize,
-    replay_chunks: Vec<String>,
+    text_replay_chunks: Vec<String>,
+    transcript_chunks: Vec<TranscriptChunk>,
+    terminal_replay_frames: Vec<String>,
+    terminal_cache_size: Option<(u16, u16)>,
     replay_step: usize,
     replay_text: String,
     replay_scroll: u16,
@@ -132,7 +169,13 @@ struct DetailState {
 
 impl DetailState {
     fn new(session: SessionSummary, events: Vec<SessionEvent>, autoplay: bool) -> Self {
-        let (timeline_entries, replay_chunks) = build_display_model(&events);
+        let (timeline_entries, text_replay_chunks) = build_display_model(&events);
+        let transcript_chunks = load_transcript_chunks(&session.transcript_path);
+        let replay_mode = if transcript_chunks.is_empty() {
+            ReplayMode::Text
+        } else {
+            ReplayMode::Terminal
+        };
         let initial_timeline_index = timeline_entries
             .iter()
             .position(|entry| entry.event_type == "command.recorded")
@@ -141,13 +184,17 @@ impl DetailState {
             session,
             events,
             timeline_entries,
+            replay_mode,
             focus: if autoplay {
                 FocusPane::Replay
             } else {
                 FocusPane::Timeline
             },
             timeline_index: initial_timeline_index,
-            replay_chunks,
+            text_replay_chunks,
+            transcript_chunks,
+            terminal_replay_frames: Vec::new(),
+            terminal_cache_size: None,
             replay_step: 0,
             replay_text: String::new(),
             replay_scroll: 0,
@@ -155,48 +202,118 @@ impl DetailState {
             autoplay,
             last_tick: Instant::now(),
         };
+        out.ensure_terminal_replay_cache();
         if out.autoplay {
             out.rebuild_replay_text(0);
-        } else if !out.replay_chunks.is_empty() {
-            let last = out.replay_chunks.len().saturating_sub(1);
+        } else if out.active_replay_len() > 0 {
+            let last = out.active_replay_len().saturating_sub(1);
             out.rebuild_replay_text(last);
         }
         out
     }
 
+    fn active_replay_frames(&self) -> &[String] {
+        match self.replay_mode {
+            ReplayMode::Terminal if !self.terminal_replay_frames.is_empty() => {
+                &self.terminal_replay_frames
+            }
+            _ => &self.text_replay_chunks,
+        }
+    }
+
+    fn active_replay_len(&self) -> usize {
+        self.active_replay_frames().len()
+    }
+
+    fn ensure_terminal_replay_cache(&mut self) {
+        if self.replay_mode != ReplayMode::Terminal && self.terminal_cache_size.is_some() {
+            return;
+        }
+        let Some(layout) = session_detail_layout(self) else {
+            return;
+        };
+        let rows = layout.replay.height.saturating_sub(2).max(1);
+        let cols = layout.replay.width.saturating_sub(2).max(1);
+        if self.terminal_cache_size == Some((rows, cols)) && !self.terminal_replay_frames.is_empty()
+        {
+            return;
+        }
+        self.terminal_replay_frames =
+            build_terminal_replay_frames(&self.transcript_chunks, rows, cols);
+        self.terminal_cache_size = Some((rows, cols));
+        if self.replay_mode == ReplayMode::Terminal && self.terminal_replay_frames.is_empty() {
+            self.replay_mode = ReplayMode::Text;
+        }
+    }
+
+    fn set_replay_mode(&mut self, mode: ReplayMode) {
+        if mode == ReplayMode::Terminal {
+            self.ensure_terminal_replay_cache();
+            if self.terminal_replay_frames.is_empty() {
+                self.replay_mode = ReplayMode::Text;
+                self.rebuild_replay_text(self.replay_step);
+                return;
+            }
+        }
+        self.replay_mode = mode;
+        self.replay_follow_end = self.replay_mode == ReplayMode::Text;
+        if self.replay_follow_end {
+            self.replay_scroll = u16::MAX;
+        } else {
+            self.replay_scroll = 0;
+        }
+        let step = self
+            .replay_step
+            .min(self.active_replay_len().saturating_sub(1));
+        self.rebuild_replay_text(step);
+    }
+
+    fn toggle_replay_mode(&mut self) {
+        let next = match self.replay_mode {
+            ReplayMode::Terminal => ReplayMode::Text,
+            ReplayMode::Text => ReplayMode::Terminal,
+        };
+        self.set_replay_mode(next);
+    }
+
     fn rebuild_replay_text(&mut self, step: usize) {
-        self.replay_step = min(step, self.replay_chunks.len().saturating_sub(1));
-        if self.replay_chunks.is_empty() {
+        let frame_count = self.active_replay_len();
+        self.replay_step = min(step, frame_count.saturating_sub(1));
+        if frame_count == 0 {
             self.replay_text.clear();
             return;
         }
-        self.replay_text = self.replay_chunks[..=self.replay_step].join("");
+        self.replay_text = match self.replay_mode {
+            ReplayMode::Terminal => self.active_replay_frames()[self.replay_step].clone(),
+            ReplayMode::Text => self.active_replay_frames()[..=self.replay_step].join(""),
+        };
         if self.replay_follow_end {
             self.replay_scroll = u16::MAX;
         }
     }
 
     fn seek_relative(&mut self, delta: isize) {
-        if self.replay_chunks.is_empty() {
+        if self.active_replay_len() == 0 {
             return;
         }
         let current = self.replay_step as isize;
         let next = min(
-            self.replay_chunks.len().saturating_sub(1) as isize,
+            self.active_replay_len().saturating_sub(1) as isize,
             max(0, current + delta),
         ) as usize;
         self.rebuild_replay_text(next);
     }
 
     fn advance_autoplay(&mut self) {
-        if !self.autoplay || self.replay_chunks.is_empty() {
+        self.ensure_terminal_replay_cache();
+        if !self.autoplay || self.active_replay_len() == 0 {
             return;
         }
         if self.last_tick.elapsed() < Duration::from_millis(60) {
             return;
         }
         self.last_tick = Instant::now();
-        if self.replay_step + 1 < self.replay_chunks.len() {
+        if self.replay_step + 1 < self.active_replay_len() {
             self.rebuild_replay_text(self.replay_step + 1);
         } else {
             self.autoplay = false;
@@ -233,6 +350,10 @@ impl DetailState {
     }
 
     fn scroll_replay(&mut self, delta: isize) {
+        if self.replay_mode == ReplayMode::Terminal {
+            self.seek_relative(delta);
+            return;
+        }
         self.replay_follow_end = false;
         if delta < 0 {
             self.replay_scroll = self
@@ -463,17 +584,25 @@ fn handle_key(app: &mut App, key: KeyEvent) -> Result<bool, String> {
                 app.needs_terminal_clear = true;
             }
             KeyCode::Char('s') => detail.cycle_focus(),
+            KeyCode::Char('t') => {
+                detail.toggle_replay_mode();
+                app.status = format!("Replay mode: {}", detail.replay_mode.label());
+            }
             KeyCode::Char(' ') => {
                 if detail.autoplay {
                     detail.autoplay = false;
-                } else if !detail.replay_chunks.is_empty() {
-                    if detail.replay_step + 1 >= detail.replay_chunks.len() {
+                } else if detail.active_replay_len() > 0 {
+                    if detail.replay_step + 1 >= detail.active_replay_len() {
                         detail.rebuild_replay_text(0);
                     }
                     detail.autoplay = true;
                     detail.focus = FocusPane::Replay;
-                    detail.replay_follow_end = true;
-                    detail.replay_scroll = u16::MAX;
+                    detail.replay_follow_end = detail.replay_mode == ReplayMode::Text;
+                    detail.replay_scroll = if detail.replay_follow_end {
+                        u16::MAX
+                    } else {
+                        0
+                    };
                     detail.last_tick = Instant::now();
                 }
             }
@@ -660,7 +789,7 @@ fn draw_detail(frame: &mut ratatui::Frame<'_>, app: &App, detail: &DetailState) 
     frame.render_widget(build_replay(detail, right[1]), right[1]);
     frame.render_widget(
         Paragraph::new(
-            "↑↓ timeline  mouse wheel scrolls timeline  Tab/Shift+Tab jump 500  s switch pane  ←→ seek replay  Enter details  space play/pause  Esc back",
+            "↑↓ timeline/text scroll or terminal seek  mouse wheel scrolls active pane  Tab/Shift+Tab jump 500  s switch pane  t toggle replay mode  ←→ seek replay  Enter details  space play/pause  Esc back",
         )
         .style(Style::default().fg(Color::White)),
         chunks[2],
@@ -897,14 +1026,20 @@ fn build_changes(detail: &DetailState) -> Paragraph<'static> {
 fn build_replay(detail: &DetailState, area: Rect) -> Paragraph<'static> {
     let focused = detail.focus == FocusPane::Replay;
     let title = if detail.autoplay {
-        "Replay (playing)"
+        format!("Replay ({}, playing)", detail.replay_mode.label())
     } else {
-        "Replay (paused)"
+        format!("Replay ({}, paused)", detail.replay_mode.label())
     };
     let display = if detail.replay_text.is_empty() {
-        "(no terminal stdout recorded)".to_string()
+        match detail.replay_mode {
+            ReplayMode::Terminal => "(no terminal transcript available)".to_string(),
+            ReplayMode::Text => "(no terminal stdout recorded)".to_string(),
+        }
     } else {
-        collapse_blank_runs(&detail.replay_text, 2)
+        match detail.replay_mode {
+            ReplayMode::Terminal => detail.replay_text.clone(),
+            ReplayMode::Text => collapse_blank_runs(&detail.replay_text, 2),
+        }
     };
     let max_scroll = replay_max_scroll(&display, area);
     let scroll = if detail.replay_follow_end {
@@ -913,7 +1048,7 @@ fn build_replay(detail: &DetailState, area: Rect) -> Paragraph<'static> {
         detail.replay_scroll.min(max_scroll)
     };
     Paragraph::new(display)
-        .block(pane_block(title, focused))
+        .block(pane_block(&title, focused))
         .scroll((scroll, 0))
         .wrap(Wrap { trim: false })
 }
@@ -1263,6 +1398,59 @@ fn build_display_model(events: &[SessionEvent]) -> (Vec<TimelineEntry>, Vec<Stri
     }
 
     (timeline_entries, replay_chunks)
+}
+
+fn load_transcript_chunks(path: &str) -> Vec<TranscriptChunk> {
+    let target = path.trim();
+    if target.is_empty() {
+        return Vec::new();
+    }
+    let Ok(contents) = fs::read_to_string(target) else {
+        return Vec::new();
+    };
+    contents
+        .lines()
+        .filter_map(|line| serde_json::from_str::<TranscriptRecord>(line).ok())
+        .filter_map(|record| {
+            let data = BASE64_STANDARD.decode(record.data_b64.as_bytes()).ok()?;
+            Some(TranscriptChunk {
+                direction: record.direction.trim().to_string(),
+                data,
+            })
+        })
+        .collect()
+}
+
+fn build_terminal_replay_frames(
+    transcript_chunks: &[TranscriptChunk],
+    rows: u16,
+    cols: u16,
+) -> Vec<String> {
+    let mut parser = VtParser::new(rows.max(1), cols.max(1), 10_000);
+    let mut frames = Vec::new();
+    let mut last_frame = String::new();
+
+    for chunk in transcript_chunks {
+        if chunk.direction != "pty" || chunk.data.is_empty() {
+            continue;
+        }
+        parser.process(&chunk.data);
+        let frame = render_terminal_frame(parser.screen(), cols.max(1));
+        if frame != last_frame {
+            last_frame = frame.clone();
+            frames.push(frame);
+        }
+    }
+
+    frames
+}
+
+fn render_terminal_frame(screen: &vt100::Screen, cols: u16) -> String {
+    screen
+        .rows(0, cols.max(1))
+        .map(|row| row.trim_end_matches(' ').to_string())
+        .collect::<Vec<_>>()
+        .join("\n")
 }
 
 struct TerminalDisplayBlock {
@@ -1809,9 +1997,9 @@ fn rect_contains(rect: Rect, column: u16, row: u16) -> bool {
 #[cfg(test)]
 mod tests {
     use super::{
-        build_display_model, collect_terminal_lines, format_header_outcome, rendered_text_height,
-        replay_max_scroll, sanitize_inline_text, sanitize_terminal_output,
-        strip_inline_progress_noise, SessionEvent,
+        build_display_model, build_terminal_replay_frames, collect_terminal_lines,
+        format_header_outcome, rendered_text_height, replay_max_scroll, sanitize_inline_text,
+        sanitize_terminal_output, strip_inline_progress_noise, SessionEvent, TranscriptChunk,
     };
     use ratatui::layout::Rect;
     use serde_json::json;
@@ -1982,6 +2170,21 @@ mod tests {
 
         let taller_text = format!("{}\n{}", text, "abcdefghijklmnopqrstuvwxyz0123456789");
         assert!(replay_max_scroll(&taller_text, area) > 0);
+    }
+
+    #[test]
+    fn terminal_replay_reconstructs_cursor_positioned_spacing() {
+        let frames = build_terminal_replay_frames(
+            &[TranscriptChunk {
+                direction: "pty".to_string(),
+                data: b"Hello\r\x1b[6Cthere".to_vec(),
+            }],
+            4,
+            20,
+        );
+
+        assert_eq!(frames.len(), 1);
+        assert_eq!(frames[0].lines().next().unwrap_or_default(), "Hello there");
     }
 
     #[test]
