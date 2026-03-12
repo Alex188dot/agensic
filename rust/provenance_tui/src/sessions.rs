@@ -1,6 +1,9 @@
 use clap::Parser;
 use chrono::TimeZone;
-use crossterm::event::{self, Event, KeyCode, KeyEvent, KeyEventKind};
+use crossterm::event::{
+    self, DisableMouseCapture, EnableMouseCapture, Event, KeyCode, KeyEvent, KeyEventKind,
+    MouseEvent, MouseEventKind,
+};
 use crossterm::execute;
 use crossterm::terminal::{
     disable_raw_mode, enable_raw_mode, EnterAlternateScreen, LeaveAlternateScreen,
@@ -17,6 +20,8 @@ use serde_json::Value;
 use std::cmp::{max, min};
 use std::io::{self, Write};
 use std::time::{Duration, Instant};
+
+const TIMELINE_PAGE_STEP: usize = 500;
 
 #[derive(Debug, Parser, Clone)]
 #[command(name = "agensic-provenance-tui sessions")]
@@ -195,41 +200,22 @@ impl DetailState {
         }
     }
 
-    fn jump_first_command(&mut self) {
-        if let Some((idx, _)) = self
-            .events
-            .iter()
-            .enumerate()
-            .find(|(_, event)| event.event_type == "command.recorded")
-        {
-            self.event_index = idx;
-            self.focus = FocusPane::Timeline;
+    fn move_selection(&mut self, delta: isize) {
+        if self.events.is_empty() {
+            self.event_index = 0;
+            return;
         }
+        let next = (self.event_index as isize + delta)
+            .clamp(0, self.events.len().saturating_sub(1) as isize) as usize;
+        self.event_index = next;
     }
 
-    fn jump_first_change(&mut self) {
-        if let Some((idx, _)) = self
-            .events
-            .iter()
-            .enumerate()
-            .find(|(_, event)| event.event_type.starts_with("git."))
-        {
-            self.event_index = idx;
-            self.focus = FocusPane::Timeline;
-        }
+    fn page_selection(&mut self, delta: isize) {
+        self.move_selection(delta.saturating_mul(TIMELINE_PAGE_STEP as isize));
     }
 
-    fn jump_failure(&mut self) {
-        if let Some((idx, _)) = self
-            .events
-            .iter()
-            .enumerate()
-            .rev()
-            .find(|(_, event)| event.event_type == "process.exited" || event.event_type == "marker.session.finished")
-        {
-            self.event_index = idx;
-            self.focus = FocusPane::Timeline;
-        }
+    fn selected_event(&self) -> Option<&SessionEvent> {
+        self.events.get(self.event_index)
     }
 }
 
@@ -242,6 +228,8 @@ struct App {
     status: String,
     deep_link: bool,
     needs_terminal_clear: bool,
+    event_modal_open: bool,
+    event_modal_scroll: u16,
 }
 
 impl App {
@@ -255,6 +243,8 @@ impl App {
             status: "Ready".to_string(),
             deep_link: !args.session_id.trim().is_empty(),
             needs_terminal_clear: true,
+            event_modal_open: false,
+            event_modal_scroll: 0,
         };
         app.refresh_sessions()?;
         if !args.session_id.trim().is_empty() {
@@ -330,6 +320,8 @@ impl App {
             .map_err(|err| format!("invalid session events payload: {}", err))?;
 
         self.detail = Some(DetailState::new(session, events_payload.events, replay));
+        self.event_modal_open = false;
+        self.event_modal_scroll = 0;
         self.status = format!("Opened session {}", session_id);
         self.needs_terminal_clear = true;
         Ok(())
@@ -350,7 +342,8 @@ pub fn run_from_env(argv: &[String]) -> Result<(), String> {
 fn run(client: Client, args: SessionsArgs) -> Result<(), String> {
     enable_raw_mode().map_err(|e| format!("enable raw mode failed: {}", e))?;
     let mut stdout = io::stdout();
-    execute!(stdout, EnterAlternateScreen).map_err(|e| format!("enter alt screen failed: {}", e))?;
+    execute!(stdout, EnterAlternateScreen, EnableMouseCapture)
+        .map_err(|e| format!("enter alt screen failed: {}", e))?;
     let backend = CrosstermBackend::new(stdout);
     let mut terminal = Terminal::new(backend).map_err(|e| format!("terminal init failed: {}", e))?;
     let mut app = App::new(client, args)?;
@@ -374,13 +367,14 @@ fn run(client: Client, args: SessionsArgs) -> Result<(), String> {
                         break;
                     }
                 }
+                Event::Mouse(mouse) => handle_mouse(&mut app, mouse),
                 _ => {}
             }
         }
     }
 
     disable_raw_mode().map_err(|e| format!("disable raw mode failed: {}", e))?;
-    execute!(terminal.backend_mut(), LeaveAlternateScreen)
+    execute!(terminal.backend_mut(), DisableMouseCapture, LeaveAlternateScreen)
         .map_err(|e| format!("leave alt screen failed: {}", e))?;
     terminal.show_cursor().map_err(|e| format!("show cursor failed: {}", e))?;
     io::stdout()
@@ -392,6 +386,30 @@ fn run(client: Client, args: SessionsArgs) -> Result<(), String> {
 
 fn handle_key(app: &mut App, key: KeyEvent) -> Result<bool, String> {
     if let Some(detail) = app.detail.as_mut() {
+        if app.event_modal_open {
+            match key.code {
+                KeyCode::Esc | KeyCode::Enter => {
+                    app.event_modal_open = false;
+                    app.event_modal_scroll = 0;
+                }
+                KeyCode::Up | KeyCode::Char('k') => {
+                    app.event_modal_scroll = app.event_modal_scroll.saturating_sub(1);
+                }
+                KeyCode::Down | KeyCode::Char('j') => {
+                    app.event_modal_scroll = app.event_modal_scroll.saturating_add(1);
+                }
+                KeyCode::PageUp => {
+                    app.event_modal_scroll = app.event_modal_scroll.saturating_sub(10);
+                }
+                KeyCode::PageDown => {
+                    app.event_modal_scroll = app.event_modal_scroll.saturating_add(10);
+                }
+                KeyCode::Home => app.event_modal_scroll = 0,
+                _ => {}
+            }
+            return Ok(false);
+        }
+
         match key.code {
             KeyCode::Esc => {
                 if app.deep_link {
@@ -405,22 +423,31 @@ fn handle_key(app: &mut App, key: KeyEvent) -> Result<bool, String> {
             KeyCode::Char('e') => detail.focus = FocusPane::Timeline,
             KeyCode::Char('d') => detail.focus = FocusPane::Changes,
             KeyCode::Char(' ') => {
-                detail.autoplay = !detail.autoplay;
-                detail.last_tick = Instant::now();
-            }
-            KeyCode::Char('1') => detail.jump_first_command(),
-            KeyCode::Char('2') => detail.jump_first_change(),
-            KeyCode::Char('3') => detail.jump_failure(),
-            KeyCode::Up | KeyCode::Char('k') => {
-                if detail.event_index > 0 {
-                    detail.event_index -= 1;
+                if detail.autoplay {
+                    detail.autoplay = false;
+                } else if !detail.replay_indices.is_empty() {
+                    if detail.replay_step + 1 >= detail.replay_indices.len() {
+                        detail.rebuild_replay_text(0);
+                    }
+                    detail.autoplay = true;
+                    detail.focus = FocusPane::Replay;
+                    detail.last_tick = Instant::now();
                 }
             }
-            KeyCode::Down | KeyCode::Char('j') => {
-                if detail.event_index + 1 < detail.events.len() {
-                    detail.event_index += 1;
+            KeyCode::Enter => {
+                if detail.selected_event().is_some() {
+                    app.event_modal_open = true;
+                    app.event_modal_scroll = 0;
                 }
             }
+            KeyCode::Up | KeyCode::Char('k') if detail.focus == FocusPane::Timeline => {
+                detail.move_selection(-1);
+            }
+            KeyCode::Down | KeyCode::Char('j') if detail.focus == FocusPane::Timeline => {
+                detail.move_selection(1);
+            }
+            KeyCode::BackTab if detail.focus == FocusPane::Timeline => detail.page_selection(-1),
+            KeyCode::Tab if detail.focus == FocusPane::Timeline => detail.page_selection(1),
             KeyCode::Left | KeyCode::Char('h') => {
                 if detail.focus == FocusPane::Replay {
                     detail.seek_relative(-1);
@@ -569,18 +596,18 @@ fn draw_detail(frame: &mut ratatui::Frame<'_>, app: &App, detail: &DetailState) 
 
     let body = Layout::default()
         .direction(Direction::Horizontal)
-        .constraints([Constraint::Percentage(46), Constraint::Percentage(54)])
+        .constraints([Constraint::Percentage(52), Constraint::Percentage(48)])
         .split(chunks[1]);
     let right = Layout::default()
         .direction(Direction::Vertical)
-        .constraints([Constraint::Percentage(42), Constraint::Percentage(58)])
+        .constraints([Constraint::Percentage(40), Constraint::Percentage(60)])
         .split(body[1]);
-    frame.render_widget(build_timeline(detail), body[0]);
+    frame.render_widget(build_timeline(detail, body[0].height), body[0]);
     frame.render_widget(build_changes(detail), right[0]);
     frame.render_widget(build_replay(detail), right[1]);
     frame.render_widget(
         Paragraph::new(
-            "↑↓ timeline  ←→ switch pane or seek replay  j/k move  h/l seek  space play/pause  1/2/3 jump  t/e/d focus  Esc back",
+            "↑↓ timeline  mouse wheel scrolls timeline  Tab/Shift+Tab jump 500  ←→ switch pane or seek replay  Enter details  space play/pause  t/e/d focus  Esc back",
         )
         .style(Style::default().fg(Color::White)),
         chunks[2],
@@ -591,6 +618,12 @@ fn draw_detail(frame: &mut ratatui::Frame<'_>, app: &App, detail: &DetailState) 
             Paragraph::new("Session unavailable").block(Block::default().borders(Borders::ALL)),
             centered_rect(50, 20, area),
         );
+    }
+
+    if app.event_modal_open {
+        if let Some(event) = detail.selected_event() {
+            draw_event_modal(frame, event, detail, app.event_modal_scroll);
+        }
     }
 }
 
@@ -638,11 +671,12 @@ fn build_header(detail: &DetailState) -> Paragraph<'static> {
         .wrap(Wrap { trim: true })
 }
 
-fn build_timeline(detail: &DetailState) -> Paragraph<'static> {
+fn build_timeline(detail: &DetailState, height: u16) -> Paragraph<'static> {
     let total = detail.events.len();
     let selected = min(detail.event_index, total.saturating_sub(1));
-    let start = selected.saturating_sub(10);
-    let end = min(total, start + 22);
+    let visible_rows = height.saturating_sub(2).max(1) as usize;
+    let start = selected.saturating_sub(visible_rows / 2);
+    let end = min(total, start + visible_rows);
     let mut lines: Vec<Line<'static>> = Vec::new();
     for (idx, event) in detail.events.iter().enumerate().take(end).skip(start) {
         let marker = if idx == selected { ">>" } else { "  " };
@@ -772,6 +806,27 @@ fn build_replay(detail: &DetailState) -> Paragraph<'static> {
         .wrap(Wrap { trim: false })
 }
 
+fn draw_event_modal(
+    frame: &mut ratatui::Frame<'_>,
+    event: &SessionEvent,
+    detail: &DetailState,
+    scroll: u16,
+) {
+    let popup = centered_rect(74, 72, frame.area());
+    let lines = build_event_modal_lines(event, detail);
+    let panel = Paragraph::new(lines)
+        .block(
+            Block::default().borders(Borders::ALL).title(Line::from(vec![
+                Span::styled("Event details ", Style::default().fg(Color::LightGreen).add_modifier(Modifier::BOLD)),
+                Span::styled("(Enter/Esc close, ↑↓ scroll)", Style::default().fg(Color::DarkGray)),
+            ])),
+        )
+        .scroll((scroll, 0))
+        .wrap(Wrap { trim: true });
+    frame.render_widget(Clear, popup);
+    frame.render_widget(panel, popup);
+}
+
 fn centered_rect(percent_x: u16, percent_y: u16, r: Rect) -> Rect {
     let popup_layout = Layout::default()
         .direction(Direction::Vertical)
@@ -878,6 +933,71 @@ fn event_summary(event: &SessionEvent) -> String {
     }
 }
 
+fn build_event_modal_lines(event: &SessionEvent, detail: &DetailState) -> Vec<Line<'static>> {
+    let mut lines = vec![
+        Line::from(format!("session: {}", detail.session.session_id)),
+        Line::from(format!("seq: {}", event.seq)),
+        Line::from(format!("type: {}", sanitize_inline_text(&event.event_type))),
+        Line::from(format!("timestamp: {}", format_wall_ts(event.ts_wall))),
+        Line::from(format!("monotonic_ms: {}", event.ts_monotonic_ms)),
+    ];
+
+    if let Some(pid) = event.payload.get("pid").and_then(Value::as_i64) {
+        lines.push(Line::from(format!("pid: {}", pid)));
+    }
+    if let Some(ppid) = event.payload.get("ppid").and_then(Value::as_i64) {
+        lines.push(Line::from(format!("ppid: {}", ppid)));
+    }
+    if let Some(exit_code) = event.payload.get("exit_code").and_then(Value::as_i64) {
+        lines.push(Line::from(format!("exit_code: {}", exit_code)));
+    }
+    if let Some(label) = event.payload.get("label").and_then(Value::as_str) {
+        lines.push(Line::from(format!(
+            "label: {}",
+            sanitize_inline_text(label)
+        )));
+    }
+    if let Some(cwd) = event.payload.get("working_directory").and_then(Value::as_str) {
+        lines.push(Line::from(format!(
+            "cwd: {}",
+            sanitize_multiline_text(cwd)
+        )));
+    } else if !detail.session.working_directory.trim().is_empty() {
+        lines.push(Line::from(format!(
+            "cwd: {}",
+            sanitize_multiline_text(&detail.session.working_directory)
+        )));
+    }
+
+    if let Some(command) = event.payload.get("command").and_then(Value::as_str) {
+        lines.push(Line::from(""));
+        lines.push(Line::from(Span::styled(
+            "command",
+            Style::default().fg(Color::Cyan).add_modifier(Modifier::BOLD),
+        )));
+        push_text_block(&mut lines, &sanitize_multiline_text(command));
+    }
+
+    if let Some(data) = event.payload.get("data").and_then(Value::as_str) {
+        lines.push(Line::from(""));
+        lines.push(Line::from(Span::styled(
+            "data",
+            Style::default().fg(Color::Cyan).add_modifier(Modifier::BOLD),
+        )));
+        push_text_block(&mut lines, &sanitize_multiline_text(data));
+    }
+
+    let payload_text = serde_json::to_string_pretty(&event.payload)
+        .unwrap_or_else(|_| "{}".to_string());
+    lines.push(Line::from(""));
+    lines.push(Line::from(Span::styled(
+        "payload",
+        Style::default().fg(Color::Cyan).add_modifier(Modifier::BOLD),
+    )));
+    push_text_block(&mut lines, &sanitize_multiline_text(&payload_text));
+    lines
+}
+
 fn pane_block(title: &str, focused: bool) -> Block<'static> {
     let border_style = if focused {
         Style::default().fg(Color::LightGreen)
@@ -897,6 +1017,15 @@ fn pane_block(title: &str, focused: bool) -> Block<'static> {
         .title(Line::from(Span::styled(title.to_string(), title_style)))
 }
 
+fn push_text_block(lines: &mut Vec<Line<'static>>, text: &str) {
+    for line in text.lines() {
+        lines.push(Line::from(line.to_string()));
+    }
+    if text.lines().next().is_none() {
+        lines.push(Line::from("-"));
+    }
+}
+
 fn metric(value: Option<&Value>) -> String {
     match value {
         Some(Value::Number(number)) => number.to_string(),
@@ -911,6 +1040,18 @@ fn tail_lines(value: &str, max_lines: usize) -> String {
         return value.to_string();
     }
     lines[lines.len() - max_lines..].join("\n")
+}
+
+fn format_wall_ts(ts_wall: f64) -> String {
+    if ts_wall <= 0.0 {
+        return "-".to_string();
+    }
+    let secs = ts_wall.floor() as i64;
+    chrono::Local
+        .timestamp_opt(secs, 0)
+        .single()
+        .map(|dt| dt.format("%Y-%m-%d %H:%M:%S").to_string())
+        .unwrap_or_else(|| format!("{:.3}", ts_wall))
 }
 
 fn sanitize_inline_text(value: &str) -> String {
@@ -1000,6 +1141,43 @@ fn sanitize_terminal_output(value: &str) -> String {
     }
 
     output
+}
+
+fn handle_mouse(app: &mut App, mouse: MouseEvent) {
+    if let Some(detail) = app.detail.as_mut() {
+        match mouse.kind {
+            MouseEventKind::ScrollDown => {
+                if app.event_modal_open {
+                    app.event_modal_scroll = app.event_modal_scroll.saturating_add(1);
+                } else {
+                    detail.move_selection(1);
+                }
+            }
+            MouseEventKind::ScrollUp => {
+                if app.event_modal_open {
+                    app.event_modal_scroll = app.event_modal_scroll.saturating_sub(1);
+                } else {
+                    detail.move_selection(-1);
+                }
+            }
+            _ => {}
+        }
+        return;
+    }
+
+    match mouse.kind {
+        MouseEventKind::ScrollDown => {
+            if app.selected + 1 < app.sessions.len() {
+                app.selected += 1;
+            }
+        }
+        MouseEventKind::ScrollUp => {
+            if app.selected > 0 {
+                app.selected -= 1;
+            }
+        }
+        _ => {}
+    }
 }
 
 #[cfg(test)]
