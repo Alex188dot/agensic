@@ -26,7 +26,8 @@ Agensic helps developers who want to keep their terminal and make it more capabl
 - Inline command autocomplete while you type
 - `#` mode for quick command generation from natural language
 - `##` mode for free-text help in the terminal
-- Provenance TUI for reviewing what happened
+- Provenance TUI for command attribution review
+- Sessions TUI for browsing tracked agent sessions and replaying transcripts
 - Local-first workflow with optional AI assistance when needed
 
 Examples:
@@ -34,6 +35,7 @@ Examples:
 ```bash
 agensic setup
 agensic provenance --tui
+agensic sessions
 agensic --explain "tar -czf backup.tgz src"
 ```
 
@@ -98,6 +100,27 @@ Open the provenance interface:
 
 ```bash
 agensic provenance --tui
+```
+
+Open the tracked sessions interface:
+
+```bash
+agensic sessions
+agensic track inspect <session_id>
+agensic track inspect <session_id> --text
+```
+
+Track an interactive agent session:
+
+```bash
+agensic track codex
+agensic track gemini
+```
+
+When an interactive tracked session starts, Agensic prints the session identifier before handing control to the agent:
+
+```text
+agensic session id <session_id>
 ```
 
 Export provenance:

@@ -315,13 +315,24 @@ def _mark_tracked_session_errored(state: dict[str, Any], violation_code: str) ->
 
 def _tracked_state_looks_live(state: dict[str, Any]) -> bool:
     status = str(state.get("status", "") or "").strip().lower()
-    if status not in {"active", "stopping"}:
+    if status not in {"active", "stopping", "launching"}:
         return False
     controller_pid = int(state.get("controller_pid", 0) or 0)
     root_pid = int(state.get("root_pid", 0) or 0)
     controller_alive = controller_pid > 0 and _is_pid_alive(controller_pid)
     root_alive = root_pid > 0 and _is_pid_alive(root_pid)
     return controller_alive or root_alive
+
+
+def reconcile_tracked_sessions() -> None:
+    for row in _state_store().list_tracked_sessions(limit=500):
+        state = _session_cache_payload(row)
+        status = str(state.get("status", "") or "").strip().lower()
+        if status not in {"active", "stopping", "launching"}:
+            continue
+        if _tracked_state_looks_live(state):
+            continue
+        _mark_tracked_session_errored(state, str(state.get("violation_code", "") or "stale_session"))
 
 
 def _refresh_track_state_cache(active_states: list[dict[str, Any]] | None = None) -> None:
@@ -333,6 +344,7 @@ def _refresh_track_state_cache(active_states: list[dict[str, Any]] | None = None
 
 
 def list_active_track_states(*, refresh_cache: bool = True) -> list[dict[str, Any]]:
+    reconcile_tracked_sessions()
     cached_state = _load_track_state()
     states: list[dict[str, Any]] = []
     for row in _state_store().list_active_tracked_sessions(limit=200):
@@ -968,6 +980,7 @@ def stop_track_sessions(session_id: str = "", *, stop_all: bool = False) -> int:
 
 
 def print_sessions_text(limit: int = 20) -> int:
+    reconcile_tracked_sessions()
     rows = _state_store().list_session_summaries(limit=max(1, min(200, int(limit or 20))))
     if not rows:
         console.print("no_sessions")
@@ -1318,6 +1331,7 @@ class TrackRuntime:
         transcript_path: str,
         event_stream_path: str,
         state_store: SQLiteStateStore,
+        start_snapshot: dict[str, Any] | None = None,
     ):
         self.launch = launch
         self.session_id = session_id
@@ -1338,7 +1352,7 @@ class TrackRuntime:
         self.transcript_event_count = 0
         self.private_key_path = _track_private_key_path()
         self.public_key_path = _track_public_key_path()
-        self.start_snapshot = _capture_repo_snapshot(self.launch.working_directory)
+        self.start_snapshot = dict(start_snapshot or {})
         self.end_snapshot: dict[str, Any] = {}
         self.processes: dict[int, ObservedProcess] = {
             self.root_pid: ObservedProcess(
@@ -1763,6 +1777,7 @@ def run_tracked_command(launch: TrackLaunch) -> int:
     transcript_path = _track_transcript_path(session_id)
     event_stream_path = _track_event_stream_path(session_id)
     state_store = _state_store()
+    start_snapshot = _capture_repo_snapshot(launch.working_directory)
     master_fd, slave_fd = os.openpty()
     child_env = _build_tracked_child_env(launch, session_id)
     proc: subprocess.Popen[bytes] | None = None
@@ -1813,6 +1828,7 @@ def run_tracked_command(launch: TrackLaunch) -> int:
         transcript_path=transcript_path,
         event_stream_path=event_stream_path,
         state_store=state_store,
+        start_snapshot=start_snapshot,
     )
     runtime.persist_state("active")
     runtime.persist_summary()

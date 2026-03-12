@@ -636,7 +636,6 @@ def _local_provenance_tui_candidates() -> list[str]:
     target = _platform_rust_target()
     candidates = [
         explicit,
-        PROVENANCE_TUI_BIN,
         os.path.join(cwd, "rust", "provenance_tui", "target", "release", "agensic-provenance-tui"),
         (
             os.path.join(
@@ -682,6 +681,29 @@ def _resolve_local_provenance_tui_binary() -> str:
         if os.path.isfile(candidate) and os.access(candidate, os.X_OK):
             return candidate
     return ""
+
+
+def _resolve_installed_provenance_tui_binary() -> str:
+    if os.path.isfile(PROVENANCE_TUI_BIN) and os.access(PROVENANCE_TUI_BIN, os.X_OK):
+        return PROVENANCE_TUI_BIN
+    return ""
+
+
+def _binary_supports_sessions_mode(binary_path: str) -> bool:
+    clean_path = str(binary_path or "").strip()
+    if not clean_path:
+        return False
+    try:
+        result = subprocess.run(
+            [clean_path, "sessions", "--help"],
+            check=False,
+            capture_output=True,
+            text=True,
+            timeout=5,
+        )
+    except Exception:
+        return False
+    return int(result.returncode or 0) == 0
 
 
 def _fetch_provenance_tui_manifest() -> dict:
@@ -793,6 +815,9 @@ def _ensure_provenance_tui_binary() -> str:
         entry = _resolve_provenance_tui_platform_entry(manifest)
         return _install_provenance_tui_binary(entry)
     except Exception as manifest_exc:
+        installed_bin = _resolve_installed_provenance_tui_binary()
+        if installed_bin:
+            return installed_bin
         local_bin = _resolve_local_provenance_tui_binary()
         if local_bin:
             return local_bin
@@ -949,6 +974,11 @@ def _run_provenance_tui(
 
 def _run_sessions_tui(session_id: str = "", *, replay: bool = False) -> bool:
     binary_path = _ensure_provenance_tui_binary()
+    if not _binary_supports_sessions_mode(binary_path):
+        raise RuntimeError(
+            "installed_sessions_tui_is_outdated; "
+            "rebuild the local sidecar or reinstall Agensic so agensic-provenance-tui supports the 'sessions' mode"
+        )
     token = ""
     try:
         token = _DAEMON_AUTH_CACHE.get_token()
@@ -3640,7 +3670,7 @@ def track_command(
     text: bool = typer.Option(False, "--text", help="Print text output instead of opening the session TUI for 'track inspect'"),
     tail: int = typer.Option(8, "--tail", min=1, max=100, help="Tail event count for 'track inspect'"),
 ):
-    """Launch and supervise a tracked CLI session."""
+    """Launch, inspect, and manage tracked CLI sessions."""
     from . import track as track_runtime
 
     args = list(ctx.args or [])

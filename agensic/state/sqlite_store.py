@@ -978,6 +978,15 @@ class SQLiteStateStore:
     @staticmethod
     def _decode_session_summary_row(row: sqlite3.Row | Dict[str, object]) -> Dict[str, object]:
         payload = dict(row)
+        for key in (
+            "repo_root",
+            "branch_start",
+            "branch_end",
+            "head_start",
+            "head_end",
+            "event_stream_path",
+        ):
+            payload[key] = str(payload.get(key, "") or "")
         for json_key in ("start_snapshot_json", "end_snapshot_json", "aggregate_json", "changes_json"):
             decoded_key = json_key[:-5]
             try:
