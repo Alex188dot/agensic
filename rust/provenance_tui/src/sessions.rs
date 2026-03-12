@@ -6,7 +6,8 @@ use crossterm::event::{
 };
 use crossterm::execute;
 use crossterm::terminal::{
-    disable_raw_mode, enable_raw_mode, EnterAlternateScreen, LeaveAlternateScreen,
+    disable_raw_mode, enable_raw_mode, size as terminal_size, EnterAlternateScreen,
+    LeaveAlternateScreen,
 };
 use ratatui::backend::CrosstermBackend;
 use ratatui::layout::{Constraint, Direction, Layout, Rect};
@@ -115,6 +116,8 @@ struct DetailState {
     replay_chunks: Vec<String>,
     replay_step: usize,
     replay_text: String,
+    replay_scroll: u16,
+    replay_follow_end: bool,
     autoplay: bool,
     last_tick: Instant,
 }
@@ -134,6 +137,8 @@ impl DetailState {
             replay_chunks,
             replay_step: 0,
             replay_text: String::new(),
+            replay_scroll: 0,
+            replay_follow_end: true,
             autoplay,
             last_tick: Instant::now(),
         };
@@ -153,6 +158,9 @@ impl DetailState {
             return;
         }
         self.replay_text = self.replay_chunks[..=self.replay_step].join("");
+        if self.replay_follow_end {
+            self.replay_scroll = u16::MAX;
+        }
     }
 
     fn seek_relative(&mut self, delta: isize) {
@@ -211,6 +219,15 @@ impl DetailState {
             FocusPane::Changes => FocusPane::Replay,
             FocusPane::Replay => FocusPane::Timeline,
         };
+    }
+
+    fn scroll_replay(&mut self, delta: isize) {
+        self.replay_follow_end = false;
+        if delta < 0 {
+            self.replay_scroll = self.replay_scroll.saturating_sub(delta.unsigned_abs() as u16);
+        } else {
+            self.replay_scroll = self.replay_scroll.saturating_add(delta as u16);
+        }
     }
 }
 
@@ -424,6 +441,8 @@ fn handle_key(app: &mut App, key: KeyEvent) -> Result<bool, String> {
                     }
                     detail.autoplay = true;
                     detail.focus = FocusPane::Replay;
+                    detail.replay_follow_end = true;
+                    detail.replay_scroll = u16::MAX;
                     detail.last_tick = Instant::now();
                 }
             }
@@ -439,12 +458,20 @@ fn handle_key(app: &mut App, key: KeyEvent) -> Result<bool, String> {
             KeyCode::Down | KeyCode::Char('j') if detail.focus == FocusPane::Timeline => {
                 detail.move_selection(1);
             }
+            KeyCode::Up | KeyCode::Char('k') if detail.focus == FocusPane::Replay => {
+                detail.scroll_replay(-1);
+            }
+            KeyCode::Down | KeyCode::Char('j') if detail.focus == FocusPane::Replay => {
+                detail.scroll_replay(1);
+            }
             KeyCode::BackTab if detail.focus == FocusPane::Timeline => detail.page_selection(-1),
             KeyCode::Tab if detail.focus == FocusPane::Timeline => detail.page_selection(1),
             KeyCode::Left | KeyCode::Char('h') if detail.focus == FocusPane::Replay => {
+                detail.replay_follow_end = false;
                 detail.seek_relative(-1);
             }
             KeyCode::Right | KeyCode::Char('l') if detail.focus == FocusPane::Replay => {
+                detail.replay_follow_end = false;
                 detail.seek_relative(1);
             }
             _ => {}
@@ -582,7 +609,7 @@ fn draw_detail(frame: &mut ratatui::Frame<'_>, app: &App, detail: &DetailState) 
         .split(body[1]);
     frame.render_widget(build_timeline(detail, body[0].height), body[0]);
     frame.render_widget(build_changes(detail), right[0]);
-    frame.render_widget(build_replay(detail), right[1]);
+    frame.render_widget(build_replay(detail, right[1].height), right[1]);
     frame.render_widget(
         Paragraph::new(
             "↑↓ timeline  mouse wheel scrolls timeline  Tab/Shift+Tab jump 500  s switch pane  ←→ seek replay  Enter details  space play/pause  Esc back",
@@ -618,11 +645,7 @@ fn build_header(detail: &DetailState) -> Paragraph<'static> {
             Span::raw(sanitize_inline_text(&detail.session.model)),
             Span::raw("  "),
             Span::styled(
-                format_outcome(
-                    detail.session.exit_code,
-                    &detail.session.status,
-                    &detail.session.violation_code,
-                ),
+                format_header_outcome(detail.session.exit_code, &detail.session.status),
                 Style::default().fg(Color::Yellow),
             ),
         ]),
@@ -811,7 +834,7 @@ fn build_changes(detail: &DetailState) -> Paragraph<'static> {
         .wrap(Wrap { trim: true })
 }
 
-fn build_replay(detail: &DetailState) -> Paragraph<'static> {
+fn build_replay(detail: &DetailState, height: u16) -> Paragraph<'static> {
     let focused = detail.focus == FocusPane::Replay;
     let title = if detail.autoplay {
         "Replay (playing)"
@@ -821,10 +844,17 @@ fn build_replay(detail: &DetailState) -> Paragraph<'static> {
     let display = if detail.replay_text.is_empty() {
         "(no terminal stdout recorded)".to_string()
     } else {
-        collapse_blank_runs(&tail_lines(&detail.replay_text, 160), 2)
+        collapse_blank_runs(&detail.replay_text, 2)
+    };
+    let max_scroll = replay_max_scroll(&display, height);
+    let scroll = if detail.replay_follow_end {
+        max_scroll
+    } else {
+        detail.replay_scroll.min(max_scroll)
     };
     Paragraph::new(display)
         .block(pane_block(title, focused))
+        .scroll((scroll, 0))
         .wrap(Wrap { trim: false })
 }
 
@@ -898,6 +928,16 @@ fn format_outcome(exit_code: Option<i64>, status: &str, violation_code: &str) ->
         out.push_str(&format!(" violation={}", violation_code));
     }
     out
+}
+
+fn format_header_outcome(exit_code: Option<i64>, status: &str) -> String {
+    format!(
+        "{} exit={}",
+        if status.trim().is_empty() { "-" } else { status },
+        exit_code
+            .map(|value| value.to_string())
+            .unwrap_or_else(|| "-".to_string())
+    )
 }
 
 fn fallback_text(value: &str) -> &str {
@@ -1176,14 +1216,6 @@ fn metric(value: Option<&Value>) -> String {
     }
 }
 
-fn tail_lines(value: &str, max_lines: usize) -> String {
-    let lines: Vec<&str> = value.lines().collect();
-    if lines.len() <= max_lines {
-        return value.to_string();
-    }
-    lines[lines.len() - max_lines..].join("\n")
-}
-
 fn collapse_blank_runs(value: &str, max_blank_lines: usize) -> String {
     let mut output: Vec<&str> = Vec::new();
     let mut blank_run = 0usize;
@@ -1201,8 +1233,16 @@ fn collapse_blank_runs(value: &str, max_blank_lines: usize) -> String {
     output.join("\n")
 }
 
+fn replay_max_scroll(value: &str, height: u16) -> u16 {
+    let content_lines = value.lines().count().max(1);
+    let visible_lines = height.saturating_sub(2).max(1) as usize;
+    content_lines
+        .saturating_sub(visible_lines)
+        .min(u16::MAX as usize) as u16
+}
+
 fn sanitize_replay_chunk(value: &str) -> String {
-    let cleaned = sanitize_terminal_output(value);
+    let cleaned = strip_inline_progress_noise(&sanitize_terminal_output(value));
     if cleaned.trim().is_empty() {
         return String::new();
     }
@@ -1228,6 +1268,30 @@ fn should_drop_replay_text(value: &str) -> bool {
     }
 
     false
+}
+
+fn strip_inline_progress_noise(value: &str) -> String {
+    let mut output = value.to_string();
+    loop {
+        let Some(start) = output.find("Working(") else {
+            break;
+        };
+        let Some(relative_end) = output[start..].find(')') else {
+            break;
+        };
+        let mut remove_start = start;
+        while remove_start > 0 {
+            let prev = output[..remove_start].chars().last().unwrap_or(' ');
+            if matches!(prev, ' ' | '\t' | '•' | '~') {
+                remove_start -= prev.len_utf8();
+            } else {
+                break;
+            }
+        }
+        let remove_end = start + relative_end + 1;
+        output.replace_range(remove_start..remove_end, "");
+    }
+    output
 }
 
 fn format_wall_ts(ts_wall: f64) -> String {
@@ -1337,15 +1401,23 @@ fn handle_mouse(app: &mut App, mouse: MouseEvent) {
             MouseEventKind::ScrollDown => {
                 if app.event_modal_open {
                     app.event_modal_scroll = app.event_modal_scroll.saturating_add(1);
-                } else {
+                } else if mouse_is_in_replay_pane(mouse, detail) {
+                    detail.scroll_replay(2);
+                } else if mouse_is_in_timeline_pane(mouse, detail) {
                     detail.move_selection(1);
+                } else {
+                    detail.scroll_replay(2);
                 }
             }
             MouseEventKind::ScrollUp => {
                 if app.event_modal_open {
                     app.event_modal_scroll = app.event_modal_scroll.saturating_sub(1);
-                } else {
+                } else if mouse_is_in_replay_pane(mouse, detail) {
+                    detail.scroll_replay(-2);
+                } else if mouse_is_in_timeline_pane(mouse, detail) {
                     detail.move_selection(-1);
+                } else {
+                    detail.scroll_replay(-2);
                 }
             }
             _ => {}
@@ -1368,11 +1440,61 @@ fn handle_mouse(app: &mut App, mouse: MouseEvent) {
     }
 }
 
+fn mouse_is_in_timeline_pane(mouse: MouseEvent, detail: &DetailState) -> bool {
+    session_detail_layout(detail)
+        .map(|layout| rect_contains(layout.timeline, mouse.column, mouse.row))
+        .unwrap_or(false)
+}
+
+fn mouse_is_in_replay_pane(mouse: MouseEvent, detail: &DetailState) -> bool {
+    session_detail_layout(detail)
+        .map(|layout| rect_contains(layout.replay, mouse.column, mouse.row))
+        .unwrap_or(false)
+}
+
+struct SessionDetailLayout {
+    timeline: Rect,
+    replay: Rect,
+}
+
+fn session_detail_layout(detail: &DetailState) -> Option<SessionDetailLayout> {
+    let (width, height) = terminal_size().ok()?;
+    let area = Rect::new(0, 0, width, height);
+    let header_height = detail_header_height(detail);
+    let chunks = Layout::default()
+        .direction(Direction::Vertical)
+        .constraints([
+            Constraint::Length(header_height),
+            Constraint::Min(12),
+            Constraint::Length(2),
+        ])
+        .split(area);
+    let body = Layout::default()
+        .direction(Direction::Horizontal)
+        .constraints([Constraint::Percentage(52), Constraint::Percentage(48)])
+        .split(chunks[1]);
+    let right = Layout::default()
+        .direction(Direction::Vertical)
+        .constraints(changes_panel_constraints(detail))
+        .split(body[1]);
+    Some(SessionDetailLayout {
+        timeline: body[0],
+        replay: right[1],
+    })
+}
+
+fn rect_contains(rect: Rect, column: u16, row: u16) -> bool {
+    column >= rect.x
+        && column < rect.x.saturating_add(rect.width)
+        && row >= rect.y
+        && row < rect.y.saturating_add(rect.height)
+}
+
 #[cfg(test)]
 mod tests {
     use super::{
-        collect_replay_chunks, sanitize_inline_text, sanitize_replay_chunk,
-        sanitize_terminal_output, tail_lines, SessionEvent,
+        collect_replay_chunks, format_header_outcome, sanitize_inline_text,
+        sanitize_replay_chunk, sanitize_terminal_output, strip_inline_progress_noise, SessionEvent,
     };
     use serde_json::json;
 
@@ -1386,12 +1508,6 @@ mod tests {
     fn sanitize_inline_text_collapses_whitespace() {
         let input = "hello\tthere\n\u{1b}[31mworld\u{1b}[0m";
         assert_eq!(sanitize_inline_text(input), "hello there world");
-    }
-
-    #[test]
-    fn tail_lines_keeps_recent_lines() {
-        let input = "1\n2\n3\n4";
-        assert_eq!(tail_lines(input, 2), "3\n4");
     }
 
     #[test]
@@ -1415,5 +1531,16 @@ mod tests {
             },
         ];
         assert_eq!(collect_replay_chunks(&events), vec!["real output\n".to_string()]);
+    }
+
+    #[test]
+    fn strip_inline_progress_noise_removes_working_substring() {
+        let input = "Read .env •Working(17s • esc to interrupt) > next";
+        assert_eq!(strip_inline_progress_noise(input), "Read .env > next");
+    }
+
+    #[test]
+    fn format_header_outcome_omits_violation() {
+        assert_eq!(format_header_outcome(Some(0), "exited"), "exited exit=0");
     }
 }
