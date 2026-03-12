@@ -244,6 +244,48 @@ class StateBackendTests(unittest.TestCase):
             self.assertEqual(session["status"], "exited")
             self.assertEqual(session["exit_code"], 0)
 
+    def test_session_summary_roundtrip(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            db_path = os.path.join(tmp, "state.sqlite")
+            store = SQLiteStateStore(db_path, journal=None)
+            store.upsert_tracked_session(
+                session_id="sess-1",
+                status="exited",
+                agent="codex",
+                model="gpt-5.4",
+                root_command="codex",
+                transcript_path="/tmp/transcript.jsonl",
+                started_at=1700000000,
+                ended_at=1700000005,
+                exit_code=0,
+            )
+
+            recorded = store.upsert_session_summary(
+                session_id="sess-1",
+                repo_root="/tmp/project",
+                branch_start="main",
+                branch_end="feature",
+                head_start="abc123",
+                head_end="def456",
+                start_snapshot={"repo_root": "/tmp/project", "branch": "main"},
+                end_snapshot={"repo_root": "/tmp/project", "branch": "feature"},
+                aggregate={"command_count": 2, "provenance_label_counts": {"AI_EXECUTED": 2}},
+                changes={"files_changed": ["app.py"]},
+                event_stream_path="/tmp/session.events.jsonl",
+            )
+
+            self.assertTrue(recorded)
+            summary = store.get_session_summary("sess-1")
+            self.assertIsNotNone(summary)
+            self.assertEqual(summary["repo_root"], "/tmp/project")
+            self.assertEqual(summary["branch_end"], "feature")
+            self.assertEqual(summary["aggregate"]["command_count"], 2)
+            self.assertEqual(summary["changes"]["files_changed"], ["app.py"])
+
+            listed = store.list_session_summaries(limit=5)
+            self.assertEqual(len(listed), 1)
+            self.assertEqual(listed[0]["session_id"], "sess-1")
+
     def test_event_idempotency_with_applied_events(self):
         with tempfile.TemporaryDirectory() as tmp:
             db_path = os.path.join(tmp, "state.sqlite")

@@ -13,6 +13,7 @@ from agensic.server.routes_command_store import router as command_store_router
 from agensic.server.routes_intent import router as intent_router
 from agensic.server.routes_predict import router as predict_router
 from agensic.server.routes_provenance import router as provenance_router
+from agensic.server.routes_sessions import router as sessions_router
 
 
 @asynccontextmanager
@@ -72,6 +73,7 @@ app.include_router(intent_router)
 app.include_router(assist_router)
 app.include_router(command_store_router)
 app.include_router(provenance_router)
+app.include_router(sessions_router)
 app.include_router(admin_router)
 
 

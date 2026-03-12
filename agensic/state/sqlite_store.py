@@ -150,6 +150,26 @@ class SQLiteStateStore:
                 CREATE INDEX IF NOT EXISTS idx_tracked_sessions_status_updated
                 ON tracked_sessions(status, updated_at DESC);
 
+                CREATE TABLE IF NOT EXISTS session_summaries (
+                    session_id TEXT PRIMARY KEY,
+                    repo_root TEXT NOT NULL DEFAULT '',
+                    branch_start TEXT NOT NULL DEFAULT '',
+                    branch_end TEXT NOT NULL DEFAULT '',
+                    head_start TEXT NOT NULL DEFAULT '',
+                    head_end TEXT NOT NULL DEFAULT '',
+                    start_snapshot_json TEXT NOT NULL DEFAULT '{}',
+                    end_snapshot_json TEXT NOT NULL DEFAULT '{}',
+                    aggregate_json TEXT NOT NULL DEFAULT '{}',
+                    changes_json TEXT NOT NULL DEFAULT '{}',
+                    event_stream_path TEXT NOT NULL DEFAULT '',
+                    created_at INTEGER NOT NULL DEFAULT 0,
+                    updated_at INTEGER NOT NULL DEFAULT 0,
+                    FOREIGN KEY(session_id) REFERENCES tracked_sessions(session_id) ON DELETE CASCADE
+                );
+
+                CREATE INDEX IF NOT EXISTS idx_session_summaries_updated
+                ON session_summaries(updated_at DESC, session_id DESC);
+
                 CREATE TABLE IF NOT EXISTS history_index_state (
                     history_file TEXT PRIMARY KEY,
                     inode INTEGER NOT NULL,
@@ -864,6 +884,188 @@ class SQLiteStateStore:
             rows = conn.execute("\n".join(query), tuple(params)).fetchall()
         return [dict(row) for row in rows]
 
+    def upsert_session_summary(
+        self,
+        session_id: str,
+        repo_root: str = "",
+        branch_start: str = "",
+        branch_end: str = "",
+        head_start: str = "",
+        head_end: str = "",
+        start_snapshot: Optional[Dict[str, object]] = None,
+        end_snapshot: Optional[Dict[str, object]] = None,
+        aggregate: Optional[Dict[str, object]] = None,
+        changes: Optional[Dict[str, object]] = None,
+        event_stream_path: str = "",
+        created_at: Optional[int] = None,
+        updated_at: Optional[int] = None,
+    ) -> bool:
+        clean_session_id = str(session_id or "").strip()
+        if not clean_session_id:
+            return False
+        now_ts = int(updated_at or time.time())
+        with self._lock, self._conn() as conn:
+            conn.execute(
+                """
+                INSERT INTO session_summaries(
+                    session_id, repo_root, branch_start, branch_end, head_start, head_end,
+                    start_snapshot_json, end_snapshot_json, aggregate_json, changes_json,
+                    event_stream_path, created_at, updated_at
+                )
+                VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                ON CONFLICT(session_id) DO UPDATE SET
+                    repo_root = CASE
+                        WHEN excluded.repo_root != '' THEN excluded.repo_root
+                        ELSE session_summaries.repo_root
+                    END,
+                    branch_start = CASE
+                        WHEN excluded.branch_start != '' THEN excluded.branch_start
+                        ELSE session_summaries.branch_start
+                    END,
+                    branch_end = CASE
+                        WHEN excluded.branch_end != '' THEN excluded.branch_end
+                        ELSE session_summaries.branch_end
+                    END,
+                    head_start = CASE
+                        WHEN excluded.head_start != '' THEN excluded.head_start
+                        ELSE session_summaries.head_start
+                    END,
+                    head_end = CASE
+                        WHEN excluded.head_end != '' THEN excluded.head_end
+                        ELSE session_summaries.head_end
+                    END,
+                    start_snapshot_json = CASE
+                        WHEN excluded.start_snapshot_json != '{}' THEN excluded.start_snapshot_json
+                        ELSE session_summaries.start_snapshot_json
+                    END,
+                    end_snapshot_json = CASE
+                        WHEN excluded.end_snapshot_json != '{}' THEN excluded.end_snapshot_json
+                        ELSE session_summaries.end_snapshot_json
+                    END,
+                    aggregate_json = CASE
+                        WHEN excluded.aggregate_json != '{}' THEN excluded.aggregate_json
+                        ELSE session_summaries.aggregate_json
+                    END,
+                    changes_json = CASE
+                        WHEN excluded.changes_json != '{}' THEN excluded.changes_json
+                        ELSE session_summaries.changes_json
+                    END,
+                    event_stream_path = CASE
+                        WHEN excluded.event_stream_path != '' THEN excluded.event_stream_path
+                        ELSE session_summaries.event_stream_path
+                    END,
+                    updated_at = excluded.updated_at
+                """,
+                (
+                    clean_session_id,
+                    str(repo_root or "").strip(),
+                    str(branch_start or "").strip(),
+                    str(branch_end or "").strip(),
+                    str(head_start or "").strip(),
+                    str(head_end or "").strip(),
+                    self._json_dumps(dict(start_snapshot or {}), "{}"),
+                    self._json_dumps(dict(end_snapshot or {}), "{}"),
+                    self._json_dumps(dict(aggregate or {}), "{}"),
+                    self._json_dumps(dict(changes or {}), "{}"),
+                    str(event_stream_path or "").strip(),
+                    int(created_at or now_ts),
+                    now_ts,
+                ),
+            )
+            conn.commit()
+        return True
+
+    @staticmethod
+    def _decode_session_summary_row(row: sqlite3.Row | Dict[str, object]) -> Dict[str, object]:
+        payload = dict(row)
+        for json_key in ("start_snapshot_json", "end_snapshot_json", "aggregate_json", "changes_json"):
+            decoded_key = json_key[:-5]
+            try:
+                payload[decoded_key] = json.loads(str(payload.get(json_key, "{}") or "{}"))
+            except Exception:
+                payload[decoded_key] = {}
+            payload.pop(json_key, None)
+        return payload
+
+    def get_session_summary(self, session_id: str) -> Optional[Dict[str, object]]:
+        clean_session_id = str(session_id or "").strip()
+        if not clean_session_id:
+            return None
+        with self._lock, self._conn() as conn:
+            row = conn.execute(
+                """
+                SELECT ts.*, ss.repo_root, ss.branch_start, ss.branch_end, ss.head_start, ss.head_end,
+                       ss.start_snapshot_json, ss.end_snapshot_json, ss.aggregate_json,
+                       ss.changes_json, ss.event_stream_path, ss.created_at AS summary_created_at,
+                       ss.updated_at AS summary_updated_at
+                FROM tracked_sessions ts
+                LEFT JOIN session_summaries ss ON ss.session_id = ts.session_id
+                WHERE ts.session_id = ?
+                LIMIT 1
+                """,
+                (clean_session_id,),
+            ).fetchone()
+        return self._decode_session_summary_row(row) if row is not None else None
+
+    def list_session_summaries(
+        self,
+        limit: int = 50,
+        before_started_at: int = 0,
+        before_session_id: str = "",
+        status: str = "",
+    ) -> List[Dict[str, object]]:
+        row_limit = max(1, min(500, int(limit or 50)))
+        keyset_started_at = int(before_started_at or 0)
+        keyset_session_id = str(before_session_id or "").strip()
+        clean_status = str(status or "").strip().lower()
+        query = [
+            """
+            SELECT ts.*, ss.repo_root, ss.branch_start, ss.branch_end, ss.head_start, ss.head_end,
+                   ss.start_snapshot_json, ss.end_snapshot_json, ss.aggregate_json,
+                   ss.changes_json, ss.event_stream_path, ss.created_at AS summary_created_at,
+                   ss.updated_at AS summary_updated_at
+            FROM tracked_sessions ts
+            LEFT JOIN session_summaries ss ON ss.session_id = ts.session_id
+            WHERE 1=1
+            """
+        ]
+        params: list[object] = []
+        if clean_status:
+            query.append("AND ts.status = ?")
+            params.append(clean_status)
+        if keyset_started_at > 0:
+            if keyset_session_id:
+                query.append("AND (ts.started_at < ? OR (ts.started_at = ? AND ts.session_id < ?))")
+                params.extend([keyset_started_at, keyset_started_at, keyset_session_id])
+            else:
+                query.append("AND ts.started_at < ?")
+                params.append(keyset_started_at)
+        query.extend(
+            [
+                "ORDER BY ts.started_at DESC, ts.session_id DESC",
+                "LIMIT ?",
+            ]
+        )
+        params.append(row_limit)
+        with self._lock, self._conn() as conn:
+            rows = conn.execute("\n".join(query), tuple(params)).fetchall()
+        return [self._decode_session_summary_row(row) for row in rows]
+
+    def count_session_summaries(self, status: str = "") -> int:
+        clean_status = str(status or "").strip().lower()
+        query = [
+            "SELECT COUNT(*) AS total",
+            "FROM tracked_sessions",
+            "WHERE 1=1",
+        ]
+        params: list[object] = []
+        if clean_status:
+            query.append("AND status = ?")
+            params.append(clean_status)
+        with self._lock, self._conn() as conn:
+            row = conn.execute("\n".join(query), tuple(params)).fetchone()
+        return int(row["total"] or 0) if row is not None else 0
+
     def apply_history_counts(self, command_counts: Dict[str, int], ts: Optional[int] = None) -> int:
         now_ts = int(ts or time.time())
         events: List[Dict[str, object]] = []
@@ -1416,6 +1618,8 @@ class SQLiteStateStore:
             ]
             removed = [dict(row) for row in conn.execute("SELECT * FROM removed_commands").fetchall()]
             command_runs = [dict(row) for row in conn.execute("SELECT * FROM command_runs").fetchall()]
+            tracked_sessions = [dict(row) for row in conn.execute("SELECT * FROM tracked_sessions").fetchall()]
+            session_summaries = [dict(row) for row in conn.execute("SELECT * FROM session_summaries").fetchall()]
             history = [dict(row) for row in conn.execute("SELECT * FROM history_index_state").fetchall()]
             meta = [dict(row) for row in conn.execute("SELECT * FROM meta").fetchall()]
         return {
@@ -1428,6 +1632,8 @@ class SQLiteStateStore:
             "repo_feedback_execute_context": repo_execute_feedback,
             "removed_commands": removed,
             "command_runs": command_runs,
+            "tracked_sessions": tracked_sessions,
+            "session_summaries": session_summaries,
             "history_index_state": history,
             "meta": meta,
             "journal_latest_ts": self.journal.latest_event_ts() if self.journal else 0,

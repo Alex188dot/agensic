@@ -238,6 +238,56 @@ class ProvenanceRunsResponse(BaseModel):
     total_matching: int = 0
 
 
+class SessionSummaryEntry(BaseModel):
+    session_id: str
+    status: str = ""
+    launch_mode: str = ""
+    agent: str = ""
+    model: str = ""
+    agent_name: str = ""
+    working_directory: str = ""
+    root_command: str = ""
+    transcript_path: str = ""
+    controller_pid: int | None = None
+    root_pid: int | None = None
+    started_at: int = 0
+    ended_at: int = 0
+    updated_at: int = 0
+    violation_code: str = ""
+    exit_code: int | None = None
+    repo_root: str = ""
+    branch_start: str = ""
+    branch_end: str = ""
+    head_start: str = ""
+    head_end: str = ""
+    start_snapshot: dict[str, Any] = Field(default_factory=dict)
+    end_snapshot: dict[str, Any] = Field(default_factory=dict)
+    aggregate: dict[str, Any] = Field(default_factory=dict)
+    changes: dict[str, Any] = Field(default_factory=dict)
+    event_stream_path: str = ""
+    summary_created_at: int | None = None
+    summary_updated_at: int | None = None
+
+
+class SessionSummariesResponse(BaseModel):
+    status: str = "ok"
+    sessions: list[SessionSummaryEntry] = Field(default_factory=list)
+    total: int = 0
+    total_matching: int = 0
+
+
+class SessionDetailResponse(BaseModel):
+    status: str = "ok"
+    session: SessionSummaryEntry | None = None
+
+
+class SessionEventsResponse(BaseModel):
+    status: str = "ok"
+    session_id: str = ""
+    events: list[dict[str, Any]] = Field(default_factory=list)
+    total: int = 0
+
+
 class ProvenanceRegistrySummaryResponse(BaseModel):
     status: str = "ok"
     summary: dict[str, Any] = Field(default_factory=dict)

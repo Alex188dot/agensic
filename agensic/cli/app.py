@@ -947,6 +947,35 @@ def _run_provenance_tui(
         _reset_terminal_mouse_reporting()
 
 
+def _run_sessions_tui(session_id: str = "", *, replay: bool = False) -> bool:
+    binary_path = _ensure_provenance_tui_binary()
+    token = ""
+    try:
+        token = _DAEMON_AUTH_CACHE.get_token()
+    except Exception:
+        token = ""
+
+    cmd = [
+        binary_path,
+        "sessions",
+        "--daemon-url",
+        DAEMON_BASE_URL,
+    ]
+    if token:
+        cmd.append(f"--auth-token={token}")
+    if session_id:
+        cmd.extend(["--session-id", str(session_id)])
+    if replay:
+        cmd.append("--replay")
+
+    _reset_terminal_mouse_reporting()
+    try:
+        result = subprocess.run(cmd, check=False)
+        return int(result.returncode or 0) == 0
+    finally:
+        _reset_terminal_mouse_reporting()
+
+
 def _format_provenance_command_preview(command: object) -> str:
     text = str(command or "")
     text = text.replace("\r", " ").replace("\n", " ").replace("\t", " ")
@@ -3023,6 +3052,25 @@ def provenance(
     console.print(table)
 
 
+@app.command()
+def sessions(
+    text: bool = typer.Option(False, "--text", help="Print sessions as text instead of opening the TUI"),
+):
+    """Browse tracked sessions."""
+    from . import track as track_runtime
+
+    if text:
+        raise typer.Exit(code=track_runtime.print_sessions_text())
+    try:
+        ok = _run_sessions_tui()
+        if ok:
+            return
+        console.print("[yellow]Sessions TUI exited with non-zero status, falling back.[/yellow]")
+    except Exception as exc:
+        console.print(f"[yellow]Sessions TUI unavailable, falling back:[/yellow] {exc}")
+    raise typer.Exit(code=track_runtime.print_sessions_text())
+
+
 def _shell_export_line(name: str, value: str) -> str:
     return f"export {name}={shlex.quote(str(value or ''))}"
 
@@ -3589,6 +3637,7 @@ def track_command(
     model: str = typer.Option("", "--model", help="Explicit tracked model identifier for any provider"),
     agent_name: str = typer.Option("", "--agent-name", help="Override tracked agent display name"),
     replay: bool = typer.Option(False, "--replay", help="Replay the decoded transcript when using 'track inspect'"),
+    text: bool = typer.Option(False, "--text", help="Print text output instead of opening the session TUI for 'track inspect'"),
     tail: int = typer.Option(8, "--tail", min=1, max=100, help="Tail event count for 'track inspect'"),
 ):
     """Launch and supervise a tracked CLI session."""
@@ -3628,7 +3677,18 @@ def track_command(
             raise typer.Exit(code=2)
         raise typer.Exit(code=track_runtime.stop_track_sessions(session_id, stop_all=stop_all))
     if args[0] == "inspect" and len(args) <= 2:
-        raise typer.Exit(code=track_runtime.inspect_track_session(args[1] if len(args) == 2 else "", replay=replay, tail_events=tail))
+        session_id = args[1] if len(args) == 2 else ""
+        if text:
+            raise typer.Exit(code=track_runtime.inspect_track_session(session_id, replay=replay, tail_events=tail))
+        try:
+            ok = _run_sessions_tui(session_id=session_id, replay=replay)
+        except Exception as exc:
+            console.print(f"[yellow]Sessions TUI unavailable, falling back:[/yellow] {exc}")
+        else:
+            if ok:
+                raise typer.Exit(code=0)
+            console.print("[yellow]Sessions TUI exited with non-zero status, falling back.[/yellow]")
+        raise typer.Exit(code=track_runtime.inspect_track_session(session_id, replay=replay, tail_events=tail))
 
     try:
         launch = track_runtime.prepare_track_launch(

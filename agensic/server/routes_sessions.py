@@ -1,0 +1,99 @@
+from fastapi import APIRouter, HTTPException
+
+from agensic.cli import track as track_runtime
+from agensic.server import deps
+from agensic.server.schemas import (
+    SessionDetailResponse,
+    SessionEventsResponse,
+    SessionSummariesResponse,
+)
+
+router = APIRouter()
+
+
+@router.get(
+    "/sessions",
+    response_model=SessionSummariesResponse,
+    response_model_exclude_unset=True,
+)
+def list_sessions(
+    limit: int = 50,
+    before_started_at: int = 0,
+    before_session_id: str = "",
+    status: str = "",
+) -> SessionSummariesResponse:
+    deps.enter_request_or_503()
+    try:
+        sessions = deps.engine.list_session_summaries(
+            limit=limit,
+            before_started_at=before_started_at,
+            before_session_id=before_session_id,
+            status=status,
+        )
+        total_matching = deps.engine.count_session_summaries(status=status)
+        return {
+            "status": "ok",
+            "sessions": sessions,
+            "total": len(sessions),
+            "total_matching": int(total_matching or 0),
+        }
+    finally:
+        deps.release_request_slot()
+
+
+@router.get(
+    "/sessions/{session_id}",
+    response_model=SessionDetailResponse,
+    response_model_exclude_unset=True,
+)
+def get_session(session_id: str) -> SessionDetailResponse:
+    deps.enter_request_or_503()
+    try:
+        session = deps.engine.get_session_summary(session_id)
+        if session is None:
+            raise HTTPException(status_code=404, detail="session_not_found")
+        return {
+            "status": "ok",
+            "session": session,
+        }
+    finally:
+        deps.release_request_slot()
+
+
+@router.get(
+    "/sessions/{session_id}/events",
+    response_model=SessionEventsResponse,
+    response_model_exclude_unset=True,
+)
+def get_session_events(session_id: str) -> SessionEventsResponse:
+    deps.enter_request_or_503()
+    try:
+        session = deps.engine.get_session_summary(session_id)
+        if session is None:
+            raise HTTPException(status_code=404, detail="session_not_found")
+        event_stream_path = str(session.get("event_stream_path", "") or "").strip()
+        events = track_runtime._load_session_events(event_stream_path) if event_stream_path else []
+        normalized_events: list[dict[str, object]] = []
+        for event in events:
+            payload = dict(event.get("payload", {}) or {})
+            data = payload.get("data")
+            if isinstance(data, (bytes, bytearray)):
+                payload["data"] = data.decode("utf-8", errors="replace")
+            normalized_events.append(
+                {
+                    "session_id": str(event.get("session_id", "") or ""),
+                    "seq": int(event.get("seq", 0) or 0),
+                    "ts_wall": float(event.get("ts_wall", 0.0) or 0.0),
+                    "ts_monotonic_ms": int(event.get("ts_monotonic_ms", 0) or 0),
+                    "type": str(event.get("type", "") or ""),
+                    "payload": payload,
+                }
+            )
+        return {
+            "status": "ok",
+            "session_id": session_id,
+            "events": normalized_events,
+            "total": len(normalized_events),
+        }
+    finally:
+        deps.release_request_slot()

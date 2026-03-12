@@ -1,3 +1,5 @@
+mod sessions;
+
 use chrono::{Duration as ChronoDuration, Local, NaiveDate, TimeZone};
 use clap::Parser;
 use crossterm::event::{
@@ -2043,6 +2045,17 @@ fn install_terminal_panic_hook() {
 }
 
 fn main() {
+    let raw_args: Vec<String> = env::args().collect();
+    if matches!(raw_args.get(1).map(String::as_str), Some("sessions")) {
+        install_terminal_panic_hook();
+        if let Err(err) = sessions::run_from_env(&raw_args[2..]) {
+            cleanup_terminal();
+            eprintln!("{}", err);
+            std::process::exit(1);
+        }
+        return;
+    }
+
     let args = Args::parse();
     install_terminal_panic_hook();
 

@@ -2,6 +2,7 @@ import importlib
 import json
 import multiprocessing
 import os
+import subprocess
 import tempfile
 import time
 import unittest
@@ -392,7 +393,7 @@ class CliTrackTests(unittest.TestCase):
 
             self.assertEqual(code, 0)
             transcript_dir = Path(temp_paths.state_dir) / "tracked_sessions"
-            transcripts = list(transcript_dir.glob("*.jsonl"))
+            transcripts = list(transcript_dir.glob("*.transcript.jsonl"))
             self.assertTrue(transcripts)
             transcript_payload = transcripts[0].read_text(encoding="utf-8")
             self.assertIn('"direction":"pty"', transcript_payload)
@@ -408,6 +409,37 @@ class CliTrackTests(unittest.TestCase):
             self.assertTrue(any(command.startswith("sleep 0.8") for command in commands))
             self.assertTrue(any(str(item.get("track_session_id", "") or "").strip() for item in payloads))
             self.assertTrue(any(item.get("track_launch_mode") == "raw_command" for item in payloads))
+
+    def test_run_tracked_command_records_session_summary_and_events(self):
+        with self._temp_app_paths() as (_, temp_paths), tempfile.TemporaryDirectory() as repo_dir:
+            subprocess.run(["git", "init"], cwd=repo_dir, check=True, capture_output=True, text=True)
+            subprocess.run(["git", "config", "user.email", "test@example.com"], cwd=repo_dir, check=True)
+            subprocess.run(["git", "config", "user.name", "Test User"], cwd=repo_dir, check=True)
+            Path(repo_dir, "README.md").write_text("hello\n", encoding="utf-8")
+            subprocess.run(["git", "add", "README.md"], cwd=repo_dir, check=True)
+            subprocess.run(["git", "commit", "-m", "init"], cwd=repo_dir, check=True, capture_output=True, text=True)
+
+            with patch("os.getcwd", return_value=repo_dir):
+                launch = track_module.prepare_track_launch(
+                    ["--", "zsh", "-lc", "echo changed > README.md; git add README.md; git commit -m 'update readme'"],
+                )
+            code = track_module.run_tracked_command(launch)
+
+            self.assertEqual(code, 0)
+            store = SQLiteStateStore(temp_paths.state_sqlite_path, journal=None)
+            session = store.get_latest_tracked_session()
+            self.assertIsNotNone(session)
+            summary = store.get_session_summary(str(session["session_id"]))
+            self.assertIsNotNone(summary)
+            self.assertEqual(os.path.realpath(str(summary["repo_root"])), os.path.realpath(repo_dir))
+            self.assertGreaterEqual(int(summary["aggregate"].get("command_count", 0) or 0), 1)
+            self.assertIn("README.md", list(summary["changes"].get("files_changed", []) or []))
+            self.assertTrue(list(summary["changes"].get("commits_created", []) or []))
+            event_stream_path = Path(str(summary.get("event_stream_path", "") or ""))
+            self.assertTrue(event_stream_path.is_file())
+            event_payload = event_stream_path.read_text(encoding="utf-8")
+            self.assertIn('"type":"git.snapshot.start"', event_payload)
+            self.assertIn('"type":"command.recorded"', event_payload)
 
     def test_prune_tracked_transcripts_removes_files_older_than_seven_days(self):
         with self._temp_app_paths() as (_, temp_paths):
@@ -465,13 +497,13 @@ class CliTrackTests(unittest.TestCase):
 
     def test_run_tracked_command_records_short_lived_child_process(self):
         with self._temp_app_paths() as (_, temp_paths):
-            launch = track_module.prepare_track_launch(["--", "zsh", "-lc", "echo hi; sleep 0.05 & wait"])
+            launch = track_module.prepare_track_launch(["--", "zsh", "-lc", "echo hi; sleep 0.2 & wait"])
             code = track_module.run_tracked_command(launch)
 
             self.assertEqual(code, 0)
             store = SQLiteStateStore(temp_paths.state_sqlite_path, journal=None)
             commands = [str(row.get("command", "") or "") for row in store.list_command_runs(limit=20)]
-            self.assertTrue(any(command.startswith("sleep 0.05") for command in commands), msg=commands)
+            self.assertTrue(any(command.startswith("sleep 0.2") for command in commands), msg=commands)
 
     def test_run_tracked_command_observes_session_boundary_escape(self):
         with self._temp_app_paths() as (_, temp_paths):

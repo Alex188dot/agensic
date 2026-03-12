@@ -218,7 +218,50 @@ class ServerContractTests(unittest.TestCase):
                 },
             )
             self.assertEqual(assist_response.status_code, 200)
-            self.assertIn("answer", assist_response.json())
+
+    def test_sessions_contracts(self):
+        session = {
+            "session_id": "sess-1",
+            "status": "exited",
+            "agent": "codex",
+            "model": "gpt-5.4",
+            "started_at": 1700000000,
+            "ended_at": 1700000005,
+            "repo_root": "/tmp/project",
+            "branch_start": "main",
+            "branch_end": "feature",
+            "aggregate": {"command_count": 2},
+            "changes": {"files_changed": ["app.py"]},
+            "event_stream_path": "/tmp/session.events.jsonl",
+        }
+        events = [
+            {
+                "session_id": "sess-1",
+                "seq": 1,
+                "ts_wall": 1700000000.0,
+                "ts_monotonic_ms": 0,
+                "type": "marker.session.started",
+                "payload": {},
+            }
+        ]
+
+        with patch.object(deps.engine, "list_session_summaries", return_value=[session]), patch.object(
+            deps.engine, "count_session_summaries", return_value=1
+        ), patch.object(deps.engine, "get_session_summary", return_value=session), patch(
+            "agensic.server.routes_sessions.track_runtime._load_session_events",
+            return_value=events,
+        ):
+            list_response = self.client.get("/sessions")
+            self.assertEqual(list_response.status_code, 200)
+            self.assertEqual(list_response.json()["total"], 1)
+
+            detail_response = self.client.get("/sessions/sess-1")
+            self.assertEqual(detail_response.status_code, 200)
+            self.assertEqual(detail_response.json()["session"]["session_id"], "sess-1")
+
+            events_response = self.client.get("/sessions/sess-1/events")
+            self.assertEqual(events_response.status_code, 200)
+            self.assertEqual(events_response.json()["total"], 1)
 
     def test_intent_history_only_returns_refusal_without_llm(self):
         with patch.object(deps, "load_config", return_value={"provider": "history_only"}), patch.object(

@@ -1833,6 +1833,53 @@ class SuggestionEngine:
     def get_provenance_registry_summary(self) -> dict:
         return get_registry_summary(force_reload=False)
 
+    def list_session_summaries(
+        self,
+        limit: int = 50,
+        before_started_at: int = 0,
+        before_session_id: str = "",
+        status: str = "",
+    ) -> list[dict]:
+        if self.state_store is None:
+            return []
+        try:
+            return self.state_store.list_session_summaries(
+                limit=limit,
+                before_started_at=before_started_at,
+                before_session_id=before_session_id,
+                status=status,
+            )
+        except Exception as exc:
+            logger.error(
+                "Failed to list tracked sessions: %s",
+                self.privacy_guard.sanitize_for_log(str(exc)),
+            )
+            return []
+
+    def count_session_summaries(self, status: str = "") -> int:
+        if self.state_store is None:
+            return 0
+        try:
+            return int(self.state_store.count_session_summaries(status=status) or 0)
+        except Exception as exc:
+            logger.error(
+                "Failed to count tracked sessions: %s",
+                self.privacy_guard.sanitize_for_log(str(exc)),
+            )
+            return 0
+
+    def get_session_summary(self, session_id: str) -> dict | None:
+        if self.state_store is None:
+            return None
+        try:
+            return self.state_store.get_session_summary(session_id)
+        except Exception as exc:
+            logger.error(
+                "Failed to load tracked session summary: %s",
+                self.privacy_guard.sanitize_for_log(str(exc)),
+            )
+            return None
+
     def list_provenance_registry_agents(self, status_filter: str = "") -> list[dict]:
         return list_registry_agents(status_filter=status_filter, force_reload=False)
 

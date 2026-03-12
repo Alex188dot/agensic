@@ -113,6 +113,16 @@ def _ensure_track_layout() -> None:
     os.makedirs(_track_transcripts_dir(), mode=0o700, exist_ok=True)
 
 
+def _track_transcript_path(session_id: str) -> str:
+    clean_session_id = str(session_id or "").strip() or uuid.uuid4().hex[:16]
+    return os.path.join(_track_transcripts_dir(), f"{clean_session_id}.transcript.jsonl")
+
+
+def _track_event_stream_path(session_id: str) -> str:
+    clean_session_id = str(session_id or "").strip() or uuid.uuid4().hex[:16]
+    return os.path.join(_track_transcripts_dir(), f"{clean_session_id}.events.jsonl")
+
+
 def _is_pid_alive(pid: int) -> bool:
     try:
         os.kill(int(pid), 0)
@@ -676,6 +686,130 @@ def _format_debug_preview(data: bytes, limit: int = 120) -> str:
     return text[:limit] + ("..." if len(text) > limit else "")
 
 
+def _run_git_capture(working_directory: str, args: list[str], *, timeout_seconds: float = 1.5) -> tuple[int, str, str]:
+    cwd = str(working_directory or "").strip() or None
+    try:
+        run = subprocess.run(
+            ["git", *args],
+            cwd=cwd,
+            capture_output=True,
+            text=True,
+            check=False,
+            timeout=timeout_seconds,
+        )
+    except Exception as exc:
+        return (1, "", str(exc))
+    return (int(run.returncode), str(run.stdout or ""), str(run.stderr or ""))
+
+
+def _capture_repo_snapshot(working_directory: str) -> dict[str, Any]:
+    repo_root = ""
+    branch_name = ""
+    head_commit = ""
+    status_output = ""
+    dirty = False
+
+    code, stdout, _ = _run_git_capture(working_directory, ["rev-parse", "--show-toplevel"])
+    if code == 0:
+        repo_root = str(stdout or "").strip()
+    repo_cwd = repo_root or str(working_directory or "").strip()
+    if repo_root:
+        code, stdout, _ = _run_git_capture(repo_cwd, ["branch", "--show-current"])
+        if code == 0:
+            branch_name = str(stdout or "").strip()
+        code, stdout, _ = _run_git_capture(repo_cwd, ["rev-parse", "HEAD"])
+        if code == 0:
+            head_commit = str(stdout or "").strip()
+        code, stdout, _ = _run_git_capture(repo_cwd, ["status", "--porcelain"])
+        if code == 0:
+            status_output = str(stdout or "")
+            dirty = bool(status_output.strip())
+
+    changed_files: list[str] = []
+    diff_stat = ""
+    if repo_root:
+        code, stdout, _ = _run_git_capture(repo_cwd, ["diff", "--name-only", "HEAD"])
+        if code == 0:
+            changed_files = [line.strip() for line in stdout.splitlines() if line.strip()]
+        code, stdout, _ = _run_git_capture(repo_cwd, ["diff", "--stat", "HEAD"])
+        if code == 0:
+            diff_stat = str(stdout or "").strip()
+
+    return {
+        "timestamp": int(time.time()),
+        "repo_root": repo_root,
+        "branch": branch_name,
+        "head": head_commit,
+        "dirty": dirty,
+        "status_porcelain": status_output,
+        "changed_files": changed_files,
+        "diff_stat": diff_stat,
+    }
+
+
+def _git_changed_files_between(repo_root: str, start_head: str, end_head: str) -> list[str]:
+    if not repo_root or not start_head or not end_head or start_head == end_head:
+        return []
+    code, stdout, _ = _run_git_capture(repo_root, ["diff", "--name-only", f"{start_head}..{end_head}"], timeout_seconds=2.0)
+    if code != 0:
+        return []
+    return [line.strip() for line in stdout.splitlines() if line.strip()]
+
+
+def _git_diff_stat_between(repo_root: str, start_head: str, end_head: str) -> str:
+    if not repo_root or not start_head or not end_head or start_head == end_head:
+        return ""
+    code, stdout, _ = _run_git_capture(repo_root, ["diff", "--stat", f"{start_head}..{end_head}"], timeout_seconds=2.0)
+    return str(stdout or "").strip() if code == 0 else ""
+
+
+def _git_commits_between(repo_root: str, start_head: str, end_head: str) -> list[dict[str, str]]:
+    if not repo_root or not start_head or not end_head or start_head == end_head:
+        return []
+    code, stdout, _ = _run_git_capture(repo_root, ["log", "--oneline", f"{start_head}..{end_head}"], timeout_seconds=2.0)
+    if code != 0:
+        return []
+    commits: list[dict[str, str]] = []
+    for line in stdout.splitlines():
+        clean = str(line or "").strip()
+        if not clean:
+            continue
+        sha, _, summary = clean.partition(" ")
+        commits.append({"sha": sha, "summary": summary.strip()})
+    return commits
+
+
+def _load_session_events(path: str) -> list[dict[str, Any]]:
+    target = Path(path).expanduser()
+    if not target.is_file():
+        return []
+    events: list[dict[str, Any]] = []
+    try:
+        lines = target.read_text(encoding="utf-8").splitlines()
+    except Exception:
+        return []
+    for line in lines:
+        try:
+            payload = json.loads(line)
+        except Exception:
+            continue
+        if not isinstance(payload, dict):
+            continue
+        item = dict(payload)
+        event_payload = item.get("payload", {})
+        if isinstance(event_payload, dict):
+            data_b64 = str(event_payload.get("data_b64", "") or "").strip()
+            if data_b64:
+                try:
+                    event_payload["data"] = base64.b64decode(data_b64.encode("ascii"), validate=True)
+                except Exception:
+                    event_payload["data"] = b""
+            item["payload"] = event_payload
+        events.append(item)
+    events.sort(key=lambda event: (float(event.get("ts_monotonic_ms", 0.0) or 0.0), int(event.get("seq", 0) or 0)))
+    return events
+
+
 def _load_transcript_events(path: str) -> list[dict[str, Any]]:
     target = Path(path).expanduser()
     if not target.is_file():
@@ -708,18 +842,18 @@ def _load_transcript_events(path: str) -> list[dict[str, Any]]:
     return events
 
 
-def _find_session_runs(session_id: str, limit: int = 12) -> list[dict[str, Any]]:
+def _find_session_runs(session_id: str, limit: int = 500) -> list[dict[str, Any]]:
     clean_session_id = str(session_id or "").strip()
     if not clean_session_id:
         return []
-    rows = _state_store().list_command_runs(limit=200)
+    rows = _state_store().list_command_runs(limit=max(200, min(500, int(limit or 500))))
     out: list[dict[str, Any]] = []
     for row in rows:
         payload = dict(row.get("payload", {}) or {})
         if str(payload.get("track_session_id", "") or "").strip() != clean_session_id:
             continue
         out.append(row)
-        if len(out) >= max(1, int(limit or 12)):
+        if len(out) >= max(1, int(limit or 500)):
             break
     return out
 
@@ -833,8 +967,33 @@ def stop_track_sessions(session_id: str = "", *, stop_all: bool = False) -> int:
     return exit_code
 
 
+def print_sessions_text(limit: int = 20) -> int:
+    rows = _state_store().list_session_summaries(limit=max(1, min(200, int(limit or 20))))
+    if not rows:
+        console.print("no_sessions")
+        return 0
+    console.print(f"sessions={len(rows)}", highlight=False)
+    for row in rows:
+        console.print(
+            "session_id={session_id} status={status} agent={agent} model={model} started_at={started_at} "
+            "repo={repo} branch={branch} exit_code={exit_code} violation={violation}".format(
+                session_id=str(row.get("session_id", "") or "-"),
+                status=str(row.get("status", "") or "-"),
+                agent=str(row.get("agent", "") or "-"),
+                model=str(row.get("model", "") or "-"),
+                started_at=_format_ts(int(row.get("started_at", 0) or 0)),
+                repo=str(row.get("repo_root", "") or "-"),
+                branch=str(row.get("branch_end", "") or row.get("branch_start", "") or "-"),
+                exit_code=str(row.get("exit_code", "-") if row.get("exit_code") is not None else "-"),
+                violation=str(row.get("violation_code", "") or "-"),
+            ),
+            highlight=False,
+        )
+    return 0
+
+
 def inspect_track_session(session_id: str = "", *, replay: bool = False, tail_events: int = TRACK_INSPECT_TAIL_EVENTS) -> int:
-    state = get_latest_track_session(session_id)
+    state = _state_store().get_session_summary(session_id) if str(session_id or "").strip() else get_latest_track_session(session_id)
     if not state:
         console.print("[red]No tracked session found.[/red]")
         return 1
@@ -862,11 +1021,26 @@ def inspect_track_session(session_id: str = "", *, replay: bool = False, tail_ev
         highlight=False,
     )
     console.print(f"command={str(state.get('root_command', '') or '-')}", highlight=False)
+    console.print(
+        "repo_start={repo_start} branch_start={branch_start} head_start={head_start} repo_end={repo_end} branch_end={branch_end} head_end={head_end}".format(
+            repo_start=str((state.get("start_snapshot") or {}).get("repo_root", "") or state.get("repo_root", "") or "-"),
+            branch_start=str(state.get("branch_start", "") or (state.get("start_snapshot") or {}).get("branch", "") or "-"),
+            head_start=str(state.get("head_start", "") or (state.get("start_snapshot") or {}).get("head", "") or "-"),
+            repo_end=str((state.get("end_snapshot") or {}).get("repo_root", "") or state.get("repo_root", "") or "-"),
+            branch_end=str(state.get("branch_end", "") or (state.get("end_snapshot") or {}).get("branch", "") or "-"),
+            head_end=str(state.get("head_end", "") or (state.get("end_snapshot") or {}).get("head", "") or "-"),
+        ),
+        highlight=False,
+    )
     transcript_path = str(state.get("transcript_path", "") or "").strip()
     if transcript_path:
         console.print(f"transcript={transcript_path}", highlight=False)
+    event_stream_path = str(state.get("event_stream_path", "") or "").strip()
+    if event_stream_path:
+        console.print(f"events={event_stream_path}", highlight=False)
 
     events = _load_transcript_events(transcript_path) if transcript_path else []
+    session_events = _load_session_events(event_stream_path) if event_stream_path else []
     if replay:
         if not events:
             console.print("transcript_replay=unavailable", highlight=False)
@@ -892,8 +1066,63 @@ def inspect_track_session(session_id: str = "", *, replay: bool = False, tail_ev
                 f"tail[{idx}] direction={str(event.get('direction', '') or '-')} ts={float(event.get('ts', 0.0) or 0.0):.6f} data={preview}",
                 highlight=False,
             )
+        console.print(f"session_events={len(session_events)}", highlight=False)
+        for idx, event in enumerate(session_events[-max(1, int(tail_events or TRACK_INSPECT_TAIL_EVENTS)) :], start=1):
+            payload = dict(event.get("payload", {}) or {})
+            preview = ""
+            if isinstance(payload.get("data"), (bytes, bytearray)):
+                preview = _format_debug_preview(bytes(payload.get("data", b"")))
+            console.print(
+                "event[{idx}] seq={seq} type={event_type} preview={preview}".format(
+                    idx=idx,
+                    seq=int(event.get("seq", 0) or 0),
+                    event_type=str(event.get("type", "") or "-"),
+                    preview=preview or "-",
+                ),
+                highlight=False,
+            )
 
     runs = _find_session_runs(str(state.get("session_id", "") or ""))
+    aggregate = dict(state.get("aggregate", {}) or {})
+    changes = dict(state.get("changes", {}) or {})
+    if aggregate:
+        console.print(
+            "aggregate command_count={command_count} subprocess_count={subprocess_count} push_attempts={push_attempts} commits_created={commits_created}".format(
+                command_count=int(aggregate.get("command_count", 0) or 0),
+                subprocess_count=int(aggregate.get("subprocess_count", 0) or 0),
+                push_attempts=int(aggregate.get("push_attempts", 0) or 0),
+                commits_created=int(aggregate.get("commits_created", 0) or 0),
+            ),
+            highlight=False,
+        )
+        console.print(
+            f"label_counts={json.dumps(dict(aggregate.get('provenance_label_counts', {}) or {}), sort_keys=True)}",
+            highlight=False,
+        )
+        suspicious_events = list(aggregate.get("suspicious_events", []) or [])
+        console.print(f"suspicious_events={','.join(str(item) for item in suspicious_events) or '-'}", highlight=False)
+    if changes:
+        console.print(
+            "files_changed={count} file_list={files}".format(
+                count=len(list(changes.get("files_changed", []) or [])),
+                files=",".join(str(item) for item in list(changes.get("files_changed", []) or [])) or "-",
+            ),
+            highlight=False,
+        )
+        console.print(
+            f"committed_diff_stat={str(changes.get('committed_diff_stat', '') or '-')}",
+            highlight=False,
+        )
+        console.print(
+            f"worktree_diff_stat={str(changes.get('worktree_diff_stat', '') or '-')}",
+            highlight=False,
+        )
+        commits = list(changes.get("commits_created", []) or [])
+        for idx, commit in enumerate(commits, start=1):
+            console.print(
+                f"commit[{idx}] sha={str(commit.get('sha', '') or '-')} summary={str(commit.get('summary', '') or '-')}",
+                highlight=False,
+            )
     if runs:
         console.print(f"recorded_runs={len(runs)}", highlight=False)
         for row in runs:
@@ -915,6 +1144,27 @@ def _write_transcript_event(handle: Any, direction: str, data: bytes) -> None:
         "ts": round(time.time(), 6),
         "direction": str(direction or "").strip(),
         "data_b64": base64.b64encode(bytes(data)).decode("ascii"),
+    }
+    handle.write(json.dumps(event, separators=(",", ":")) + "\n")
+    handle.flush()
+
+
+def _write_session_event(
+    handle: Any,
+    *,
+    session_id: str,
+    seq: int,
+    started_monotonic: float,
+    event_type: str,
+    payload: dict[str, Any] | None = None,
+) -> None:
+    event = {
+        "session_id": str(session_id or "").strip(),
+        "seq": int(seq),
+        "ts_wall": round(time.time(), 6),
+        "ts_monotonic_ms": int(max(0.0, (time.monotonic() - float(started_monotonic or time.monotonic())) * 1000.0)),
+        "type": str(event_type or "").strip(),
+        "payload": dict(payload or {}),
     }
     handle.write(json.dumps(event, separators=(",", ":")) + "\n")
     handle.flush()
@@ -1060,7 +1310,15 @@ def _leaves_allowed_session(row: dict[str, Any], *, root_session_id: int) -> boo
 
 
 class TrackRuntime:
-    def __init__(self, launch: TrackLaunch, session_id: str, root_pid: int, transcript_path: str, state_store: SQLiteStateStore):
+    def __init__(
+        self,
+        launch: TrackLaunch,
+        session_id: str,
+        root_pid: int,
+        transcript_path: str,
+        event_stream_path: str,
+        state_store: SQLiteStateStore,
+    ):
         self.launch = launch
         self.session_id = session_id
         self.root_pid = int(root_pid)
@@ -1068,13 +1326,20 @@ class TrackRuntime:
         self.root_process_group_id = _safe_getpgid(root_pid) or int(root_pid)
         self.controller_pid = int(os.getpid())
         self.transcript_path = transcript_path
+        self.event_stream_path = event_stream_path
         self.state_store = state_store
         self.stop_event = threading.Event()
         self._lock = threading.Lock()
         self.root_exit_code: int | None = None
         self.violation_code = ""
+        self.started_monotonic = time.monotonic()
+        self._event_seq = 0
+        self._event_handle: Any | None = None
+        self.transcript_event_count = 0
         self.private_key_path = _track_private_key_path()
         self.public_key_path = _track_public_key_path()
+        self.start_snapshot = _capture_repo_snapshot(self.launch.working_directory)
+        self.end_snapshot: dict[str, Any] = {}
         self.processes: dict[int, ObservedProcess] = {
             self.root_pid: ObservedProcess(
                 pid=self.root_pid,
@@ -1086,6 +1351,88 @@ class TrackRuntime:
                 process_group_id=self.root_process_group_id,
             )
         }
+
+    def set_event_handle(self, handle: Any) -> None:
+        self._event_handle = handle
+
+    def emit_event(self, event_type: str, payload: dict[str, Any] | None = None) -> None:
+        handle = self._event_handle
+        if handle is None:
+            return
+        with self._lock:
+            self._event_seq += 1
+            seq = self._event_seq
+        _write_session_event(
+            handle,
+            session_id=self.session_id,
+            seq=seq,
+            started_monotonic=self.started_monotonic,
+            event_type=event_type,
+            payload=payload,
+        )
+
+    def persist_summary(
+        self,
+        *,
+        aggregate: dict[str, Any] | None = None,
+        changes: dict[str, Any] | None = None,
+    ) -> None:
+        start_snapshot = dict(self.start_snapshot or {})
+        end_snapshot = dict(self.end_snapshot or {})
+        self.state_store.upsert_session_summary(
+            session_id=self.session_id,
+            repo_root=str(end_snapshot.get("repo_root", "") or start_snapshot.get("repo_root", "") or ""),
+            branch_start=str(start_snapshot.get("branch", "") or ""),
+            branch_end=str(end_snapshot.get("branch", "") or ""),
+            head_start=str(start_snapshot.get("head", "") or ""),
+            head_end=str(end_snapshot.get("head", "") or ""),
+            start_snapshot=start_snapshot,
+            end_snapshot=end_snapshot,
+            aggregate=aggregate,
+            changes=changes,
+            event_stream_path=self.event_stream_path,
+            created_at=int(start_snapshot.get("timestamp", 0) or time.time()),
+            updated_at=int(time.time()),
+        )
+
+    def build_session_summary(self) -> tuple[dict[str, Any], dict[str, Any]]:
+        runs = _find_session_runs(self.session_id, limit=500)
+        label_counts: dict[str, int] = {}
+        push_attempts = 0
+        for row in runs:
+            label = str(row.get("label", "") or "UNKNOWN")
+            label_counts[label] = int(label_counts.get(label, 0) or 0) + 1
+            command = str(row.get("command", "") or "").strip().lower()
+            if command.startswith("git push") or " git push" in command:
+                push_attempts += 1
+
+        repo_root = str(self.end_snapshot.get("repo_root", "") or self.start_snapshot.get("repo_root", "") or "")
+        head_start = str(self.start_snapshot.get("head", "") or "")
+        head_end = str(self.end_snapshot.get("head", "") or "")
+        committed_files = _git_changed_files_between(repo_root, head_start, head_end)
+        worktree_files = [str(item) for item in self.end_snapshot.get("changed_files", []) if str(item)]
+        files_changed = sorted({*committed_files, *worktree_files})
+        commits_created = _git_commits_between(repo_root, head_start, head_end)
+
+        aggregate = {
+            "command_count": len(runs),
+            "provenance_label_counts": label_counts,
+            "subprocess_count": max(0, len(self.processes) - 1),
+            "push_attempts": push_attempts,
+            "commits_created": len(commits_created),
+            "transcript_event_count": int(self.transcript_event_count),
+            "structured_event_count": int(self._event_seq),
+            "suspicious_events": [item for item in self.violation_code.split(",") if item],
+        }
+        changes = {
+            "files_changed": files_changed,
+            "committed_files": committed_files,
+            "worktree_files": worktree_files,
+            "committed_diff_stat": _git_diff_stat_between(repo_root, head_start, head_end),
+            "worktree_diff_stat": str(self.end_snapshot.get("diff_stat", "") or ""),
+            "commits_created": commits_created,
+        }
+        return (aggregate, changes)
 
     def session_payload(self, status: str, *, exit_code: int | None = None) -> dict[str, Any]:
         payload = {
@@ -1145,6 +1492,7 @@ class TrackRuntime:
                 return
             existing.append(clean)
             self.violation_code = ",".join(existing)
+        self.emit_event("violation.noted", {"code": clean})
         state = self.state_store.get_tracked_session(self.session_id) or {}
         current_status = str(state.get("status", "") or "active").strip().lower() or "active"
         self.persist_state(current_status)
@@ -1242,6 +1590,27 @@ class TrackRuntime:
             run_id=f"{self.session_id}:{proc.pid}",
             ts=ts,
         )
+        self.emit_event(
+            "command.recorded",
+            {
+                "pid": int(proc.pid),
+                "command": proc.command,
+                "label": str(classification.get("label", "UNKNOWN") or "UNKNOWN"),
+                "exit_code": exit_code,
+                "detached": bool(proc.detached),
+            },
+        )
+        self.emit_event(
+            "process.exited",
+            {
+                "pid": int(proc.pid),
+                "ppid": int(proc.ppid),
+                "command": proc.command,
+                "exit_code": exit_code,
+                "detached": bool(proc.detached),
+                "session_escape": bool(proc.session_escape),
+            },
+        )
 
 
 def _watch_tracked_process_tree(runtime: TrackRuntime) -> None:
@@ -1263,6 +1632,24 @@ def _watch_tracked_process_tree(runtime: TrackRuntime) -> None:
                     process_group_id=int(row.get("process_group_id", 0) or 0),
                 )
                 existing = runtime.processes[pid]
+                runtime.emit_event(
+                    "process.spawned",
+                    {
+                        "pid": pid,
+                        "ppid": int(row.get("ppid", 0) or 0),
+                        "command": existing.command,
+                        "working_directory": existing.working_directory,
+                    },
+                )
+                command_text = str(existing.command or "").strip().lower()
+                if command_text.startswith("git push") or " git push" in command_text:
+                    runtime.emit_event(
+                        "git.push.attempted",
+                        {
+                            "pid": pid,
+                            "command": existing.command,
+                        },
+                    )
             else:
                 command = str(row.get("args", "") or "").strip() or str(row.get("comm", "") or "").strip()
                 if command and (not existing.command or existing.command.startswith("(")):
@@ -1314,7 +1701,14 @@ def _apply_winsize(master_fd: int, stdin_fd: int) -> None:
         return
 
 
-def _drain_master_output(master_fd: int, transcript: Any, stdout_fd: int | None, *, timeout_seconds: float = 0.2) -> None:
+def _drain_master_output(
+    master_fd: int,
+    transcript: Any,
+    runtime: TrackRuntime,
+    stdout_fd: int | None,
+    *,
+    timeout_seconds: float = 0.2,
+) -> None:
     deadline = time.monotonic() + max(0.0, float(timeout_seconds or 0.0))
     while time.monotonic() < deadline:
         try:
@@ -1332,6 +1726,15 @@ def _drain_master_output(master_fd: int, transcript: Any, stdout_fd: int | None,
         if not data:
             return
         _write_transcript_event(transcript, "pty", data)
+        runtime.transcript_event_count += 1
+        runtime.emit_event(
+            "terminal.stdout",
+            {
+                "stream": "stdout",
+                "data_b64": base64.b64encode(bytes(data)).decode("ascii"),
+                "size": len(data),
+            },
+        )
         if stdout_fd is not None:
             os.write(stdout_fd, data)
         else:
@@ -1353,10 +1756,11 @@ def run_tracked_command(launch: TrackLaunch) -> int:
     _ensure_track_layout()
     _prune_tracked_transcripts()
 
-    transcript_path = os.path.join(_track_transcripts_dir(), f"{uuid.uuid4().hex}.jsonl")
+    session_id = uuid.uuid4().hex[:16]
+    transcript_path = _track_transcript_path(session_id)
+    event_stream_path = _track_event_stream_path(session_id)
     state_store = _state_store()
     master_fd, slave_fd = os.openpty()
-    session_id = uuid.uuid4().hex[:16]
     child_env = _build_tracked_child_env(launch, session_id)
     proc: subprocess.Popen[bytes] | None = None
     try:
@@ -1399,11 +1803,19 @@ def run_tracked_command(launch: TrackLaunch) -> int:
             pass
 
     pid = int(proc.pid)
-    runtime = TrackRuntime(launch=launch, session_id=session_id, root_pid=pid, transcript_path=transcript_path, state_store=state_store)
+    runtime = TrackRuntime(
+        launch=launch,
+        session_id=session_id,
+        root_pid=pid,
+        transcript_path=transcript_path,
+        event_stream_path=event_stream_path,
+        state_store=state_store,
+    )
     runtime.persist_state("active")
+    runtime.persist_summary()
 
     watcher = threading.Thread(target=_watch_tracked_process_tree, args=(runtime,), daemon=True)
-    watcher.start()
+    watcher_started = False
 
     old_tty = None
     stdin_fd = None
@@ -1413,6 +1825,7 @@ def run_tracked_command(launch: TrackLaunch) -> int:
         if sys.stdin.isatty():
             stdin_fd = sys.stdin.fileno()
             stdout_fd = sys.stdout.fileno()
+            console.print(f"agensic session id {session_id}", highlight=False)
             old_tty = termios.tcgetattr(stdin_fd)
             tty.setraw(stdin_fd)
             _apply_winsize(master_fd, stdin_fd)
@@ -1423,7 +1836,24 @@ def run_tracked_command(launch: TrackLaunch) -> int:
             resize_handler = signal.getsignal(signal.SIGWINCH)
             signal.signal(signal.SIGWINCH, _on_resize)
 
-        with open(transcript_path, "a", encoding="utf-8") as transcript:
+        with open(transcript_path, "a", encoding="utf-8") as transcript, open(
+            event_stream_path,
+            "a",
+            encoding="utf-8",
+        ) as event_stream:
+            runtime.set_event_handle(event_stream)
+            runtime.emit_event(
+                "marker.session.started",
+                {
+                    "session_id": session_id,
+                    "agent": runtime.launch.agent,
+                    "model": runtime.launch.model,
+                    "command": runtime.launch.root_command,
+                },
+            )
+            runtime.emit_event("git.snapshot.start", dict(runtime.start_snapshot))
+            watcher.start()
+            watcher_started = True
             while True:
                 read_fds = [master_fd]
                 if stdin_fd is not None:
@@ -1434,6 +1864,15 @@ def run_tracked_command(launch: TrackLaunch) -> int:
                     data = os.read(stdin_fd, 4096)
                     if data:
                         _write_transcript_event(transcript, "stdin", data)
+                        runtime.transcript_event_count += 1
+                        runtime.emit_event(
+                            "terminal.stdin",
+                            {
+                                "stream": "stdin",
+                                "data_b64": base64.b64encode(bytes(data)).decode("ascii"),
+                                "size": len(data),
+                            },
+                        )
                         os.write(master_fd, data)
 
                 if master_fd in ready:
@@ -1446,6 +1885,15 @@ def run_tracked_command(launch: TrackLaunch) -> int:
                             raise
                     if data:
                         _write_transcript_event(transcript, "pty", data)
+                        runtime.transcript_event_count += 1
+                        runtime.emit_event(
+                            "terminal.stdout",
+                            {
+                                "stream": "stdout",
+                                "data_b64": base64.b64encode(bytes(data)).decode("ascii"),
+                                "size": len(data),
+                            },
+                        )
                         if stdout_fd is not None:
                             os.write(stdout_fd, data)
                         else:
@@ -1455,11 +1903,27 @@ def run_tracked_command(launch: TrackLaunch) -> int:
                 exit_code = proc.poll()
                 if exit_code is not None:
                     runtime.root_exit_code = int(128 + abs(exit_code)) if exit_code < 0 else int(exit_code)
-                    _drain_master_output(master_fd, transcript, stdout_fd)
+                    _drain_master_output(master_fd, transcript, runtime, stdout_fd)
                     break
+            runtime.end_snapshot = _capture_repo_snapshot(runtime.launch.working_directory)
+            runtime.emit_event("git.snapshot.end", dict(runtime.end_snapshot))
+            for commit in _git_commits_between(
+                str(runtime.end_snapshot.get("repo_root", "") or runtime.start_snapshot.get("repo_root", "") or ""),
+                str(runtime.start_snapshot.get("head", "") or ""),
+                str(runtime.end_snapshot.get("head", "") or ""),
+            ):
+                runtime.emit_event("git.commit.created", commit)
+            runtime.emit_event(
+                "marker.session.finished",
+                {
+                    "exit_code": runtime.root_exit_code,
+                    "violation_code": runtime.violation_code,
+                },
+            )
     finally:
         runtime.stop_event.set()
-        watcher.join(timeout=5.0)
+        if watcher_started:
+            watcher.join(timeout=5.0)
         if resize_handler is not None:
             try:
                 signal.signal(signal.SIGWINCH, resize_handler)
@@ -1479,6 +1943,8 @@ def run_tracked_command(launch: TrackLaunch) -> int:
     final_state = state_store.get_tracked_session(session_id) or _load_track_state()
     final_status = "stopped" if str(final_state.get("status", "") or "").strip().lower() == "stopping" else "exited"
     runtime.persist_state(final_status, exit_code=runtime.root_exit_code if runtime.root_exit_code is not None else 1)
-    _prune_tracked_transcripts(exclude_paths={transcript_path})
+    aggregate, changes = runtime.build_session_summary()
+    runtime.persist_summary(aggregate=aggregate, changes=changes)
+    _prune_tracked_transcripts(exclude_paths={transcript_path, event_stream_path})
     _refresh_track_state_cache()
     return int(runtime.root_exit_code if runtime.root_exit_code is not None else 1)
