@@ -166,7 +166,10 @@ impl DetailState {
         for idx in self.replay_indices.iter().take(self.replay_step + 1) {
             if let Some(event) = self.events.get(*idx) {
                 if let Some(chunk) = event.payload.get("data").and_then(Value::as_str) {
-                    text.push_str(&sanitize_terminal_output(chunk));
+                    let cleaned = sanitize_replay_chunk(chunk);
+                    if !cleaned.is_empty() {
+                        text.push_str(&cleaned);
+                    }
                 }
             }
         }
@@ -221,6 +224,14 @@ impl DetailState {
 
     fn selected_event(&self) -> Option<&SessionEvent> {
         self.events.get(self.event_index)
+    }
+
+    fn cycle_focus(&mut self) {
+        self.focus = match self.focus {
+            FocusPane::Timeline => FocusPane::Changes,
+            FocusPane::Changes => FocusPane::Replay,
+            FocusPane::Replay => FocusPane::Timeline,
+        };
     }
 }
 
@@ -424,9 +435,7 @@ fn handle_key(app: &mut App, key: KeyEvent) -> Result<bool, String> {
                 app.status = "Back to sessions".to_string();
                 app.needs_terminal_clear = true;
             }
-            KeyCode::Char('t') => detail.focus = FocusPane::Replay,
-            KeyCode::Char('e') => detail.focus = FocusPane::Timeline,
-            KeyCode::Char('d') => detail.focus = FocusPane::Changes,
+            KeyCode::Char('s') => detail.cycle_focus(),
             KeyCode::Char(' ') => {
                 if detail.autoplay {
                     detail.autoplay = false;
@@ -453,27 +462,11 @@ fn handle_key(app: &mut App, key: KeyEvent) -> Result<bool, String> {
             }
             KeyCode::BackTab if detail.focus == FocusPane::Timeline => detail.page_selection(-1),
             KeyCode::Tab if detail.focus == FocusPane::Timeline => detail.page_selection(1),
-            KeyCode::Left | KeyCode::Char('h') => {
-                if detail.focus == FocusPane::Replay {
-                    detail.seek_relative(-1);
-                } else {
-                    detail.focus = match detail.focus {
-                        FocusPane::Timeline => FocusPane::Replay,
-                        FocusPane::Changes => FocusPane::Timeline,
-                        FocusPane::Replay => FocusPane::Changes,
-                    };
-                }
+            KeyCode::Left | KeyCode::Char('h') if detail.focus == FocusPane::Replay => {
+                detail.seek_relative(-1);
             }
-            KeyCode::Right | KeyCode::Char('l') => {
-                if detail.focus == FocusPane::Replay {
-                    detail.seek_relative(1);
-                } else {
-                    detail.focus = match detail.focus {
-                        FocusPane::Timeline => FocusPane::Changes,
-                        FocusPane::Changes => FocusPane::Replay,
-                        FocusPane::Replay => FocusPane::Timeline,
-                    };
-                }
+            KeyCode::Right | KeyCode::Char('l') if detail.focus == FocusPane::Replay => {
+                detail.seek_relative(1);
             }
             _ => {}
         }
@@ -613,7 +606,7 @@ fn draw_detail(frame: &mut ratatui::Frame<'_>, app: &App, detail: &DetailState) 
     frame.render_widget(build_replay(detail), right[1]);
     frame.render_widget(
         Paragraph::new(
-            "↑↓ timeline  mouse wheel scrolls timeline  Tab/Shift+Tab jump 500  ←→ switch pane or seek replay  Enter details  space play/pause  t/e/d focus  Esc back",
+            "↑↓ timeline  mouse wheel scrolls timeline  Tab/Shift+Tab jump 500  s switch pane  ←→ seek replay  Enter details  space play/pause  Esc back",
         )
         .style(Style::default().fg(Color::White)),
         chunks[2],
@@ -1219,6 +1212,35 @@ fn collapse_blank_runs(value: &str, max_blank_lines: usize) -> String {
     output.join("\n")
 }
 
+fn sanitize_replay_chunk(value: &str) -> String {
+    let cleaned = sanitize_terminal_output(value);
+    if cleaned.trim().is_empty() {
+        return String::new();
+    }
+    if should_drop_replay_text(&cleaned) {
+        return String::new();
+    }
+    cleaned
+}
+
+fn should_drop_replay_text(value: &str) -> bool {
+    let lowered = value.to_lowercase();
+    if lowered.contains("working(") || lowered.contains("esc to interrupt") {
+        return true;
+    }
+
+    let compact = sanitize_inline_text(value);
+    if compact.is_empty() {
+        return true;
+    }
+
+    if is_transient_terminal_fragment(&compact) {
+        return true;
+    }
+
+    false
+}
+
 fn format_wall_ts(ts_wall: f64) -> String {
     if ts_wall <= 0.0 {
         return "-".to_string();
@@ -1359,7 +1381,9 @@ fn handle_mouse(app: &mut App, mouse: MouseEvent) {
 
 #[cfg(test)]
 mod tests {
-    use super::{sanitize_inline_text, sanitize_terminal_output, tail_lines};
+    use super::{
+        sanitize_inline_text, sanitize_replay_chunk, sanitize_terminal_output, tail_lines,
+    };
 
     #[test]
     fn sanitize_terminal_output_strips_ansi_sequences() {
@@ -1377,5 +1401,11 @@ mod tests {
     fn tail_lines_keeps_recent_lines() {
         let input = "1\n2\n3\n4";
         assert_eq!(tail_lines(input, 2), "3\n4");
+    }
+
+    #[test]
+    fn sanitize_replay_chunk_drops_working_spinner_text() {
+        let input = "~Working(0s • esc to interrupt)";
+        assert!(sanitize_replay_chunk(input).is_empty());
     }
 }
