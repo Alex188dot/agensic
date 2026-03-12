@@ -1357,19 +1357,22 @@ class TrackRuntime:
 
     def emit_event(self, event_type: str, payload: dict[str, Any] | None = None) -> None:
         handle = self._event_handle
-        if handle is None:
+        if handle is None or bool(getattr(handle, "closed", False)):
             return
         with self._lock:
             self._event_seq += 1
             seq = self._event_seq
-        _write_session_event(
-            handle,
-            session_id=self.session_id,
-            seq=seq,
-            started_monotonic=self.started_monotonic,
-            event_type=event_type,
-            payload=payload,
-        )
+        try:
+            _write_session_event(
+                handle,
+                session_id=self.session_id,
+                seq=seq,
+                started_monotonic=self.started_monotonic,
+                event_type=event_type,
+                payload=payload,
+            )
+        except ValueError:
+            return
 
     def persist_summary(
         self,
@@ -1905,6 +1908,10 @@ def run_tracked_command(launch: TrackLaunch) -> int:
                     runtime.root_exit_code = int(128 + abs(exit_code)) if exit_code < 0 else int(exit_code)
                     _drain_master_output(master_fd, transcript, runtime, stdout_fd)
                     break
+            runtime.stop_event.set()
+            if watcher_started:
+                watcher.join(timeout=5.0)
+                watcher_started = False
             runtime.end_snapshot = _capture_repo_snapshot(runtime.launch.working_directory)
             runtime.emit_event("git.snapshot.end", dict(runtime.end_snapshot))
             for commit in _git_commits_between(
