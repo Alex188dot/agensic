@@ -112,7 +112,7 @@ struct DetailState {
     events: Vec<SessionEvent>,
     focus: FocusPane,
     event_index: usize,
-    replay_indices: Vec<usize>,
+    replay_chunks: Vec<String>,
     replay_step: usize,
     replay_text: String,
     autoplay: bool,
@@ -125,23 +125,13 @@ impl DetailState {
             .iter()
             .position(|event| event.event_type == "command.recorded")
             .unwrap_or(0);
-        let replay_indices: Vec<usize> = events
-            .iter()
-            .enumerate()
-            .filter_map(|(idx, event)| {
-                if event.event_type == "terminal.stdout" {
-                    Some(idx)
-                } else {
-                    None
-                }
-            })
-            .collect();
+        let replay_chunks = collect_replay_chunks(&events);
         let mut out = Self {
             session,
             events,
             focus: if autoplay { FocusPane::Replay } else { FocusPane::Timeline },
             event_index: initial_event_index,
-            replay_indices,
+            replay_chunks,
             replay_step: 0,
             replay_text: String::new(),
             autoplay,
@@ -149,54 +139,43 @@ impl DetailState {
         };
         if out.autoplay {
             out.rebuild_replay_text(0);
-        } else if !out.replay_indices.is_empty() {
-            let last = out.replay_indices.len().saturating_sub(1);
+        } else if !out.replay_chunks.is_empty() {
+            let last = out.replay_chunks.len().saturating_sub(1);
             out.rebuild_replay_text(last);
         }
         out
     }
 
     fn rebuild_replay_text(&mut self, step: usize) {
-        self.replay_step = min(step, self.replay_indices.len().saturating_sub(1));
-        let mut text = String::new();
-        if self.replay_indices.is_empty() {
+        self.replay_step = min(step, self.replay_chunks.len().saturating_sub(1));
+        if self.replay_chunks.is_empty() {
             self.replay_text.clear();
             return;
         }
-        for idx in self.replay_indices.iter().take(self.replay_step + 1) {
-            if let Some(event) = self.events.get(*idx) {
-                if let Some(chunk) = event.payload.get("data").and_then(Value::as_str) {
-                    let cleaned = sanitize_replay_chunk(chunk);
-                    if !cleaned.is_empty() {
-                        text.push_str(&cleaned);
-                    }
-                }
-            }
-        }
-        self.replay_text = text;
+        self.replay_text = self.replay_chunks[..=self.replay_step].join("");
     }
 
     fn seek_relative(&mut self, delta: isize) {
-        if self.replay_indices.is_empty() {
+        if self.replay_chunks.is_empty() {
             return;
         }
         let current = self.replay_step as isize;
         let next = min(
-            self.replay_indices.len().saturating_sub(1) as isize,
+            self.replay_chunks.len().saturating_sub(1) as isize,
             max(0, current + delta),
         ) as usize;
         self.rebuild_replay_text(next);
     }
 
     fn advance_autoplay(&mut self) {
-        if !self.autoplay || self.replay_indices.is_empty() {
+        if !self.autoplay || self.replay_chunks.is_empty() {
             return;
         }
         if self.last_tick.elapsed() < Duration::from_millis(60) {
             return;
         }
         self.last_tick = Instant::now();
-        if self.replay_step + 1 < self.replay_indices.len() {
+        if self.replay_step + 1 < self.replay_chunks.len() {
             self.rebuild_replay_text(self.replay_step + 1);
         } else {
             self.autoplay = false;
@@ -439,8 +418,8 @@ fn handle_key(app: &mut App, key: KeyEvent) -> Result<bool, String> {
             KeyCode::Char(' ') => {
                 if detail.autoplay {
                     detail.autoplay = false;
-                } else if !detail.replay_indices.is_empty() {
-                    if detail.replay_step + 1 >= detail.replay_indices.len() {
+                } else if !detail.replay_chunks.is_empty() {
+                    if detail.replay_step + 1 >= detail.replay_chunks.len() {
                         detail.rebuild_replay_text(0);
                     }
                     detail.autoplay = true;
@@ -701,7 +680,7 @@ fn build_timeline(detail: &DetailState, height: u16) -> Paragraph<'static> {
         let line = format!(
             "{} {:>4}  {:<18}  {}",
             marker,
-            event.seq,
+            row_index + 1,
             truncate(&sanitize_inline_text(&event.event_type), 18),
             event_summary(event),
         );
@@ -1110,6 +1089,16 @@ fn timeline_visible_indices(detail: &DetailState) -> Vec<usize> {
     }
 }
 
+fn collect_replay_chunks(events: &[SessionEvent]) -> Vec<String> {
+    events
+        .iter()
+        .filter(|event| event.event_type == "terminal.stdout")
+        .filter_map(|event| event.payload.get("data").and_then(Value::as_str))
+        .map(sanitize_replay_chunk)
+        .filter(|chunk| !chunk.is_empty())
+        .collect()
+}
+
 fn should_hide_timeline_event(events: &[SessionEvent], index: usize, event: &SessionEvent) -> bool {
     if event.event_type != "terminal.stdout" {
         return false;
@@ -1382,8 +1371,10 @@ fn handle_mouse(app: &mut App, mouse: MouseEvent) {
 #[cfg(test)]
 mod tests {
     use super::{
-        sanitize_inline_text, sanitize_replay_chunk, sanitize_terminal_output, tail_lines,
+        collect_replay_chunks, sanitize_inline_text, sanitize_replay_chunk,
+        sanitize_terminal_output, tail_lines, SessionEvent,
     };
+    use serde_json::json;
 
     #[test]
     fn sanitize_terminal_output_strips_ansi_sequences() {
@@ -1407,5 +1398,22 @@ mod tests {
     fn sanitize_replay_chunk_drops_working_spinner_text() {
         let input = "~Working(0s • esc to interrupt)";
         assert!(sanitize_replay_chunk(input).is_empty());
+    }
+
+    #[test]
+    fn collect_replay_chunks_skips_hidden_terminal_noise() {
+        let events = vec![
+            SessionEvent {
+                event_type: "terminal.stdout".to_string(),
+                payload: json!({"data": "~Working(0s • esc to interrupt)"}),
+                ..SessionEvent::default()
+            },
+            SessionEvent {
+                event_type: "terminal.stdout".to_string(),
+                payload: json!({"data": "real output\n"}),
+                ..SessionEvent::default()
+            },
+        ];
+        assert_eq!(collect_replay_chunks(&events), vec!["real output\n".to_string()]);
     }
 }
