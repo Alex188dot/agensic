@@ -1,5 +1,5 @@
-use clap::Parser;
 use chrono::TimeZone;
+use clap::Parser;
 use crossterm::event::{
     self, DisableMouseCapture, EnableMouseCapture, Event, KeyCode, KeyEvent, KeyEventKind,
     MouseEvent, MouseEventKind,
@@ -108,11 +108,19 @@ enum FocusPane {
     Replay,
 }
 
+#[derive(Clone, Debug)]
+struct TimelineEntry {
+    event_index: usize,
+    event_type: String,
+    summary: String,
+}
+
 struct DetailState {
     session: SessionSummary,
     events: Vec<SessionEvent>,
+    timeline_entries: Vec<TimelineEntry>,
     focus: FocusPane,
-    event_index: usize,
+    timeline_index: usize,
     replay_chunks: Vec<String>,
     replay_step: usize,
     replay_text: String,
@@ -124,16 +132,21 @@ struct DetailState {
 
 impl DetailState {
     fn new(session: SessionSummary, events: Vec<SessionEvent>, autoplay: bool) -> Self {
-        let initial_event_index = events
+        let (timeline_entries, replay_chunks) = build_display_model(&events);
+        let initial_timeline_index = timeline_entries
             .iter()
-            .position(|event| event.event_type == "command.recorded")
+            .position(|entry| entry.event_type == "command.recorded")
             .unwrap_or(0);
-        let replay_chunks = collect_replay_chunks(&events);
         let mut out = Self {
             session,
             events,
-            focus: if autoplay { FocusPane::Replay } else { FocusPane::Timeline },
-            event_index: initial_event_index,
+            timeline_entries,
+            focus: if autoplay {
+                FocusPane::Replay
+            } else {
+                FocusPane::Timeline
+            },
+            timeline_index: initial_timeline_index,
             replay_chunks,
             replay_step: 0,
             replay_text: String::new(),
@@ -191,18 +204,14 @@ impl DetailState {
     }
 
     fn move_selection(&mut self, delta: isize) {
-        let visible_indices = timeline_visible_indices(self);
-        if visible_indices.is_empty() {
-            self.event_index = 0;
+        if self.timeline_entries.is_empty() {
+            self.timeline_index = 0;
             return;
         }
-        let current_visible = visible_indices
-            .iter()
-            .position(|idx| *idx == self.event_index)
-            .unwrap_or(0);
-        let next_visible = (current_visible as isize + delta)
-            .clamp(0, visible_indices.len().saturating_sub(1) as isize) as usize;
-        self.event_index = visible_indices[next_visible];
+        let next_visible = (self.timeline_index as isize + delta)
+            .clamp(0, self.timeline_entries.len().saturating_sub(1) as isize)
+            as usize;
+        self.timeline_index = next_visible;
     }
 
     fn page_selection(&mut self, delta: isize) {
@@ -210,7 +219,9 @@ impl DetailState {
     }
 
     fn selected_event(&self) -> Option<&SessionEvent> {
-        self.events.get(self.event_index)
+        self.timeline_entries
+            .get(self.timeline_index)
+            .and_then(|entry| self.events.get(entry.event_index))
     }
 
     fn cycle_focus(&mut self) {
@@ -224,7 +235,9 @@ impl DetailState {
     fn scroll_replay(&mut self, delta: isize) {
         self.replay_follow_end = false;
         if delta < 0 {
-            self.replay_scroll = self.replay_scroll.saturating_sub(delta.unsigned_abs() as u16);
+            self.replay_scroll = self
+                .replay_scroll
+                .saturating_sub(delta.unsigned_abs() as u16);
         } else {
             self.replay_scroll = self.replay_scroll.saturating_add(delta as u16);
         }
@@ -281,7 +294,10 @@ impl App {
 
     fn refresh_sessions(&mut self) -> Result<(), String> {
         let response = self
-            .request(&format!("/sessions?limit={}", max(1, min(500, self.args.limit))))
+            .request(&format!(
+                "/sessions?limit={}",
+                max(1, min(500, self.args.limit))
+            ))
             .send()
             .map_err(|err| format!("sessions request failed: {}", err))?;
         if response.status().as_u16() != 200 {
@@ -311,7 +327,10 @@ impl App {
             .send()
             .map_err(|err| format!("session detail request failed: {}", err))?;
         if session_response.status().as_u16() != 200 {
-            return Err(format!("session detail request failed: {}", session_response.status()));
+            return Err(format!(
+                "session detail request failed: {}",
+                session_response.status()
+            ));
         }
         let session_payload: SessionDetailResponse = session_response
             .json()
@@ -325,7 +344,10 @@ impl App {
             .send()
             .map_err(|err| format!("session events request failed: {}", err))?;
         if events_response.status().as_u16() != 200 {
-            return Err(format!("session events request failed: {}", events_response.status()));
+            return Err(format!(
+                "session events request failed: {}",
+                events_response.status()
+            ));
         }
         let events_payload: SessionEventsResponse = events_response
             .json()
@@ -357,12 +379,15 @@ fn run(client: Client, args: SessionsArgs) -> Result<(), String> {
     execute!(stdout, EnterAlternateScreen, EnableMouseCapture)
         .map_err(|e| format!("enter alt screen failed: {}", e))?;
     let backend = CrosstermBackend::new(stdout);
-    let mut terminal = Terminal::new(backend).map_err(|e| format!("terminal init failed: {}", e))?;
+    let mut terminal =
+        Terminal::new(backend).map_err(|e| format!("terminal init failed: {}", e))?;
     let mut app = App::new(client, args)?;
 
     loop {
         if app.needs_terminal_clear {
-            terminal.clear().map_err(|e| format!("terminal clear failed: {}", e))?;
+            terminal
+                .clear()
+                .map_err(|e| format!("terminal clear failed: {}", e))?;
             app.needs_terminal_clear = false;
         }
         if let Some(detail) = app.detail.as_mut() {
@@ -386,9 +411,15 @@ fn run(client: Client, args: SessionsArgs) -> Result<(), String> {
     }
 
     disable_raw_mode().map_err(|e| format!("disable raw mode failed: {}", e))?;
-    execute!(terminal.backend_mut(), DisableMouseCapture, LeaveAlternateScreen)
-        .map_err(|e| format!("leave alt screen failed: {}", e))?;
-    terminal.show_cursor().map_err(|e| format!("show cursor failed: {}", e))?;
+    execute!(
+        terminal.backend_mut(),
+        DisableMouseCapture,
+        LeaveAlternateScreen
+    )
+    .map_err(|e| format!("leave alt screen failed: {}", e))?;
+    terminal
+        .show_cursor()
+        .map_err(|e| format!("show cursor failed: {}", e))?;
     io::stdout()
         .flush()
         .map_err(|e| format!("stdout flush failed: {}", e))?;
@@ -511,7 +542,11 @@ fn draw_browser(frame: &mut ratatui::Frame<'_>, app: &App) {
     frame.render_widget(Clear, area);
     let chunks = Layout::default()
         .direction(Direction::Vertical)
-        .constraints([Constraint::Min(5), Constraint::Length(2), Constraint::Length(1)])
+        .constraints([
+            Constraint::Min(5),
+            Constraint::Length(2),
+            Constraint::Length(1),
+        ])
         .split(area);
 
     let rows: Vec<Row> = app
@@ -534,7 +569,11 @@ fn draw_browser(frame: &mut ratatui::Frame<'_>, app: &App) {
                     session.branch_end.clone()
                 }),
                 Cell::from(format_duration(session.started_at, session.ended_at)),
-                Cell::from(format_outcome(session.exit_code, &session.status, &session.violation_code)),
+                Cell::from(format_outcome(
+                    session.exit_code,
+                    &session.status,
+                    &session.violation_code,
+                )),
             ])
         })
         .collect();
@@ -553,11 +592,20 @@ fn draw_browser(frame: &mut ratatui::Frame<'_>, app: &App) {
         ],
     )
     .header(
-        Row::new(vec!["session", "started", "agent", "model", "repo", "branch", "duration", "outcome"]).style(
-            Style::default().fg(Color::Cyan).add_modifier(Modifier::BOLD),
+        Row::new(vec![
+            "session", "started", "agent", "model", "repo", "branch", "duration", "outcome",
+        ])
+        .style(
+            Style::default()
+                .fg(Color::Cyan)
+                .add_modifier(Modifier::BOLD),
         ),
     )
-    .block(Block::default().borders(Borders::ALL).title("Agensic Sessions"))
+    .block(
+        Block::default()
+            .borders(Borders::ALL)
+            .title("Agensic Sessions"),
+    )
     .row_highlight_style(
         Style::default()
             .fg(Color::Black)
@@ -575,7 +623,7 @@ fn draw_browser(frame: &mut ratatui::Frame<'_>, app: &App) {
             "↑↓ move  Enter open  r refresh  Esc quit    {}",
             app.status
         ))
-            .style(Style::default().fg(Color::White)),
+        .style(Style::default().fg(Color::White)),
         chunks[1],
     );
     frame.render_widget(
@@ -640,7 +688,12 @@ fn build_header(detail: &DetailState) -> Paragraph<'static> {
     };
     let mut lines = vec![
         Line::from(vec![
-            Span::styled(actor.to_string(), Style::default().fg(Color::LightGreen).add_modifier(Modifier::BOLD)),
+            Span::styled(
+                actor.to_string(),
+                Style::default()
+                    .fg(Color::LightGreen)
+                    .add_modifier(Modifier::BOLD),
+            ),
             Span::raw("  "),
             Span::raw(sanitize_inline_text(&detail.session.model)),
             Span::raw("  "),
@@ -681,19 +734,14 @@ fn build_header(detail: &DetailState) -> Paragraph<'static> {
 }
 
 fn build_timeline(detail: &DetailState, height: u16) -> Paragraph<'static> {
-    let visible_indices = timeline_visible_indices(detail);
-    let total = visible_indices.len();
-    let selected = visible_indices
-        .iter()
-        .position(|idx| *idx == detail.event_index)
-        .unwrap_or(0);
+    let total = detail.timeline_entries.len();
+    let selected = detail.timeline_index.min(total.saturating_sub(1));
     let visible_rows = height.saturating_sub(2).max(1) as usize;
     let start = selected.saturating_sub(visible_rows / 2);
     let end = min(total, start + visible_rows);
     let mut lines: Vec<Line<'static>> = Vec::new();
     for row_index in start..end {
-        let event_index = visible_indices[row_index];
-        let event = &detail.events[event_index];
+        let entry = &detail.timeline_entries[row_index];
         let marker = if row_index == selected { ">>" } else { "  " };
         let style = if row_index == selected {
             Style::default().fg(Color::Black).bg(Color::LightGreen)
@@ -704,8 +752,8 @@ fn build_timeline(detail: &DetailState, height: u16) -> Paragraph<'static> {
             "{} {:>4}  {:<18}  {}",
             marker,
             row_index + 1,
-            truncate(&sanitize_inline_text(&event.event_type), 18),
-            event_summary(event),
+            truncate(&sanitize_inline_text(&entry.event_type), 18),
+            entry.summary.clone(),
         );
         lines.push(Line::from(Span::styled(line, style)));
     }
@@ -788,7 +836,11 @@ fn build_changes(detail: &DetailState) -> Paragraph<'static> {
         })
         .unwrap_or_default();
 
-    if files.is_empty() && committed_diff.is_empty() && worktree_diff.is_empty() && commits.is_empty() {
+    if files.is_empty()
+        && committed_diff.is_empty()
+        && worktree_diff.is_empty()
+        && commits.is_empty()
+    {
         lines.push(Line::from(""));
         lines.push(Line::from("No repo changes recorded."));
     } else {
@@ -796,7 +848,9 @@ fn build_changes(detail: &DetailState) -> Paragraph<'static> {
             lines.push(Line::from(""));
             lines.push(Line::from(Span::styled(
                 "Files changed",
-                Style::default().fg(Color::Cyan).add_modifier(Modifier::BOLD),
+                Style::default()
+                    .fg(Color::Cyan)
+                    .add_modifier(Modifier::BOLD),
             )));
             for file in files {
                 lines.push(Line::from(format!("- {}", file)));
@@ -806,7 +860,9 @@ fn build_changes(detail: &DetailState) -> Paragraph<'static> {
             lines.push(Line::from(""));
             lines.push(Line::from(Span::styled(
                 "Committed diff stat",
-                Style::default().fg(Color::Cyan).add_modifier(Modifier::BOLD),
+                Style::default()
+                    .fg(Color::Cyan)
+                    .add_modifier(Modifier::BOLD),
             )));
             push_text_block(&mut lines, &committed_diff);
         }
@@ -814,7 +870,9 @@ fn build_changes(detail: &DetailState) -> Paragraph<'static> {
             lines.push(Line::from(""));
             lines.push(Line::from(Span::styled(
                 "Worktree diff stat",
-                Style::default().fg(Color::Cyan).add_modifier(Modifier::BOLD),
+                Style::default()
+                    .fg(Color::Cyan)
+                    .add_modifier(Modifier::BOLD),
             )));
             push_text_block(&mut lines, &worktree_diff);
         }
@@ -822,7 +880,9 @@ fn build_changes(detail: &DetailState) -> Paragraph<'static> {
             lines.push(Line::from(""));
             lines.push(Line::from(Span::styled(
                 "Commits created",
-                Style::default().fg(Color::Cyan).add_modifier(Modifier::BOLD),
+                Style::default()
+                    .fg(Color::Cyan)
+                    .add_modifier(Modifier::BOLD),
             )));
             for commit in commits {
                 lines.push(Line::from(commit));
@@ -868,10 +928,20 @@ fn draw_event_modal(
     let lines = build_event_modal_lines(event, detail);
     let panel = Paragraph::new(lines)
         .block(
-            Block::default().borders(Borders::ALL).title(Line::from(vec![
-                Span::styled("Event details ", Style::default().fg(Color::LightGreen).add_modifier(Modifier::BOLD)),
-                Span::styled("(Enter/Esc close, ↑↓ scroll)", Style::default().fg(Color::DarkGray)),
-            ])),
+            Block::default()
+                .borders(Borders::ALL)
+                .title(Line::from(vec![
+                    Span::styled(
+                        "Event details ",
+                        Style::default()
+                            .fg(Color::LightGreen)
+                            .add_modifier(Modifier::BOLD),
+                    ),
+                    Span::styled(
+                        "(Enter/Esc close, ↑↓ scroll)",
+                        Style::default().fg(Color::DarkGray),
+                    ),
+                ])),
         )
         .scroll((scroll, 0))
         .wrap(Wrap { trim: true });
@@ -921,8 +991,14 @@ fn format_duration(started_at: i64, ended_at: i64) -> String {
 fn format_outcome(exit_code: Option<i64>, status: &str, violation_code: &str) -> String {
     let mut out = format!(
         "{} exit={}",
-        if status.trim().is_empty() { "-" } else { status },
-        exit_code.map(|value| value.to_string()).unwrap_or_else(|| "-".to_string())
+        if status.trim().is_empty() {
+            "-"
+        } else {
+            status
+        },
+        exit_code
+            .map(|value| value.to_string())
+            .unwrap_or_else(|| "-".to_string())
     );
     if !violation_code.trim().is_empty() {
         out.push_str(&format!(" violation={}", violation_code));
@@ -933,7 +1009,11 @@ fn format_outcome(exit_code: Option<i64>, status: &str, violation_code: &str) ->
 fn format_header_outcome(exit_code: Option<i64>, status: &str) -> String {
     format!(
         "{} exit={}",
-        if status.trim().is_empty() { "-" } else { status },
+        if status.trim().is_empty() {
+            "-"
+        } else {
+            status
+        },
         exit_code
             .map(|value| value.to_string())
             .unwrap_or_else(|| "-".to_string())
@@ -953,7 +1033,11 @@ fn truncate(value: &str, max_chars: usize) -> String {
     if chars.len() <= max_chars {
         return value.to_string();
     }
-    chars.into_iter().take(max_chars.saturating_sub(1)).collect::<String>() + "…"
+    chars
+        .into_iter()
+        .take(max_chars.saturating_sub(1))
+        .collect::<String>()
+        + "…"
 }
 
 fn event_summary(event: &SessionEvent) -> String {
@@ -972,7 +1056,13 @@ fn event_summary(event: &SessionEvent) -> String {
             .unwrap_or_else(|| "-".to_string()),
         "git.commit.created" => format!(
             "{} {}",
-            sanitize_inline_text(event.payload.get("sha").and_then(Value::as_str).unwrap_or("-")),
+            sanitize_inline_text(
+                event
+                    .payload
+                    .get("sha")
+                    .and_then(Value::as_str)
+                    .unwrap_or("-")
+            ),
             sanitize_inline_text(
                 event
                     .payload
@@ -1019,11 +1109,12 @@ fn build_event_modal_lines(event: &SessionEvent, detail: &DetailState) -> Vec<Li
             sanitize_inline_text(label)
         )));
     }
-    if let Some(cwd) = event.payload.get("working_directory").and_then(Value::as_str) {
-        lines.push(Line::from(format!(
-            "cwd: {}",
-            sanitize_multiline_text(cwd)
-        )));
+    if let Some(cwd) = event
+        .payload
+        .get("working_directory")
+        .and_then(Value::as_str)
+    {
+        lines.push(Line::from(format!("cwd: {}", sanitize_multiline_text(cwd))));
     } else if !detail.session.working_directory.trim().is_empty() {
         lines.push(Line::from(format!(
             "cwd: {}",
@@ -1035,7 +1126,9 @@ fn build_event_modal_lines(event: &SessionEvent, detail: &DetailState) -> Vec<Li
         lines.push(Line::from(""));
         lines.push(Line::from(Span::styled(
             "command",
-            Style::default().fg(Color::Cyan).add_modifier(Modifier::BOLD),
+            Style::default()
+                .fg(Color::Cyan)
+                .add_modifier(Modifier::BOLD),
         )));
         push_text_block(&mut lines, &sanitize_multiline_text(command));
     }
@@ -1044,17 +1137,21 @@ fn build_event_modal_lines(event: &SessionEvent, detail: &DetailState) -> Vec<Li
         lines.push(Line::from(""));
         lines.push(Line::from(Span::styled(
             "data",
-            Style::default().fg(Color::Cyan).add_modifier(Modifier::BOLD),
+            Style::default()
+                .fg(Color::Cyan)
+                .add_modifier(Modifier::BOLD),
         )));
         push_text_block(&mut lines, &sanitize_multiline_text(data));
     }
 
-    let payload_text = serde_json::to_string_pretty(&event.payload)
-        .unwrap_or_else(|_| "{}".to_string());
+    let payload_text =
+        serde_json::to_string_pretty(&event.payload).unwrap_or_else(|_| "{}".to_string());
     lines.push(Line::from(""));
     lines.push(Line::from(Span::styled(
         "payload",
-        Style::default().fg(Color::Cyan).add_modifier(Modifier::BOLD),
+        Style::default()
+            .fg(Color::Cyan)
+            .add_modifier(Modifier::BOLD),
     )));
     push_text_block(&mut lines, &sanitize_multiline_text(&payload_text));
     lines
@@ -1109,75 +1206,308 @@ fn has_nonempty_array(value: Option<&Value>) -> bool {
         .unwrap_or(false)
 }
 
-fn timeline_visible_indices(detail: &DetailState) -> Vec<usize> {
-    let indices: Vec<usize> = detail
-        .events
-        .iter()
-        .enumerate()
-        .filter_map(|(idx, event)| {
-            if should_hide_timeline_event(&detail.events, idx, event) {
-                None
-            } else {
-                Some(idx)
+fn build_display_model(events: &[SessionEvent]) -> (Vec<TimelineEntry>, Vec<String>) {
+    let mut timeline_entries = Vec::new();
+    let mut replay_chunks = Vec::new();
+    let mut index = 0usize;
+
+    while index < events.len() {
+        let event = &events[index];
+        match event.event_type.as_str() {
+            "terminal.stdout" => {
+                let start = index;
+                while index < events.len() && events[index].event_type == "terminal.stdout" {
+                    index += 1;
+                }
+                if let Some(block) = build_terminal_display_block(&events[start..index], start) {
+                    timeline_entries.push(TimelineEntry {
+                        event_index: block.event_index,
+                        event_type: "terminal.output".to_string(),
+                        summary: block.summary,
+                    });
+                    replay_chunks.push(block.replay_text);
+                }
             }
-        })
-        .collect();
-    if indices.is_empty() {
-        (0..detail.events.len()).collect()
-    } else {
-        indices
+            "terminal.stdin" => {
+                let start = index;
+                while index < events.len() && events[index].event_type == "terminal.stdin" {
+                    index += 1;
+                }
+                if let Some(block) = build_terminal_display_block(&events[start..index], start) {
+                    timeline_entries.push(TimelineEntry {
+                        event_index: block.event_index,
+                        event_type: "terminal.input".to_string(),
+                        summary: block.summary,
+                    });
+                }
+            }
+            _ => {
+                timeline_entries.push(TimelineEntry {
+                    event_index: index,
+                    event_type: event.event_type.clone(),
+                    summary: event_summary(event),
+                });
+                index += 1;
+            }
+        }
     }
+
+    if timeline_entries.is_empty() {
+        for (idx, event) in events.iter().enumerate() {
+            timeline_entries.push(TimelineEntry {
+                event_index: idx,
+                event_type: event.event_type.clone(),
+                summary: event_summary(event),
+            });
+        }
+    }
+
+    (timeline_entries, replay_chunks)
 }
 
-fn collect_replay_chunks(events: &[SessionEvent]) -> Vec<String> {
+struct TerminalDisplayBlock {
+    event_index: usize,
+    summary: String,
+    replay_text: String,
+}
+
+fn build_terminal_display_block(
+    events: &[SessionEvent],
+    start_index: usize,
+) -> Option<TerminalDisplayBlock> {
+    let aggressive = terminal_group_is_noisy(events);
+    let lines = collect_terminal_lines(events, aggressive);
+    if lines.is_empty() {
+        return None;
+    }
+    let replay_text = format!("{}\n\n", lines.join("\n"));
+    let summary = summarize_terminal_lines(&lines);
+    Some(TerminalDisplayBlock {
+        event_index: start_index + events.len().saturating_sub(1),
+        summary,
+        replay_text,
+    })
+}
+
+fn terminal_group_is_noisy(events: &[SessionEvent]) -> bool {
+    if events.len() >= 6 {
+        return true;
+    }
     events
         .iter()
-        .filter(|event| event.event_type == "terminal.stdout")
         .filter_map(|event| event.payload.get("data").and_then(Value::as_str))
-        .map(sanitize_replay_chunk)
-        .filter(|chunk| !chunk.is_empty())
-        .collect()
+        .map(str::len)
+        .sum::<usize>()
+        >= 512
 }
 
-fn should_hide_timeline_event(events: &[SessionEvent], index: usize, event: &SessionEvent) -> bool {
-    if event.event_type != "terminal.stdout" {
-        return false;
+fn collect_terminal_lines(events: &[SessionEvent], aggressive: bool) -> Vec<String> {
+    let mut lines = Vec::new();
+    let mut current = String::new();
+
+    for event in events {
+        let Some(raw) = event.payload.get("data").and_then(Value::as_str) else {
+            continue;
+        };
+        let cleaned = sanitize_terminal_output(raw);
+        for ch in cleaned.chars() {
+            if ch == '\n' {
+                push_terminal_line(&mut lines, &mut current, aggressive);
+                current.clear();
+            } else {
+                current.push(ch);
+            }
+        }
     }
-    let text = event
-        .payload
-        .get("data")
-        .and_then(Value::as_str)
-        .map(sanitize_inline_text)
-        .unwrap_or_default();
-    if text.is_empty() {
+
+    push_terminal_line(&mut lines, &mut current, aggressive);
+    lines
+}
+
+fn push_terminal_line(lines: &mut Vec<String>, raw_line: &mut String, aggressive: bool) {
+    let Some(candidate) = normalize_terminal_line(raw_line, aggressive) else {
+        return;
+    };
+    merge_terminal_line(lines, candidate);
+}
+
+fn normalize_terminal_line(raw_line: &str, aggressive: bool) -> Option<String> {
+    let stripped = strip_inline_progress_noise(raw_line);
+    let collapsed = stripped.split_whitespace().collect::<Vec<_>>().join(" ");
+    if collapsed.is_empty() || should_drop_terminal_line(&collapsed, aggressive) {
+        return None;
+    }
+    Some(collapsed)
+}
+
+fn should_drop_terminal_line(line: &str, aggressive: bool) -> bool {
+    let lowered = line.to_lowercase();
+    if lowered.is_empty() {
         return true;
     }
-    if is_transient_terminal_fragment(&text)
-        && (neighbor_is_terminal_stdout(events, index, -1) || neighbor_is_terminal_stdout(events, index, 1))
-    {
+
+    if line.chars().count() <= 2 {
         return true;
     }
-    false
+
+    if lowered.contains("esc to interrupt") {
+        return true;
+    }
+
+    if looks_like_terminal_chrome(&lowered) {
+        return true;
+    }
+
+    aggressive
+        && (looks_like_activity_status(&lowered)
+            || looks_like_fragment_token(line)
+            || line.chars().count() <= 1)
 }
 
-fn neighbor_is_terminal_stdout(events: &[SessionEvent], index: usize, delta: isize) -> bool {
-    let neighbor = index as isize + delta;
-    if neighbor < 0 || neighbor >= events.len() as isize {
+fn looks_like_terminal_chrome(lowered: &str) -> bool {
+    [
+        "openai codex (v",
+        "claudecode",
+        "see full release notes:",
+        "/model to change",
+        "model:",
+        "directory:",
+        "shortcuts",
+        "context left",
+        "tip: use /rename",
+        "pressctrl-c again to exit",
+        "best experience, launch it in a project directory instead",
+    ]
+    .iter()
+    .any(|pattern| lowered.contains(pattern))
+        || lowered.contains("100% left")
+}
+
+fn looks_like_activity_status(lowered: &str) -> bool {
+    let tokens: Vec<&str> = lowered
+        .split_whitespace()
+        .map(|token| token.trim_matches(|ch: char| !ch.is_alphanumeric()))
+        .filter(|token| !token.is_empty())
+        .collect();
+    if tokens.is_empty() || tokens.len() > 2 {
         return false;
     }
-    events[neighbor as usize].event_type == "terminal.stdout"
+    let head = tokens[0];
+    let repeat_counter = tokens
+        .get(1)
+        .map(|token| token.starts_with('x') && token[1..].chars().all(|ch| ch.is_ascii_digit()))
+        .unwrap_or(true);
+    repeat_counter
+        && matches!(
+            head,
+            "working"
+                | "thinking"
+                | "loading"
+                | "brewing"
+                | "boogieing"
+                | "quantizing"
+                | "quantumizing"
+                | "analyzing"
+                | "reasoning"
+        )
 }
 
-fn is_transient_terminal_fragment(text: &str) -> bool {
+fn looks_like_fragment_token(text: &str) -> bool {
     let trimmed = text.trim();
     if trimmed.is_empty() {
         return true;
     }
-    let has_spaces = trimmed.chars().any(char::is_whitespace);
-    let looks_like_progress = trimmed
+    if trimmed.chars().any(char::is_whitespace) {
+        return false;
+    }
+    let compact = compact_terminal_text(trimmed);
+    if compact.is_empty() || compact.len() > 12 {
+        return false;
+    }
+    let starts_clean = trimmed
         .chars()
-        .all(|ch| ch.is_alphanumeric() || matches!(ch, '•' | '.' | ':' | '-' | '_' | '/' | '\\'));
-    !has_spaces && looks_like_progress && trimmed.chars().count() <= 12
+        .next()
+        .map(|ch| ch.is_ascii_uppercase() || ch.is_ascii_digit())
+        .unwrap_or(false);
+    let alphabetic_chars: Vec<char> = trimmed
+        .chars()
+        .filter(|ch| ch.is_ascii_alphabetic())
+        .collect();
+    let all_caps =
+        !alphabetic_chars.is_empty() && alphabetic_chars.iter().all(|ch| ch.is_ascii_uppercase());
+    let weird_punctuation =
+        trimmed.contains('…') || trimmed.chars().any(|ch| matches!(ch, '*' | '~' | '•'));
+    weird_punctuation
+        || (!starts_clean && compact.len() <= 4)
+        || (!starts_clean && trimmed.chars().count() <= 8)
+        || (trimmed.chars().count() <= 4 && trimmed.chars().any(|ch| ch.is_ascii_lowercase()))
+        || (compact.len() <= 2 && !all_caps)
+}
+
+fn compact_terminal_text(value: &str) -> String {
+    value
+        .chars()
+        .filter(|ch| ch.is_alphanumeric())
+        .flat_map(char::to_lowercase)
+        .collect()
+}
+
+fn merge_terminal_line(lines: &mut Vec<String>, candidate: String) {
+    const DEDUPE_WINDOW: usize = 8;
+
+    for offset in 0..lines.len().min(DEDUPE_WINDOW) {
+        let idx = lines.len() - 1 - offset;
+        if lines[idx] == candidate {
+            return;
+        }
+        if line_replaces_existing(&lines[idx], &candidate) {
+            lines[idx] = candidate;
+            return;
+        }
+        if line_replaces_existing(&candidate, &lines[idx]) {
+            return;
+        }
+    }
+
+    lines.push(candidate);
+}
+
+fn line_replaces_existing(existing: &str, candidate: &str) -> bool {
+    let existing_compact = compact_terminal_text(existing);
+    let candidate_compact = compact_terminal_text(candidate);
+    if existing_compact.is_empty() || candidate_compact.is_empty() {
+        return false;
+    }
+    if existing_compact == candidate_compact {
+        return candidate.len() > existing.len();
+    }
+    if candidate_compact.len() > existing_compact.len()
+        && candidate_compact.contains(&existing_compact)
+        && existing_compact.len() >= 5
+    {
+        return true;
+    }
+    let common_prefix = common_prefix_len(&existing_compact, &candidate_compact);
+    let shorter = existing_compact.len().min(candidate_compact.len());
+    shorter <= 24
+        && common_prefix + 2 >= shorter
+        && candidate_compact.len() > existing_compact.len()
+}
+
+fn common_prefix_len(left: &str, right: &str) -> usize {
+    left.chars()
+        .zip(right.chars())
+        .take_while(|(a, b)| a == b)
+        .count()
+}
+
+fn summarize_terminal_lines(lines: &[String]) -> String {
+    let first = truncate(lines.first().map(String::as_str).unwrap_or("-"), 52);
+    if lines.len() <= 1 {
+        first
+    } else {
+        format!("{} (+{} lines)", first, lines.len() - 1)
+    }
 }
 
 fn pane_block(title: &str, focused: bool) -> Block<'static> {
@@ -1239,35 +1569,6 @@ fn replay_max_scroll(value: &str, height: u16) -> u16 {
     content_lines
         .saturating_sub(visible_lines)
         .min(u16::MAX as usize) as u16
-}
-
-fn sanitize_replay_chunk(value: &str) -> String {
-    let cleaned = strip_inline_progress_noise(&sanitize_terminal_output(value));
-    if cleaned.trim().is_empty() {
-        return String::new();
-    }
-    if should_drop_replay_text(&cleaned) {
-        return String::new();
-    }
-    cleaned
-}
-
-fn should_drop_replay_text(value: &str) -> bool {
-    let lowered = value.to_lowercase();
-    if lowered.contains("working(") || lowered.contains("esc to interrupt") {
-        return true;
-    }
-
-    let compact = sanitize_inline_text(value);
-    if compact.is_empty() {
-        return true;
-    }
-
-    if is_transient_terminal_fragment(&compact) {
-        return true;
-    }
-
-    false
 }
 
 fn strip_inline_progress_noise(value: &str) -> String {
@@ -1493,8 +1794,8 @@ fn rect_contains(rect: Rect, column: u16, row: u16) -> bool {
 #[cfg(test)]
 mod tests {
     use super::{
-        collect_replay_chunks, format_header_outcome, sanitize_inline_text,
-        sanitize_replay_chunk, sanitize_terminal_output, strip_inline_progress_noise, SessionEvent,
+        build_display_model, collect_terminal_lines, format_header_outcome, sanitize_inline_text,
+        sanitize_terminal_output, strip_inline_progress_noise, SessionEvent,
     };
     use serde_json::json;
 
@@ -1511,26 +1812,147 @@ mod tests {
     }
 
     #[test]
-    fn sanitize_replay_chunk_drops_working_spinner_text() {
-        let input = "~Working(0s • esc to interrupt)";
-        assert!(sanitize_replay_chunk(input).is_empty());
-    }
-
-    #[test]
-    fn collect_replay_chunks_skips_hidden_terminal_noise() {
+    fn collect_terminal_lines_filters_noisy_terminal_redraws() {
         let events = vec![
             SessionEvent {
                 event_type: "terminal.stdout".to_string(),
-                payload: json!({"data": "~Working(0s • esc to interrupt)"}),
+                payload: json!({"data": "OpenAI Codex (v0.113.0)\n"}),
                 ..SessionEvent::default()
             },
             SessionEvent {
                 event_type: "terminal.stdout".to_string(),
-                payload: json!({"data": "real output\n"}),
+                payload: json!({"data": "model: gpt-5.4 low  /model to change\ndirectory: ~\n"}),
+                ..SessionEvent::default()
+            },
+            SessionEvent {
+                event_type: "terminal.stdout".to_string(),
+                payload: json!({"data": "~Working(0s • esc to interrupt)\rWorking\r"}),
+                ..SessionEvent::default()
+            },
+            SessionEvent {
+                event_type: "terminal.stdout".to_string(),
+                payload: json!({"data": "• Ran pwd\n"}),
+                ..SessionEvent::default()
+            },
+            SessionEvent {
+                event_type: "terminal.stdout".to_string(),
+                payload: json!({"data": "└ /Users/alessioleodori/HelloWorld/ai_terminal2\n"}),
+                ..SessionEvent::default()
+            },
+            SessionEvent {
+                event_type: "terminal.stdout".to_string(),
+                payload: json!({"data": "The repo is clean and ready.\n"}),
                 ..SessionEvent::default()
             },
         ];
-        assert_eq!(collect_replay_chunks(&events), vec!["real output\n".to_string()]);
+
+        assert_eq!(
+            collect_terminal_lines(&events, true),
+            vec![
+                "• Ran pwd".to_string(),
+                "└ /Users/alessioleodori/HelloWorld/ai_terminal2".to_string(),
+                "The repo is clean and ready.".to_string(),
+            ]
+        );
+    }
+
+    #[test]
+    fn build_display_model_condenses_terminal_runs() {
+        let events = vec![
+            SessionEvent {
+                event_type: "command.recorded".to_string(),
+                payload: json!({"command": "codex"}),
+                ..SessionEvent::default()
+            },
+            SessionEvent {
+                event_type: "terminal.stdout".to_string(),
+                payload: json!({"data": "Wo\r"}),
+                ..SessionEvent::default()
+            },
+            SessionEvent {
+                event_type: "terminal.stdout".to_string(),
+                payload: json!({"data": "Wor\r"}),
+                ..SessionEvent::default()
+            },
+            SessionEvent {
+                event_type: "terminal.stdout".to_string(),
+                payload: json!({"data": "Working\r"}),
+                ..SessionEvent::default()
+            },
+            SessionEvent {
+                event_type: "terminal.stdout".to_string(),
+                payload: json!({"data": "• Ran git status --short --branch\n"}),
+                ..SessionEvent::default()
+            },
+            SessionEvent {
+                event_type: "terminal.stdout".to_string(),
+                payload: json!({"data": "The repo is clean.\n"}),
+                ..SessionEvent::default()
+            },
+            SessionEvent {
+                event_type: "terminal.stdout".to_string(),
+                payload: json!({"data": "Tip: Use /rename to rename your threads.\n"}),
+                ..SessionEvent::default()
+            },
+            SessionEvent {
+                event_type: "process.exited".to_string(),
+                payload: json!({"command": "codex"}),
+                ..SessionEvent::default()
+            },
+        ];
+
+        let (timeline, replay) = build_display_model(&events);
+
+        assert_eq!(timeline.len(), 3);
+        assert_eq!(timeline[1].event_type, "terminal.output");
+        assert_eq!(
+            timeline[1].summary,
+            "• Ran git status --short --branch (+1 lines)"
+        );
+        assert_eq!(
+            replay,
+            vec!["• Ran git status --short --branch\nThe repo is clean.\n\n".to_string()]
+        );
+    }
+
+    #[test]
+    fn collect_terminal_lines_keeps_plain_output_above_two_chars() {
+        let events = vec![SessionEvent {
+            event_type: "terminal.stdout".to_string(),
+            payload: json!({"data": "done\n"}),
+            ..SessionEvent::default()
+        }];
+
+        assert_eq!(
+            collect_terminal_lines(&events, false),
+            vec!["done".to_string()]
+        );
+    }
+
+    #[test]
+    fn collect_terminal_lines_drops_one_and_two_char_rows() {
+        let events = vec![
+            SessionEvent {
+                event_type: "terminal.stdout".to_string(),
+                payload: json!({"data": "i\n"}),
+                ..SessionEvent::default()
+            },
+            SessionEvent {
+                event_type: "terminal.stdout".to_string(),
+                payload: json!({"data": "ok\n"}),
+                ..SessionEvent::default()
+            },
+            SessionEvent {
+                event_type: "terminal.stdout".to_string(),
+                payload: json!({"data": "yes\n"}),
+                ..SessionEvent::default()
+            },
+        ];
+
+        assert_eq!(
+            collect_terminal_lines(&events, false),
+            vec!["yes".to_string()]
+        );
     }
 
     #[test]

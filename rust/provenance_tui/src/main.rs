@@ -131,10 +131,7 @@ where
             break;
         }
 
-        let next_cursor = page
-            .rows
-            .last()
-            .map(|row| (row.ts, row.run_id.clone()));
+        let next_cursor = page.rows.last().map(|row| (row.ts, row.run_id.clone()));
 
         for row in page.rows {
             if seen.insert(row.run_id.clone()) {
@@ -163,7 +160,10 @@ where
         total_matching = rows.len();
     }
 
-    Ok(RunsPage { rows, total_matching })
+    Ok(RunsPage {
+        rows,
+        total_matching,
+    })
 }
 
 const SECONDS_PER_DAY: i64 = 24 * 60 * 60;
@@ -392,7 +392,9 @@ impl App {
     }
 
     fn header_style() -> Style {
-        Style::default().fg(Color::Cyan).add_modifier(Modifier::BOLD)
+        Style::default()
+            .fg(Color::Cyan)
+            .add_modifier(Modifier::BOLD)
     }
 
     fn search_hit(row: &RunEntry, query: &str) -> bool {
@@ -714,9 +716,7 @@ impl App {
             export_rows(&rows, format, out_path)?;
             Ok(count)
         }) {
-            Ok(count) => {
-                self.status = format!("Exported {} matching rows to {}", count, out_path)
-            }
+            Ok(count) => self.status = format!("Exported {} matching rows to {}", count, out_path),
             Err(err) => self.status = format!("Export failed: {}", err),
         }
     }
@@ -1245,7 +1245,10 @@ fn rendered_line_height(line: &Line<'_>, width: usize) -> usize {
 }
 
 fn rendered_content_height(lines: &[Line<'_>], width: usize) -> usize {
-    lines.iter().map(|line| rendered_line_height(line, width)).sum()
+    lines
+        .iter()
+        .map(|line| rendered_line_height(line, width))
+        .sum()
 }
 
 fn draw_ui(terminal: &mut Terminal<CrosstermBackend<Stdout>>, app: &App) -> io::Result<()> {
@@ -1893,8 +1896,8 @@ fn export_rows(rows: &[RunEntry], export_format: &str, out_path: &str) -> Result
     for row in rows {
         let evidence_json = serde_json::to_string(&row.evidence)
             .map_err(|e| format!("serialize evidence failed: {}", e))?;
-        let payload_json =
-            serde_json::to_string(&row.payload).map_err(|e| format!("serialize payload failed: {}", e))?;
+        let payload_json = serde_json::to_string(&row.payload)
+            .map_err(|e| format!("serialize payload failed: {}", e))?;
         writer
             .write_record([
                 row.run_id.clone(),
@@ -1939,7 +1942,10 @@ fn export_row_json_value(row: &RunEntry) -> Result<Value, String> {
     if let Value::Object(map) = &mut value {
         map.insert("time".to_string(), Value::String(App::format_time(row.ts)));
         map.insert("actor".to_string(), Value::String(App::actor_of(row)));
-        map.insert("exit".to_string(), Value::String(App::format_exit(row.exit_code)));
+        map.insert(
+            "exit".to_string(),
+            Value::String(App::format_exit(row.exit_code)),
+        );
         map.insert(
             "duration".to_string(),
             Value::String(App::format_duration(row.duration_ms)),
@@ -2348,8 +2354,10 @@ mod tests {
         assert_eq!(record.get(11), Some("gpt-5-raw"));
         assert_eq!(record.get(21), Some("1"));
         assert_eq!(record.get(23), Some("42ms"));
-        let evidence: Value = serde_json::from_str(record.get(25).expect("evidence field")).expect("parse evidence");
-        let payload: Value = serde_json::from_str(record.get(26).expect("payload field")).expect("parse payload");
+        let evidence: Value =
+            serde_json::from_str(record.get(25).expect("evidence field")).expect("parse evidence");
+        let payload: Value =
+            serde_json::from_str(record.get(26).expect("payload field")).expect("parse payload");
         assert_eq!(evidence[0], "sig:ok");
         assert_eq!(payload["example"], "value");
 
