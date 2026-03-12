@@ -201,13 +201,18 @@ impl DetailState {
     }
 
     fn move_selection(&mut self, delta: isize) {
-        if self.events.is_empty() {
+        let visible_indices = timeline_visible_indices(self);
+        if visible_indices.is_empty() {
             self.event_index = 0;
             return;
         }
-        let next = (self.event_index as isize + delta)
-            .clamp(0, self.events.len().saturating_sub(1) as isize) as usize;
-        self.event_index = next;
+        let current_visible = visible_indices
+            .iter()
+            .position(|idx| *idx == self.event_index)
+            .unwrap_or(0);
+        let next_visible = (current_visible as isize + delta)
+            .clamp(0, visible_indices.len().saturating_sub(1) as isize) as usize;
+        self.event_index = visible_indices[next_visible];
     }
 
     fn page_selection(&mut self, delta: isize) {
@@ -584,10 +589,11 @@ fn draw_browser(frame: &mut ratatui::Frame<'_>, app: &App) {
 fn draw_detail(frame: &mut ratatui::Frame<'_>, app: &App, detail: &DetailState) {
     let area = frame.area();
     frame.render_widget(Clear, area);
+    let header_height = detail_header_height(detail);
     let chunks = Layout::default()
         .direction(Direction::Vertical)
         .constraints([
-            Constraint::Length(5),
+            Constraint::Length(header_height),
             Constraint::Min(12),
             Constraint::Length(2),
         ])
@@ -600,7 +606,7 @@ fn draw_detail(frame: &mut ratatui::Frame<'_>, app: &App, detail: &DetailState) 
         .split(chunks[1]);
     let right = Layout::default()
         .direction(Direction::Vertical)
-        .constraints([Constraint::Percentage(40), Constraint::Percentage(60)])
+        .constraints(changes_panel_constraints(detail))
         .split(body[1]);
     frame.render_widget(build_timeline(detail, body[0].height), body[0]);
     frame.render_widget(build_changes(detail), right[0]);
@@ -633,7 +639,7 @@ fn build_header(detail: &DetailState) -> Paragraph<'static> {
     } else {
         detail.session.agent_name.as_str()
     };
-    let lines = vec![
+    let mut lines = vec![
         Line::from(vec![
             Span::styled(actor.to_string(), Style::default().fg(Color::LightGreen).add_modifier(Modifier::BOLD)),
             Span::raw("  "),
@@ -654,36 +660,48 @@ fn build_header(detail: &DetailState) -> Paragraph<'static> {
             format_duration(detail.session.started_at, detail.session.ended_at),
             format_ts(detail.session.started_at),
         )),
-        Line::from(format!(
+    ];
+    if !detail.session.repo_root.trim().is_empty() {
+        lines.push(Line::from(format!(
             "repo {}",
-            fallback_text(&sanitize_inline_text(&detail.session.repo_root))
-        )),
-        Line::from(format!(
+            sanitize_inline_text(&detail.session.repo_root)
+        )));
+    }
+    if !detail.session.branch_start.trim().is_empty()
+        || !detail.session.branch_end.trim().is_empty()
+        || !detail.session.head_start.trim().is_empty()
+        || !detail.session.head_end.trim().is_empty()
+    {
+        lines.push(Line::from(format!(
             "branch {} -> {}    head {} -> {}",
             fallback_text(&sanitize_inline_text(&detail.session.branch_start)),
             fallback_text(&sanitize_inline_text(&detail.session.branch_end)),
             truncate(&sanitize_inline_text(&detail.session.head_start), 12),
             truncate(&sanitize_inline_text(&detail.session.head_end), 12),
-        )),
-    ];
+        )));
+    }
     Paragraph::new(lines)
         .block(pane_block("Header", false))
         .wrap(Wrap { trim: true })
 }
 
 fn build_timeline(detail: &DetailState, height: u16) -> Paragraph<'static> {
-    let total = detail.events.len();
-    let selected = min(detail.event_index, total.saturating_sub(1));
+    let visible_indices = timeline_visible_indices(detail);
+    let total = visible_indices.len();
+    let selected = visible_indices
+        .iter()
+        .position(|idx| *idx == detail.event_index)
+        .unwrap_or(0);
     let visible_rows = height.saturating_sub(2).max(1) as usize;
     let start = selected.saturating_sub(visible_rows / 2);
     let end = min(total, start + visible_rows);
     let mut lines: Vec<Line<'static>> = Vec::new();
-    for (idx, event) in detail.events.iter().enumerate().take(end).skip(start) {
-        let marker = if idx == selected { ">>" } else { "  " };
-        let style = if idx == selected && detail.focus == FocusPane::Timeline {
+    for row_index in start..end {
+        let event_index = visible_indices[row_index];
+        let event = &detail.events[event_index];
+        let marker = if row_index == selected { ">>" } else { "  " };
+        let style = if row_index == selected {
             Style::default().fg(Color::Black).bg(Color::LightGreen)
-        } else if idx == selected {
-            Style::default().fg(Color::Yellow).add_modifier(Modifier::BOLD)
         } else {
             Style::default()
         };
@@ -721,68 +739,100 @@ fn build_changes(detail: &DetailState) -> Paragraph<'static> {
             sanitize_inline_text(&detail.session.violation_code)
         },
     )));
-    lines.push(Line::from(""));
-    lines.push(Line::from(Span::styled(
-        "Files changed",
-        Style::default().fg(Color::Cyan).add_modifier(Modifier::BOLD),
-    )));
-    if let Some(files) = detail.session.changes.get("files_changed").and_then(Value::as_array) {
-        for value in files.iter().take(12) {
-            lines.push(Line::from(format!(
-                "- {}",
-                sanitize_inline_text(value.as_str().unwrap_or_default())
-            )));
-        }
+
+    let files: Vec<String> = detail
+        .session
+        .changes
+        .get("files_changed")
+        .and_then(Value::as_array)
+        .map(|items| {
+            items
+                .iter()
+                .filter_map(Value::as_str)
+                .map(sanitize_inline_text)
+                .filter(|item| !item.is_empty())
+                .take(12)
+                .collect()
+        })
+        .unwrap_or_default();
+    let committed_diff = detail
+        .session
+        .changes
+        .get("committed_diff_stat")
+        .and_then(Value::as_str)
+        .map(sanitize_multiline_text)
+        .filter(|value| value != "-")
+        .unwrap_or_default();
+    let worktree_diff = detail
+        .session
+        .changes
+        .get("worktree_diff_stat")
+        .and_then(Value::as_str)
+        .map(sanitize_multiline_text)
+        .filter(|value| value != "-")
+        .unwrap_or_default();
+    let commits: Vec<String> = detail
+        .session
+        .changes
+        .get("commits_created")
+        .and_then(Value::as_array)
+        .map(|items| {
+            items
+                .iter()
+                .take(6)
+                .map(|commit| {
+                    let sha = commit.get("sha").and_then(Value::as_str).unwrap_or("-");
+                    let summary = commit.get("summary").and_then(Value::as_str).unwrap_or("-");
+                    format!(
+                        "{} {}",
+                        sanitize_inline_text(sha),
+                        sanitize_inline_text(summary)
+                    )
+                })
+                .collect()
+        })
+        .unwrap_or_default();
+
+    if files.is_empty() && committed_diff.is_empty() && worktree_diff.is_empty() && commits.is_empty() {
+        lines.push(Line::from(""));
+        lines.push(Line::from("No repo changes recorded."));
     } else {
-        lines.push(Line::from("-"));
-    }
-    lines.push(Line::from(""));
-    lines.push(Line::from(Span::styled(
-        "Committed diff stat",
-        Style::default().fg(Color::Cyan).add_modifier(Modifier::BOLD),
-    )));
-    lines.push(Line::from(
-        sanitize_multiline_text(
-            detail
-                .session
-                .changes
-                .get("committed_diff_stat")
-                .and_then(Value::as_str)
-                .unwrap_or("-"),
-        ),
-    ));
-    lines.push(Line::from(""));
-    lines.push(Line::from(Span::styled(
-        "Worktree diff stat",
-        Style::default().fg(Color::Cyan).add_modifier(Modifier::BOLD),
-    )));
-    lines.push(Line::from(
-        sanitize_multiline_text(
-            detail
-                .session
-                .changes
-                .get("worktree_diff_stat")
-                .and_then(Value::as_str)
-                .unwrap_or("-"),
-        ),
-    ));
-    lines.push(Line::from(""));
-    lines.push(Line::from(Span::styled(
-        "Commits created",
-        Style::default().fg(Color::Cyan).add_modifier(Modifier::BOLD),
-    )));
-    if let Some(commits) = detail.session.changes.get("commits_created").and_then(Value::as_array) {
-        for commit in commits.iter().take(6) {
-            let sha = commit.get("sha").and_then(Value::as_str).unwrap_or("-");
-            let summary = commit.get("summary").and_then(Value::as_str).unwrap_or("-");
-            lines.push(Line::from(format!(
-                "{} {}",
-                sanitize_inline_text(sha),
-                sanitize_inline_text(summary)
+        if !files.is_empty() {
+            lines.push(Line::from(""));
+            lines.push(Line::from(Span::styled(
+                "Files changed",
+                Style::default().fg(Color::Cyan).add_modifier(Modifier::BOLD),
             )));
+            for file in files {
+                lines.push(Line::from(format!("- {}", file)));
+            }
         }
-    } else {
-        lines.push(Line::from("-"));
+        if !committed_diff.is_empty() {
+            lines.push(Line::from(""));
+            lines.push(Line::from(Span::styled(
+                "Committed diff stat",
+                Style::default().fg(Color::Cyan).add_modifier(Modifier::BOLD),
+            )));
+            push_text_block(&mut lines, &committed_diff);
+        }
+        if !worktree_diff.is_empty() {
+            lines.push(Line::from(""));
+            lines.push(Line::from(Span::styled(
+                "Worktree diff stat",
+                Style::default().fg(Color::Cyan).add_modifier(Modifier::BOLD),
+            )));
+            push_text_block(&mut lines, &worktree_diff);
+        }
+        if !commits.is_empty() {
+            lines.push(Line::from(""));
+            lines.push(Line::from(Span::styled(
+                "Commits created",
+                Style::default().fg(Color::Cyan).add_modifier(Modifier::BOLD),
+            )));
+            for commit in commits {
+                lines.push(Line::from(commit));
+            }
+        }
     }
     Paragraph::new(lines)
         .block(pane_block("Changes", detail.focus == FocusPane::Changes))
@@ -799,7 +849,7 @@ fn build_replay(detail: &DetailState) -> Paragraph<'static> {
     let display = if detail.replay_text.is_empty() {
         "(no terminal stdout recorded)".to_string()
     } else {
-        tail_lines(&detail.replay_text, 160)
+        collapse_blank_runs(&tail_lines(&detail.replay_text, 160), 2)
     };
     Paragraph::new(display)
         .block(pane_block(title, focused))
@@ -998,6 +1048,116 @@ fn build_event_modal_lines(event: &SessionEvent, detail: &DetailState) -> Vec<Li
     lines
 }
 
+fn detail_header_height(detail: &DetailState) -> u16 {
+    let mut line_count = 2u16;
+    if !detail.session.repo_root.trim().is_empty() {
+        line_count += 1;
+    }
+    if !detail.session.branch_start.trim().is_empty()
+        || !detail.session.branch_end.trim().is_empty()
+        || !detail.session.head_start.trim().is_empty()
+        || !detail.session.head_end.trim().is_empty()
+    {
+        line_count += 1;
+    }
+    line_count + 2
+}
+
+fn changes_panel_constraints(detail: &DetailState) -> [Constraint; 2] {
+    if detail_has_meaningful_changes(detail) {
+        [Constraint::Percentage(40), Constraint::Percentage(60)]
+    } else {
+        [Constraint::Length(7), Constraint::Min(10)]
+    }
+}
+
+fn detail_has_meaningful_changes(detail: &DetailState) -> bool {
+    has_nonempty_array(detail.session.changes.get("files_changed"))
+        || has_nonempty_array(detail.session.changes.get("commits_created"))
+        || detail
+            .session
+            .changes
+            .get("committed_diff_stat")
+            .and_then(Value::as_str)
+            .map(|value| sanitize_multiline_text(value) != "-")
+            .unwrap_or(false)
+        || detail
+            .session
+            .changes
+            .get("worktree_diff_stat")
+            .and_then(Value::as_str)
+            .map(|value| sanitize_multiline_text(value) != "-")
+            .unwrap_or(false)
+}
+
+fn has_nonempty_array(value: Option<&Value>) -> bool {
+    value
+        .and_then(Value::as_array)
+        .map(|items| !items.is_empty())
+        .unwrap_or(false)
+}
+
+fn timeline_visible_indices(detail: &DetailState) -> Vec<usize> {
+    let indices: Vec<usize> = detail
+        .events
+        .iter()
+        .enumerate()
+        .filter_map(|(idx, event)| {
+            if should_hide_timeline_event(&detail.events, idx, event) {
+                None
+            } else {
+                Some(idx)
+            }
+        })
+        .collect();
+    if indices.is_empty() {
+        (0..detail.events.len()).collect()
+    } else {
+        indices
+    }
+}
+
+fn should_hide_timeline_event(events: &[SessionEvent], index: usize, event: &SessionEvent) -> bool {
+    if event.event_type != "terminal.stdout" {
+        return false;
+    }
+    let text = event
+        .payload
+        .get("data")
+        .and_then(Value::as_str)
+        .map(sanitize_inline_text)
+        .unwrap_or_default();
+    if text.is_empty() {
+        return true;
+    }
+    if is_transient_terminal_fragment(&text)
+        && (neighbor_is_terminal_stdout(events, index, -1) || neighbor_is_terminal_stdout(events, index, 1))
+    {
+        return true;
+    }
+    false
+}
+
+fn neighbor_is_terminal_stdout(events: &[SessionEvent], index: usize, delta: isize) -> bool {
+    let neighbor = index as isize + delta;
+    if neighbor < 0 || neighbor >= events.len() as isize {
+        return false;
+    }
+    events[neighbor as usize].event_type == "terminal.stdout"
+}
+
+fn is_transient_terminal_fragment(text: &str) -> bool {
+    let trimmed = text.trim();
+    if trimmed.is_empty() {
+        return true;
+    }
+    let has_spaces = trimmed.chars().any(char::is_whitespace);
+    let looks_like_progress = trimmed
+        .chars()
+        .all(|ch| ch.is_alphanumeric() || matches!(ch, '•' | '.' | ':' | '-' | '_' | '/' | '\\'));
+    !has_spaces && looks_like_progress && trimmed.chars().count() <= 12
+}
+
 fn pane_block(title: &str, focused: bool) -> Block<'static> {
     let border_style = if focused {
         Style::default().fg(Color::LightGreen)
@@ -1040,6 +1200,23 @@ fn tail_lines(value: &str, max_lines: usize) -> String {
         return value.to_string();
     }
     lines[lines.len() - max_lines..].join("\n")
+}
+
+fn collapse_blank_runs(value: &str, max_blank_lines: usize) -> String {
+    let mut output: Vec<&str> = Vec::new();
+    let mut blank_run = 0usize;
+    for line in value.lines() {
+        if line.trim().is_empty() {
+            blank_run += 1;
+            if blank_run <= max_blank_lines {
+                output.push(line);
+            }
+        } else {
+            blank_run = 0;
+            output.push(line);
+        }
+    }
+    output.join("\n")
 }
 
 fn format_wall_ts(ts_wall: f64) -> String {
