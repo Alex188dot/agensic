@@ -657,7 +657,7 @@ fn draw_detail(frame: &mut ratatui::Frame<'_>, app: &App, detail: &DetailState) 
         .split(body[1]);
     frame.render_widget(build_timeline(detail, body[0].height), body[0]);
     frame.render_widget(build_changes(detail), right[0]);
-    frame.render_widget(build_replay(detail, right[1].height), right[1]);
+    frame.render_widget(build_replay(detail, right[1]), right[1]);
     frame.render_widget(
         Paragraph::new(
             "↑↓ timeline  mouse wheel scrolls timeline  Tab/Shift+Tab jump 500  s switch pane  ←→ seek replay  Enter details  space play/pause  Esc back",
@@ -894,7 +894,7 @@ fn build_changes(detail: &DetailState) -> Paragraph<'static> {
         .wrap(Wrap { trim: true })
 }
 
-fn build_replay(detail: &DetailState, height: u16) -> Paragraph<'static> {
+fn build_replay(detail: &DetailState, area: Rect) -> Paragraph<'static> {
     let focused = detail.focus == FocusPane::Replay;
     let title = if detail.autoplay {
         "Replay (playing)"
@@ -906,7 +906,7 @@ fn build_replay(detail: &DetailState, height: u16) -> Paragraph<'static> {
     } else {
         collapse_blank_runs(&detail.replay_text, 2)
     };
-    let max_scroll = replay_max_scroll(&display, height);
+    let max_scroll = replay_max_scroll(&display, area);
     let scroll = if detail.replay_follow_end {
         max_scroll
     } else {
@@ -1563,12 +1563,27 @@ fn collapse_blank_runs(value: &str, max_blank_lines: usize) -> String {
     output.join("\n")
 }
 
-fn replay_max_scroll(value: &str, height: u16) -> u16 {
-    let content_lines = value.lines().count().max(1);
-    let visible_lines = height.saturating_sub(2).max(1) as usize;
+fn replay_max_scroll(value: &str, area: Rect) -> u16 {
+    let content_lines = rendered_text_height(value, area.width.saturating_sub(2).max(1) as usize);
+    let visible_lines = area.height.saturating_sub(2).max(1) as usize;
     content_lines
         .saturating_sub(visible_lines)
         .min(u16::MAX as usize) as u16
+}
+
+fn rendered_text_height(value: &str, width: usize) -> usize {
+    value
+        .lines()
+        .map(|line| {
+            let len = line.chars().count();
+            if len == 0 {
+                1
+            } else {
+                ((len - 1) / width.max(1)) + 1
+            }
+        })
+        .sum::<usize>()
+        .max(1)
 }
 
 fn strip_inline_progress_noise(value: &str) -> String {
@@ -1794,9 +1809,11 @@ fn rect_contains(rect: Rect, column: u16, row: u16) -> bool {
 #[cfg(test)]
 mod tests {
     use super::{
-        build_display_model, collect_terminal_lines, format_header_outcome, sanitize_inline_text,
-        sanitize_terminal_output, strip_inline_progress_noise, SessionEvent,
+        build_display_model, collect_terminal_lines, format_header_outcome, rendered_text_height,
+        replay_max_scroll, sanitize_inline_text, sanitize_terminal_output,
+        strip_inline_progress_noise, SessionEvent,
     };
+    use ratatui::layout::Rect;
     use serde_json::json;
 
     #[test]
@@ -1953,6 +1970,18 @@ mod tests {
             collect_terminal_lines(&events, false),
             vec!["yes".to_string()]
         );
+    }
+
+    #[test]
+    fn replay_max_scroll_accounts_for_wrapped_lines() {
+        let area = Rect::new(0, 0, 20, 6);
+        let text = "1234567890123456789012345678901234567890\nok";
+
+        assert_eq!(rendered_text_height(text, 18), 4);
+        assert_eq!(replay_max_scroll(text, area), 0);
+
+        let taller_text = format!("{}\n{}", text, "abcdefghijklmnopqrstuvwxyz0123456789");
+        assert!(replay_max_scroll(&taller_text, area) > 0);
     }
 
     #[test]
