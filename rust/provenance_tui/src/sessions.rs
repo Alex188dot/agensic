@@ -27,6 +27,8 @@ use std::time::{Duration, Instant};
 use vt100::Parser as VtParser;
 
 const TIMELINE_PAGE_STEP: usize = 500;
+const TEXT_REPLAY_TICK_MS: u64 = 60;
+const TERMINAL_REPLAY_TICK_MS: u64 = TEXT_REPLAY_TICK_MS / 3;
 
 #[derive(Debug, Parser, Clone)]
 #[command(name = "agensic-provenance-tui sessions")]
@@ -309,7 +311,11 @@ impl DetailState {
         if !self.autoplay || self.active_replay_len() == 0 {
             return;
         }
-        if self.last_tick.elapsed() < Duration::from_millis(60) {
+        let tick_ms = match self.replay_mode {
+            ReplayMode::Terminal => TERMINAL_REPLAY_TICK_MS,
+            ReplayMode::Text => TEXT_REPLAY_TICK_MS,
+        };
+        if self.last_tick.elapsed() < Duration::from_millis(tick_ms) {
             return;
         }
         self.last_tick = Instant::now();
@@ -1446,11 +1452,7 @@ fn build_terminal_replay_frames(
 }
 
 fn render_terminal_frame(screen: &vt100::Screen, cols: u16) -> String {
-    screen
-        .rows(0, cols.max(1))
-        .map(|row| row.trim_end_matches(' ').to_string())
-        .collect::<Vec<_>>()
-        .join("\n")
+    screen.rows(0, cols.max(1)).collect::<Vec<_>>().join("\n")
 }
 
 struct TerminalDisplayBlock {
