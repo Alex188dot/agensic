@@ -3750,7 +3750,7 @@ def main(
         help="Explain a shell command and exit",
     ),
 ):
-    """Agensic: AI-powered terminal autocomplete."""
+    """Agensic: Forensic Observability for AI Agents and AI-powered terminal autocomplete"""
     if version:
         console.print(f"Agensic {__version__}", highlight=False)
         raise typer.Exit()
