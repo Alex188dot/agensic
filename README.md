@@ -110,6 +110,13 @@ agensic track inspect <session_id>
 agensic track inspect <session_id> --text
 ```
 
+Tracked-session retention:
+
+- Raw transcript and tracked-session event files are kept for up to 7 days
+- Total storage for `~/.local/state/agensic/tracked_sessions/*.jsonl` is capped at 1 GiB
+- When the cap is exceeded, the oldest tracked-session files are pruned first
+- Session rows can still appear in the UI after pruning, but terminal replay may fall back to the cleaned text transcript or become unavailable if the tracked files are gone
+
 Track an interactive agent session:
 
 ```bash

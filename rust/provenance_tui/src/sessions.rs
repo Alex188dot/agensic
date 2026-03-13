@@ -4,7 +4,7 @@ use chrono::TimeZone;
 use clap::Parser;
 use crossterm::event::{
     self, DisableMouseCapture, EnableMouseCapture, Event, KeyCode, KeyEvent, KeyEventKind,
-    MouseEvent, MouseEventKind,
+    MouseButton, MouseEvent, MouseEventKind,
 };
 use crossterm::execute;
 use crossterm::terminal::{
@@ -14,7 +14,7 @@ use crossterm::terminal::{
 use ratatui::backend::CrosstermBackend;
 use ratatui::layout::{Constraint, Direction, Layout, Rect};
 use ratatui::style::{Color, Modifier, Style};
-use ratatui::text::{Line, Span};
+use ratatui::text::{Line, Span, Text};
 use ratatui::widgets::{Block, Borders, Cell, Clear, Paragraph, Row, Table, TableState, Wrap};
 use ratatui::Terminal;
 use reqwest::blocking::Client;
@@ -23,12 +23,17 @@ use serde_json::Value;
 use std::cmp::{max, min};
 use std::fs;
 use std::io::{self, Write};
+use std::path::Path;
 use std::time::{Duration, Instant};
 use vt100::Parser as VtParser;
 
 const TIMELINE_PAGE_STEP: usize = 500;
 const TEXT_REPLAY_TICK_MS: u64 = 60;
 const TERMINAL_REPLAY_TICK_MS: u64 = TEXT_REPLAY_TICK_MS / 3;
+const SESSION_COPY_ICON: &str = "⧉";
+const TIMELINE_EVENT_TYPE_WIDTH: usize = 18;
+const TIMELINE_COPY_ICON_OFFSET: u16 = 29;
+const EVENT_MODAL_COMMAND_ICON_OFFSET: u16 = 9;
 
 #[derive(Debug, Parser, Clone)]
 #[command(name = "agensic-provenance-tui sessions")]
@@ -134,6 +139,7 @@ struct TimelineEntry {
     event_index: usize,
     event_type: String,
     summary: String,
+    copy_command: Option<String>,
 }
 
 #[derive(Clone, Debug, Default, Deserialize)]
@@ -159,8 +165,9 @@ struct DetailState {
     timeline_index: usize,
     text_replay_chunks: Vec<String>,
     transcript_chunks: Vec<TranscriptChunk>,
-    terminal_replay_frames: Vec<String>,
+    terminal_replay_frames: Vec<TerminalReplayFrame>,
     terminal_cache_size: Option<(u16, u16)>,
+    replay_notice: Option<String>,
     replay_step: usize,
     replay_text: String,
     replay_scroll: u16,
@@ -173,10 +180,23 @@ impl DetailState {
     fn new(session: SessionSummary, events: Vec<SessionEvent>, autoplay: bool) -> Self {
         let (timeline_entries, text_replay_chunks) = build_display_model(&events);
         let transcript_chunks = load_transcript_chunks(&session.transcript_path);
+        let transcript_missing = !session.transcript_path.trim().is_empty()
+            && !Path::new(session.transcript_path.trim()).is_file();
         let replay_mode = if transcript_chunks.is_empty() {
             ReplayMode::Text
         } else {
             ReplayMode::Terminal
+        };
+        let replay_notice = if transcript_missing {
+            Some(if text_replay_chunks.is_empty() {
+                "Replay unavailable: tracked transcript expired or was pruned (kept 7 days / 1 GiB total)."
+                    .to_string()
+            } else {
+                "Terminal replay expired or was pruned (kept 7 days / 1 GiB total). Showing cleaned session transcript fallback."
+                    .to_string()
+            })
+        } else {
+            None
         };
         let initial_timeline_index = timeline_entries
             .iter()
@@ -197,6 +217,7 @@ impl DetailState {
             transcript_chunks,
             terminal_replay_frames: Vec::new(),
             terminal_cache_size: None,
+            replay_notice,
             replay_step: 0,
             replay_text: String::new(),
             replay_scroll: 0,
@@ -214,17 +235,13 @@ impl DetailState {
         out
     }
 
-    fn active_replay_frames(&self) -> &[String] {
+    fn active_replay_len(&self) -> usize {
         match self.replay_mode {
             ReplayMode::Terminal if !self.terminal_replay_frames.is_empty() => {
-                &self.terminal_replay_frames
+                self.terminal_replay_frames.len()
             }
-            _ => &self.text_replay_chunks,
+            _ => self.text_replay_chunks.len(),
         }
-    }
-
-    fn active_replay_len(&self) -> usize {
-        self.active_replay_frames().len()
     }
 
     fn ensure_terminal_replay_cache(&mut self) {
@@ -286,8 +303,12 @@ impl DetailState {
             return;
         }
         self.replay_text = match self.replay_mode {
-            ReplayMode::Terminal => self.active_replay_frames()[self.replay_step].clone(),
-            ReplayMode::Text => self.active_replay_frames()[..=self.replay_step].join(""),
+            ReplayMode::Terminal if !self.terminal_replay_frames.is_empty() => self
+                .terminal_replay_frames[self.replay_step]
+                .plain_text
+                .clone(),
+            ReplayMode::Text => self.text_replay_chunks[..=self.replay_step].join(""),
+            ReplayMode::Terminal => self.text_replay_chunks[..=self.replay_step].join(""),
         };
         if self.replay_follow_end {
             self.replay_scroll = u16::MAX;
@@ -378,10 +399,30 @@ struct App {
     selected: usize,
     detail: Option<DetailState>,
     status: String,
+    flash_status: Option<crate::FlashStatus>,
     deep_link: bool,
     needs_terminal_clear: bool,
     event_modal_open: bool,
     event_modal_scroll: u16,
+}
+
+#[derive(Clone, Debug, Default)]
+struct TerminalReplayFrame {
+    plain_text: String,
+    lines: Vec<Line<'static>>,
+}
+
+#[derive(Clone, Debug, Default)]
+struct EventModalContent {
+    lines: Vec<Line<'static>>,
+    command_line_index: Option<u16>,
+    command: Option<String>,
+}
+
+#[derive(Clone, Copy, Debug)]
+struct TimelineViewport {
+    start: usize,
+    end: usize,
 }
 
 impl App {
@@ -393,6 +434,7 @@ impl App {
             selected: 0,
             detail: None,
             status: "Ready".to_string(),
+            flash_status: None,
             deep_link: !args.session_id.trim().is_empty(),
             needs_terminal_clear: true,
             event_modal_open: false,
@@ -480,12 +522,29 @@ impl App {
             .json()
             .map_err(|err| format!("invalid session events payload: {}", err))?;
 
-        self.detail = Some(DetailState::new(session, events_payload.events, replay));
+        let detail = DetailState::new(session, events_payload.events, replay);
+        self.status = if detail.replay_notice.is_some() {
+            "Tracked terminal replay expired or was pruned; showing fallback text transcript."
+                .to_string()
+        } else {
+            format!("Opened session {}", session_id)
+        };
+        self.detail = Some(detail);
         self.event_modal_open = false;
         self.event_modal_scroll = 0;
-        self.status = format!("Opened session {}", session_id);
         self.needs_terminal_clear = true;
         Ok(())
+    }
+
+    fn status_text(&self) -> &str {
+        self.flash_status
+            .as_ref()
+            .and_then(crate::FlashStatus::active_message)
+            .unwrap_or(self.status.as_str())
+    }
+
+    fn set_flash(&mut self, message: impl Into<String>) {
+        self.flash_status = Some(crate::FlashStatus::new(message));
     }
 }
 
@@ -518,6 +577,7 @@ fn run(client: Client, args: SessionsArgs) -> Result<(), String> {
             app.needs_terminal_clear = false;
         }
         if let Some(detail) = app.detail.as_mut() {
+            detail.ensure_terminal_replay_cache();
             detail.advance_autoplay();
         }
         terminal
@@ -739,7 +799,10 @@ fn draw_browser(frame: &mut ratatui::Frame<'_>, app: &App) {
     .block(
         Block::default()
             .borders(Borders::ALL)
-            .title("Agensic Sessions"),
+            .title(Line::from(Span::styled(
+                "Agensic Sessions",
+                crate::agensic_title_style(),
+            ))),
     )
     .row_highlight_style(
         Style::default()
@@ -756,7 +819,7 @@ fn draw_browser(frame: &mut ratatui::Frame<'_>, app: &App) {
     frame.render_widget(
         Paragraph::new(format!(
             "↑↓ move  Enter open  r refresh  Esc quit    {}",
-            app.status
+            app.status_text()
         ))
         .style(Style::default().fg(Color::White)),
         chunks[1],
@@ -794,9 +857,12 @@ fn draw_detail(frame: &mut ratatui::Frame<'_>, app: &App, detail: &DetailState) 
     frame.render_widget(build_changes(detail), right[0]);
     frame.render_widget(build_replay(detail, right[1]), right[1]);
     frame.render_widget(
-        Paragraph::new(
-            "↑↓ timeline/text scroll or terminal seek  mouse wheel scrolls active pane  Tab/Shift+Tab jump 500  s switch pane  t toggle replay mode  ←→ seek replay  Enter details  space play/pause  Esc back",
-        )
+        Paragraph::new(vec![
+            Line::from(
+                "↑↓ timeline/text scroll or terminal seek  mouse wheel scrolls active pane  Tab/Shift+Tab jump 500  s switch pane  t toggle replay mode  ←→ seek replay  Enter details  space play/pause  Esc back",
+            ),
+            Line::from(app.status_text().to_string()),
+        ])
         .style(Style::default().fg(Color::White)),
         chunks[2],
     );
@@ -864,18 +930,23 @@ fn build_header(detail: &DetailState) -> Paragraph<'static> {
         )));
     }
     Paragraph::new(lines)
-        .block(pane_block("Header", false))
+        .block(
+            Block::default()
+                .borders(Borders::ALL)
+                .title(Line::from(Span::styled(
+                    "Agensic Session Detail (Experimental)",
+                    crate::agensic_title_style(),
+                ))),
+        )
         .wrap(Wrap { trim: true })
 }
 
 fn build_timeline(detail: &DetailState, height: u16) -> Paragraph<'static> {
     let total = detail.timeline_entries.len();
     let selected = detail.timeline_index.min(total.saturating_sub(1));
-    let visible_rows = height.saturating_sub(2).max(1) as usize;
-    let start = selected.saturating_sub(visible_rows / 2);
-    let end = min(total, start + visible_rows);
+    let viewport = timeline_viewport(detail, height);
     let mut lines: Vec<Line<'static>> = Vec::new();
-    for row_index in start..end {
+    for row_index in viewport.start..viewport.end {
         let entry = &detail.timeline_entries[row_index];
         let marker = if row_index == selected { ">>" } else { "  " };
         let style = if row_index == selected {
@@ -883,14 +954,30 @@ fn build_timeline(detail: &DetailState, height: u16) -> Paragraph<'static> {
         } else {
             Style::default()
         };
-        let line = format!(
-            "{} {:>4}  {:<18}  {}",
+        let prefix = format!(
+            "{} {:>4}  {:<width$}  ",
             marker,
             row_index + 1,
-            truncate(&sanitize_inline_text(&entry.event_type), 18),
-            entry.summary.clone(),
+            truncate(
+                &sanitize_inline_text(&entry.event_type),
+                TIMELINE_EVENT_TYPE_WIDTH,
+            ),
+            width = TIMELINE_EVENT_TYPE_WIDTH,
         );
-        lines.push(Line::from(Span::styled(line, style)));
+        let icon = if entry.copy_command.is_some() {
+            Span::styled(SESSION_COPY_ICON, copy_icon_style())
+        } else {
+            Span::raw(" ")
+        };
+        lines.push(
+            Line::from(vec![
+                Span::raw(prefix),
+                icon,
+                Span::raw("  "),
+                Span::raw(entry.summary.clone()),
+            ])
+            .style(style),
+        );
     }
     if lines.is_empty() {
         lines.push(Line::from("(no recorded events)"));
@@ -1031,29 +1118,66 @@ fn build_changes(detail: &DetailState) -> Paragraph<'static> {
 
 fn build_replay(detail: &DetailState, area: Rect) -> Paragraph<'static> {
     let focused = detail.focus == FocusPane::Replay;
-    let title = if detail.autoplay {
-        format!("Replay ({}, playing)", detail.replay_mode.label())
-    } else {
-        format!("Replay ({}, paused)", detail.replay_mode.label())
+    let status_icon = if detail.autoplay { "▶" } else { "⏸" };
+    let mode_label = match detail.replay_mode {
+        ReplayMode::Terminal => "Terminal, faithful screen state",
+        ReplayMode::Text => "Text, session transcript",
     };
-    let display = if detail.replay_text.is_empty() {
-        match detail.replay_mode {
-            ReplayMode::Terminal => "(no terminal transcript available)".to_string(),
-            ReplayMode::Text => "(no terminal stdout recorded)".to_string(),
+    let title = format!("Replay ({}) {} ", mode_label, status_icon);
+    let (text, scroll) = match detail.replay_mode {
+        ReplayMode::Terminal => {
+            let lines = detail
+                .terminal_replay_frames
+                .get(detail.replay_step)
+                .map(|frame| frame.lines.clone())
+                .filter(|lines| !lines.is_empty())
+                .unwrap_or_else(|| {
+                    vec![Line::from(
+                        detail
+                            .replay_notice
+                            .as_deref()
+                            .unwrap_or("(no terminal transcript available)")
+                            .to_string(),
+                    )]
+                });
+            (Text::from(lines), 0)
         }
-    } else {
-        match detail.replay_mode {
-            ReplayMode::Terminal => detail.replay_text.clone(),
-            ReplayMode::Text => collapse_blank_runs(&detail.replay_text, 2),
+        ReplayMode::Text => {
+            let collapsed = collapse_blank_runs(&detail.replay_text, 2);
+            let mut lines = Vec::new();
+            if let Some(notice) = detail.replay_notice.as_ref() {
+                lines.push(Line::from(Span::styled(
+                    notice.clone(),
+                    Style::default()
+                        .fg(Color::LightYellow)
+                        .add_modifier(Modifier::BOLD),
+                )));
+                if !collapsed.trim().is_empty() {
+                    lines.push(Line::from(""));
+                }
+            }
+            if collapsed.trim().is_empty() {
+                if lines.is_empty() {
+                    lines.push(Line::from("(no terminal stdout recorded)"));
+                }
+            } else {
+                lines.extend(collapsed.lines().map(|line| Line::from(line.to_string())));
+            }
+            let plain = lines
+                .iter()
+                .map(ToString::to_string)
+                .collect::<Vec<_>>()
+                .join("\n");
+            let max_scroll = replay_max_scroll(&plain, area);
+            let scroll = if detail.replay_follow_end {
+                max_scroll
+            } else {
+                detail.replay_scroll.min(max_scroll)
+            };
+            (Text::from(lines), scroll)
         }
     };
-    let max_scroll = replay_max_scroll(&display, area);
-    let scroll = if detail.replay_follow_end {
-        max_scroll
-    } else {
-        detail.replay_scroll.min(max_scroll)
-    };
-    Paragraph::new(display)
+    Paragraph::new(text)
         .block(pane_block(&title, focused))
         .scroll((scroll, 0))
         .wrap(Wrap { trim: false })
@@ -1066,8 +1190,8 @@ fn draw_event_modal(
     scroll: u16,
 ) {
     let popup = centered_rect(74, 72, frame.area());
-    let lines = build_event_modal_lines(event, detail);
-    let panel = Paragraph::new(lines)
+    let content = build_event_modal_content(event, detail);
+    let panel = Paragraph::new(content.lines)
         .block(
             Block::default()
                 .borders(Borders::ALL)
@@ -1226,7 +1350,7 @@ fn event_summary(event: &SessionEvent) -> String {
     }
 }
 
-fn build_event_modal_lines(event: &SessionEvent, detail: &DetailState) -> Vec<Line<'static>> {
+fn build_event_modal_content(event: &SessionEvent, detail: &DetailState) -> EventModalContent {
     let mut lines = vec![
         Line::from(format!("session: {}", detail.session.session_id)),
         Line::from(format!("seq: {}", event.seq)),
@@ -1263,14 +1387,20 @@ fn build_event_modal_lines(event: &SessionEvent, detail: &DetailState) -> Vec<Li
         )));
     }
 
-    if let Some(command) = event.payload.get("command").and_then(Value::as_str) {
+    let command = event_command(event);
+    let mut command_line_index = None;
+    if let Some(command) = command.as_ref() {
         lines.push(Line::from(""));
-        lines.push(Line::from(Span::styled(
-            "command",
-            Style::default()
-                .fg(Color::Cyan)
-                .add_modifier(Modifier::BOLD),
-        )));
+        command_line_index = Some(lines.len() as u16);
+        lines.push(Line::from(vec![
+            Span::styled(
+                "command  ",
+                Style::default()
+                    .fg(Color::Cyan)
+                    .add_modifier(Modifier::BOLD),
+            ),
+            Span::styled(SESSION_COPY_ICON, copy_icon_style()),
+        ]));
         push_text_block(&mut lines, &sanitize_multiline_text(command));
     }
 
@@ -1295,7 +1425,11 @@ fn build_event_modal_lines(event: &SessionEvent, detail: &DetailState) -> Vec<Li
             .add_modifier(Modifier::BOLD),
     )));
     push_text_block(&mut lines, &sanitize_multiline_text(&payload_text));
-    lines
+    EventModalContent {
+        lines,
+        command_line_index,
+        command,
+    }
 }
 
 fn detail_header_height(detail: &DetailState) -> u16 {
@@ -1365,6 +1499,7 @@ fn build_display_model(events: &[SessionEvent]) -> (Vec<TimelineEntry>, Vec<Stri
                         event_index: block.event_index,
                         event_type: "terminal.output".to_string(),
                         summary: block.summary,
+                        copy_command: None,
                     });
                     replay_chunks.push(block.replay_text);
                 }
@@ -1379,6 +1514,7 @@ fn build_display_model(events: &[SessionEvent]) -> (Vec<TimelineEntry>, Vec<Stri
                         event_index: block.event_index,
                         event_type: "terminal.input".to_string(),
                         summary: block.summary,
+                        copy_command: None,
                     });
                 }
             }
@@ -1387,6 +1523,7 @@ fn build_display_model(events: &[SessionEvent]) -> (Vec<TimelineEntry>, Vec<Stri
                     event_index: index,
                     event_type: event.event_type.clone(),
                     summary: event_summary(event),
+                    copy_command: event_command(event),
                 });
                 index += 1;
             }
@@ -1399,11 +1536,22 @@ fn build_display_model(events: &[SessionEvent]) -> (Vec<TimelineEntry>, Vec<Stri
                 event_index: idx,
                 event_type: event.event_type.clone(),
                 summary: event_summary(event),
+                copy_command: event_command(event),
             });
         }
     }
 
     (timeline_entries, replay_chunks)
+}
+
+fn event_command(event: &SessionEvent) -> Option<String> {
+    event
+        .payload
+        .get("command")
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(ToOwned::to_owned)
 }
 
 fn load_transcript_chunks(path: &str) -> Vec<TranscriptChunk> {
@@ -1431,19 +1579,20 @@ fn build_terminal_replay_frames(
     transcript_chunks: &[TranscriptChunk],
     rows: u16,
     cols: u16,
-) -> Vec<String> {
+) -> Vec<TerminalReplayFrame> {
     let mut parser = VtParser::new(rows.max(1), cols.max(1), 10_000);
     let mut frames = Vec::new();
-    let mut last_frame = String::new();
+    let mut last_frame = Vec::new();
 
     for chunk in transcript_chunks {
         if chunk.direction != "pty" || chunk.data.is_empty() {
             continue;
         }
         parser.process(&chunk.data);
-        let frame = render_terminal_frame(parser.screen(), cols.max(1));
-        if frame != last_frame {
-            last_frame = frame.clone();
+        let formatted = parser.screen().contents_formatted();
+        let frame = render_terminal_frame(parser.screen(), rows.max(1), cols.max(1));
+        if formatted != last_frame {
+            last_frame = formatted;
             frames.push(frame);
         }
     }
@@ -1451,8 +1600,43 @@ fn build_terminal_replay_frames(
     frames
 }
 
-fn render_terminal_frame(screen: &vt100::Screen, cols: u16) -> String {
-    screen.rows(0, cols.max(1)).collect::<Vec<_>>().join("\n")
+fn render_terminal_frame(screen: &vt100::Screen, rows: u16, cols: u16) -> TerminalReplayFrame {
+    let plain_text = screen.rows(0, cols.max(1)).collect::<Vec<_>>().join("\n");
+    let mut lines = Vec::with_capacity(rows as usize);
+    for row in 0..rows.max(1) {
+        let mut spans: Vec<Span<'static>> = Vec::new();
+        let mut current_style: Option<Style> = None;
+        let mut buffer = String::new();
+        let mut col = 0u16;
+        while col < cols.max(1) {
+            let cell = screen.cell(row, col);
+            if cell.is_some_and(vt100::Cell::is_wide_continuation) {
+                col += 1;
+                continue;
+            }
+            let width = if cell.is_some_and(vt100::Cell::is_wide) {
+                2
+            } else {
+                1
+            };
+            let style = cell.map(terminal_cell_style).unwrap_or_default();
+            let text = match cell {
+                Some(cell) if cell.has_contents() => cell.contents(),
+                _ => " ".to_string(),
+            };
+            if current_style == Some(style) {
+                buffer.push_str(&text);
+            } else {
+                flush_terminal_span(&mut spans, &mut buffer, current_style);
+                current_style = Some(style);
+                buffer.push_str(&text);
+            }
+            col += width;
+        }
+        flush_terminal_span(&mut spans, &mut buffer, current_style);
+        lines.push(Line::from(spans));
+    }
+    TerminalReplayFrame { plain_text, lines }
 }
 
 struct TerminalDisplayBlock {
@@ -1719,6 +1903,81 @@ fn pane_block(title: &str, focused: bool) -> Block<'static> {
         .title(Line::from(Span::styled(title.to_string(), title_style)))
 }
 
+fn copy_icon_style() -> Style {
+    Style::default()
+        .fg(Color::LightGreen)
+        .add_modifier(Modifier::BOLD)
+}
+
+fn flush_terminal_span(spans: &mut Vec<Span<'static>>, buffer: &mut String, style: Option<Style>) {
+    if buffer.is_empty() {
+        return;
+    }
+    let text = std::mem::take(buffer);
+    match style {
+        Some(style) => spans.push(Span::styled(text, style)),
+        None => spans.push(Span::raw(text)),
+    }
+}
+
+fn terminal_cell_style(cell: &vt100::Cell) -> Style {
+    let mut style = Style::default()
+        .fg(vt100_color_to_ratatui(cell.fgcolor()))
+        .bg(vt100_color_to_ratatui(cell.bgcolor()));
+    if cell.bold() {
+        style = style.add_modifier(Modifier::BOLD);
+    }
+    if cell.italic() {
+        style = style.add_modifier(Modifier::ITALIC);
+    }
+    if cell.underline() {
+        style = style.add_modifier(Modifier::UNDERLINED);
+    }
+    if cell.inverse() {
+        style = style.add_modifier(Modifier::REVERSED);
+    }
+    style
+}
+
+fn vt100_color_to_ratatui(color: vt100::Color) -> Color {
+    match color {
+        vt100::Color::Default => Color::Reset,
+        vt100::Color::Idx(value) => match value {
+            0 => Color::Black,
+            1 => Color::Red,
+            2 => Color::Green,
+            3 => Color::Yellow,
+            4 => Color::Blue,
+            5 => Color::Magenta,
+            6 => Color::Cyan,
+            7 => Color::Gray,
+            8 => Color::DarkGray,
+            9 => Color::LightRed,
+            10 => Color::LightGreen,
+            11 => Color::LightYellow,
+            12 => Color::LightBlue,
+            13 => Color::LightMagenta,
+            14 => Color::LightCyan,
+            15 => Color::White,
+            _ => Color::Indexed(value),
+        },
+        vt100::Color::Rgb(r, g, b) => Color::Rgb(r, g, b),
+    }
+}
+
+fn timeline_viewport(detail: &DetailState, height: u16) -> TimelineViewport {
+    let total = detail.timeline_entries.len();
+    let selected = detail.timeline_index.min(total.saturating_sub(1));
+    let visible_rows = height.saturating_sub(2).max(1) as usize;
+    let start = selected.saturating_sub(visible_rows / 2);
+    let max_start = total.saturating_sub(visible_rows);
+    let start = start.min(max_start);
+    TimelineViewport {
+        start,
+        end: min(total, start + visible_rows),
+    }
+}
+
 fn push_text_block(lines: &mut Vec<Line<'static>>, text: &str) {
     for line in text.lines() {
         lines.push(Line::from(line.to_string()));
@@ -1903,6 +2162,33 @@ fn sanitize_terminal_output(value: &str) -> String {
 
 fn handle_mouse(app: &mut App, mouse: MouseEvent) {
     if let Some(detail) = app.detail.as_mut() {
+        if let MouseEventKind::Down(MouseButton::Left) = mouse.kind {
+            if app.event_modal_open {
+                if let Some(event) = detail.selected_event() {
+                    if let Some(command) =
+                        event_modal_copy_command(mouse, event, detail, app.event_modal_scroll)
+                    {
+                        match crate::copy_to_clipboard(&command) {
+                            Ok(()) => app.set_flash("✓ Copied command"),
+                            Err(err) => app.set_flash(err),
+                        }
+                    }
+                }
+                return;
+            }
+            if let Some((row_index, clicked_copy)) = timeline_mouse_hit(mouse, detail) {
+                detail.timeline_index = row_index;
+                if clicked_copy {
+                    if let Some(command) = detail.timeline_entries[row_index].copy_command.clone() {
+                        match crate::copy_to_clipboard(&command) {
+                            Ok(()) => app.set_flash("✓ Copied command"),
+                            Err(err) => app.set_flash(err),
+                        }
+                    }
+                }
+                return;
+            }
+        }
         match mouse.kind {
             MouseEventKind::ScrollDown => {
                 if app.event_modal_open {
@@ -1944,6 +2230,56 @@ fn handle_mouse(app: &mut App, mouse: MouseEvent) {
         }
         _ => {}
     }
+}
+
+fn timeline_mouse_hit(mouse: MouseEvent, detail: &DetailState) -> Option<(usize, bool)> {
+    let layout = session_detail_layout(detail)?;
+    if !rect_contains(layout.timeline, mouse.column, mouse.row) {
+        return None;
+    }
+    let inner_x = layout.timeline.x.saturating_add(1);
+    let inner_y = layout.timeline.y.saturating_add(1);
+    if mouse.column < inner_x || mouse.row < inner_y {
+        return None;
+    }
+    let viewport = timeline_viewport(detail, layout.timeline.height);
+    let row_offset = mouse.row.saturating_sub(inner_y) as usize;
+    let row_index = viewport.start + row_offset;
+    if row_index >= viewport.end {
+        return None;
+    }
+    let copy_x = inner_x.saturating_add(TIMELINE_COPY_ICON_OFFSET);
+    let clicked_copy =
+        mouse.column == copy_x && detail.timeline_entries[row_index].copy_command.is_some();
+    Some((row_index, clicked_copy))
+}
+
+fn event_modal_copy_command(
+    mouse: MouseEvent,
+    event: &SessionEvent,
+    detail: &DetailState,
+    scroll: u16,
+) -> Option<String> {
+    let popup = current_event_modal_rect()?;
+    if !rect_contains(popup, mouse.column, mouse.row) {
+        return None;
+    }
+    let content = build_event_modal_content(event, detail);
+    let command_line = content.command_line_index?;
+    let visible_row = popup
+        .y
+        .saturating_add(1)
+        .saturating_add(command_line)
+        .saturating_sub(scroll);
+    let icon_x = popup.x.saturating_add(1 + EVENT_MODAL_COMMAND_ICON_OFFSET);
+    (mouse.row == visible_row && mouse.column == icon_x)
+        .then_some(content.command)
+        .flatten()
+}
+
+fn current_event_modal_rect() -> Option<Rect> {
+    let (width, height) = terminal_size().ok()?;
+    Some(centered_rect(74, 72, Rect::new(0, 0, width, height)))
 }
 
 fn mouse_is_in_timeline_pane(mouse: MouseEvent, detail: &DetailState) -> bool {
@@ -2001,9 +2337,13 @@ mod tests {
     use super::{
         build_display_model, build_terminal_replay_frames, collect_terminal_lines,
         format_header_outcome, rendered_text_height, replay_max_scroll, sanitize_inline_text,
-        sanitize_terminal_output, strip_inline_progress_noise, SessionEvent, TranscriptChunk,
+        sanitize_terminal_output, strip_inline_progress_noise, vt100_color_to_ratatui,
+        SessionEvent, TranscriptChunk,
     };
-    use ratatui::layout::Rect;
+    use ratatui::{
+        layout::Rect,
+        style::{Color, Modifier},
+    };
     use serde_json::json;
 
     #[test]
@@ -2186,7 +2526,34 @@ mod tests {
         );
 
         assert_eq!(frames.len(), 1);
-        assert_eq!(frames[0].lines().next().unwrap_or_default(), "Hello there");
+        assert_eq!(
+            frames[0].plain_text.lines().next().unwrap_or_default(),
+            "Hello there"
+        );
+    }
+
+    #[test]
+    fn terminal_replay_preserves_color_and_style() {
+        let frames = build_terminal_replay_frames(
+            &[TranscriptChunk {
+                direction: "pty".to_string(),
+                data: b"\x1b[31;1mERR\x1b[0m".to_vec(),
+            }],
+            2,
+            8,
+        );
+
+        assert_eq!(frames.len(), 1);
+        assert_eq!(frames[0].lines[0].spans[0].content.as_ref(), "ERR");
+        assert_eq!(frames[0].lines[0].spans[0].style.fg, Some(Color::Red));
+        assert!(frames[0].lines[0].spans[0]
+            .style
+            .add_modifier
+            .contains(Modifier::BOLD));
+        assert_eq!(
+            vt100_color_to_ratatui(vt100::Color::Idx(42)),
+            Color::Indexed(42)
+        );
     }
 
     #[test]
