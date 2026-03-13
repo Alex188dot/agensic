@@ -194,6 +194,7 @@ struct DetailState {
     replay_text: String,
     replay_visible: bool,
     replay_scroll: u16,
+    replay_scroll_x: u16,
     replay_follow_end: bool,
     autoplay: bool,
     last_tick: Instant,
@@ -248,6 +249,7 @@ impl DetailState {
             replay_text: String::new(),
             replay_visible: false,
             replay_scroll: 0,
+            replay_scroll_x: 0,
             replay_follow_end: true,
             autoplay,
             last_tick: Instant::now(),
@@ -310,6 +312,7 @@ impl DetailState {
         } else {
             self.replay_scroll = 0;
         }
+        self.replay_scroll_x = 0;
         self.sync_replay_to_timeline();
     }
 
@@ -341,6 +344,9 @@ impl DetailState {
         if self.replay_follow_end {
             self.replay_scroll = u16::MAX;
         }
+        if self.replay_mode == ReplayMode::Text {
+            self.replay_scroll_x = 0;
+        }
     }
 
     fn clear_replay(&mut self) {
@@ -352,6 +358,7 @@ impl DetailState {
         } else {
             self.replay_scroll = 0;
         }
+        self.replay_scroll_x = 0;
     }
 
     fn text_replay_step_for_timeline(&self, timeline_index: usize) -> Option<usize> {
@@ -478,6 +485,16 @@ impl DetailState {
             FocusPane::Changes => FocusPane::Replay,
             FocusPane::Replay => FocusPane::Timeline,
         };
+    }
+
+    fn scroll_replay_horizontal(&mut self, delta: i32) {
+        if delta < 0 {
+            self.replay_scroll_x = self
+                .replay_scroll_x
+                .saturating_sub(delta.unsigned_abs() as u16);
+        } else {
+            self.replay_scroll_x = self.replay_scroll_x.saturating_add(delta as u16);
+        }
     }
 }
 
@@ -893,6 +910,12 @@ fn handle_key(app: &mut App, key: KeyEvent) -> Result<bool, String> {
                         }
                     }
                     KeyCode::Char('E') => export_timeline_csv = true,
+                    KeyCode::Left if detail.focus == FocusPane::Replay => {
+                        detail.scroll_replay_horizontal(-4)
+                    }
+                    KeyCode::Right if detail.focus == FocusPane::Replay => {
+                        detail.scroll_replay_horizontal(4)
+                    }
                     KeyCode::Up | KeyCode::Char('k') => detail.move_selection(-1),
                     KeyCode::Down | KeyCode::Char('j') => detail.move_selection(1),
                     KeyCode::BackTab if detail.focus == FocusPane::Timeline => {
@@ -1084,7 +1107,7 @@ fn draw_detail(frame: &mut ratatui::Frame<'_>, app: &App, detail: &DetailState) 
     frame.render_widget(
         Paragraph::new(vec![
             Line::from(Span::styled(
-                "Space: Play/Pause   Mouse wheel / ↑↓: Move  Tab/Shift+Tab: Jump 500  c: Copy command  E: Export(csv)  s: Switch pane  t: Toggle replay mode  Enter: Details  Esc: Back",
+                "Space: Play/Pause   Mouse wheel / ↑↓: Move  ←/→: Replay horizontal scroll when needed  Tab/Shift+Tab: Jump 500  c: Copy command  E: Export(csv)  s: Switch pane  t: Toggle replay mode  Enter: Details  Esc: Back",
                 Style::default().fg(Color::Yellow),
             )),
             Line::from(app.status_text().to_string()),
@@ -1427,20 +1450,25 @@ fn build_changes(detail: &DetailState) -> Paragraph<'static> {
 
 fn build_replay(detail: &DetailState, area: Rect) -> Paragraph<'static> {
     let focused = detail.focus == FocusPane::Replay;
-    let status_icon = if detail.autoplay { "▶️" } else { "⏸️" };
+    let status_label = if detail.autoplay { "playing" } else { "paused" };
     let mode_label = match detail.replay_mode {
         ReplayMode::Terminal => "Terminal, faithful screen state",
         ReplayMode::Text => "Text, session transcript",
     };
-    let frame_size_label = detail
+    let active_frame = detail
         .terminal_replay_frames
         .get(detail.replay_step)
-        .filter(|_| detail.replay_mode == ReplayMode::Terminal && detail.replay_visible)
+        .filter(|_| detail.replay_mode == ReplayMode::Terminal && detail.replay_visible);
+    let frame_size_label = active_frame
         .map(|frame| format!(" {}x{}", frame.cols, frame.rows))
         .unwrap_or_default();
+    let horizontal_scroll_hint = active_frame
+        .filter(|frame| terminal_replay_max_scroll_x(frame, area) > 0)
+        .map(|_| " ←/→ horizontal scroll")
+        .unwrap_or("");
     let title = format!(
-        "Replay ({}{}) {} ",
-        mode_label, frame_size_label, status_icon
+        "Replay ({}{}) [{}]{} ",
+        mode_label, frame_size_label, status_label, horizontal_scroll_hint
     );
     let (text, scroll_y, scroll_x) = match detail.replay_mode {
         ReplayMode::Terminal => {
@@ -1488,7 +1516,14 @@ fn build_replay(detail: &DetailState, area: Rect) -> Paragraph<'static> {
             } else {
                 0
             };
-            (Text::from(lines), scroll, 0)
+            let scroll_x = active_frame
+                .map(|frame| {
+                    detail
+                        .replay_scroll_x
+                        .min(terminal_replay_max_scroll_x(frame, area))
+                })
+                .unwrap_or(0);
+            (Text::from(lines), scroll, scroll_x)
         }
         ReplayMode::Text => {
             let collapsed = if detail.replay_visible {
@@ -2657,6 +2692,11 @@ fn terminal_replay_scroll(frame: &TerminalReplayFrame, area: Rect, padding_rows:
         .saturating_sub(visible_lines)
 }
 
+fn terminal_replay_max_scroll_x(frame: &TerminalReplayFrame, area: Rect) -> u16 {
+    let visible_cols = area.width.saturating_sub(2).max(1);
+    frame.cols.saturating_sub(visible_cols)
+}
+
 fn rendered_text_height(value: &str, width: usize) -> usize {
     value
         .lines()
@@ -3160,8 +3200,9 @@ mod tests {
         export_timeline_rows, format_header_outcome, format_outcome, format_timeline_ordinal,
         rendered_text_height, replay_max_scroll, repo_display_name, sanitize_inline_text,
         sanitize_terminal_output, strip_inline_progress_noise, terminal_replay_end_padding,
-        terminal_replay_scroll, vt100_color_to_ratatui, DetailState, FocusPane, ReplayMode,
-        SessionEvent, SessionSummary, TerminalReplayFrame, TimelineEntry, TranscriptChunk,
+        terminal_replay_max_scroll_x, terminal_replay_scroll, vt100_color_to_ratatui, DetailState,
+        FocusPane, ReplayMode, SessionEvent, SessionSummary, TerminalReplayFrame, TimelineEntry,
+        TranscriptChunk,
     };
     use ratatui::{
         layout::Rect,
@@ -3359,6 +3400,20 @@ mod tests {
 
         assert_eq!(terminal_replay_scroll(&frame, area, 0), 20);
         assert_eq!(terminal_replay_scroll(&frame, area, 20), 40);
+    }
+
+    #[test]
+    fn terminal_replay_max_scroll_x_detects_horizontal_overflow() {
+        let area = Rect::new(0, 0, 40, 12);
+        let frame = TerminalReplayFrame {
+            plain_text: String::new(),
+            lines: vec![Line::from(""); 10],
+            source_seq_end: Some(1),
+            rows: 10,
+            cols: 60,
+        };
+
+        assert_eq!(terminal_replay_max_scroll_x(&frame, area), 22);
     }
 
     #[test]
@@ -3571,6 +3626,7 @@ mod tests {
             replay_text: String::new(),
             replay_visible: false,
             replay_scroll: 0,
+            replay_scroll_x: 0,
             replay_follow_end: false,
             autoplay: false,
             last_tick: Instant::now(),
