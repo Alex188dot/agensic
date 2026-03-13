@@ -31,6 +31,7 @@ use vt100::Parser as VtParser;
 const TIMELINE_PAGE_STEP: usize = 500;
 const TEXT_REPLAY_TICK_MS: u64 = 60;
 const TERMINAL_REPLAY_TICK_MS: u64 = TEXT_REPLAY_TICK_MS / 3;
+const TERMINAL_REPLAY_END_PADDING_ROWS: u16 = 20;
 const SESSION_COPY_BUTTON: &str = "[ Copy ]";
 const SESSION_COPIED_BUTTON: &str = "[   ✓   ]";
 const TIMELINE_ORDINAL_WIDTH: u16 = 6;
@@ -1447,7 +1448,20 @@ fn build_replay(detail: &DetailState, area: Rect) -> Paragraph<'static> {
                 detail
                     .terminal_replay_frames
                     .get(detail.replay_step)
-                    .map(|frame| frame.lines.clone())
+                    .map(|frame| {
+                        let mut lines = frame.lines.clone();
+                        let padding_rows = terminal_replay_end_padding(
+                            detail.replay_step,
+                            detail.terminal_replay_frames.len(),
+                        );
+                        if padding_rows > 0 {
+                            lines.extend(
+                                std::iter::repeat_with(|| Line::from(""))
+                                    .take(padding_rows as usize),
+                            );
+                        }
+                        lines
+                    })
                     .filter(|lines| !lines.is_empty())
                     .unwrap_or_else(|| vec![Line::from("")])
             } else if let Some(notice) = detail.replay_notice.as_ref() {
@@ -1455,7 +1469,26 @@ fn build_replay(detail: &DetailState, area: Rect) -> Paragraph<'static> {
             } else {
                 vec![Line::from("")]
             };
-            (Text::from(lines), 0, 0)
+            let scroll = if detail.replay_visible {
+                detail
+                    .terminal_replay_frames
+                    .get(detail.replay_step)
+                    .map(|frame| {
+                        let padding_rows = terminal_replay_end_padding(
+                            detail.replay_step,
+                            detail.terminal_replay_frames.len(),
+                        );
+                        if padding_rows > 0 {
+                            terminal_replay_scroll(frame, area, padding_rows)
+                        } else {
+                            0
+                        }
+                    })
+                    .unwrap_or(0)
+            } else {
+                0
+            };
+            (Text::from(lines), scroll, 0)
         }
         ReplayMode::Text => {
             let collapsed = if detail.replay_visible {
@@ -2608,6 +2641,22 @@ fn replay_max_scroll(value: &str, area: Rect) -> u16 {
         .min(u16::MAX as usize) as u16
 }
 
+fn terminal_replay_end_padding(frame_index: usize, total_frames: usize) -> u16 {
+    if total_frames > 0 && frame_index + 1 >= total_frames {
+        TERMINAL_REPLAY_END_PADDING_ROWS
+    } else {
+        0
+    }
+}
+
+fn terminal_replay_scroll(frame: &TerminalReplayFrame, area: Rect, padding_rows: u16) -> u16 {
+    let visible_lines = area.height.saturating_sub(2).max(1);
+    frame
+        .rows
+        .saturating_add(padding_rows)
+        .saturating_sub(visible_lines)
+}
+
 fn rendered_text_height(value: &str, width: usize) -> usize {
     value
         .lines()
@@ -3110,9 +3159,9 @@ mod tests {
         build_display_model, build_terminal_replay_frames, collect_terminal_lines, diff_stat_line,
         export_timeline_rows, format_header_outcome, format_outcome, format_timeline_ordinal,
         rendered_text_height, replay_max_scroll, repo_display_name, sanitize_inline_text,
-        sanitize_terminal_output, strip_inline_progress_noise, vt100_color_to_ratatui, DetailState,
-        FocusPane, ReplayMode, SessionEvent, SessionSummary, TerminalReplayFrame, TimelineEntry,
-        TranscriptChunk,
+        sanitize_terminal_output, strip_inline_progress_noise, terminal_replay_end_padding,
+        terminal_replay_scroll, vt100_color_to_ratatui, DetailState, FocusPane, ReplayMode,
+        SessionEvent, SessionSummary, TerminalReplayFrame, TimelineEntry, TranscriptChunk,
     };
     use ratatui::{
         layout::Rect,
@@ -3289,6 +3338,48 @@ mod tests {
 
         let taller_text = format!("{}\n{}", text, "abcdefghijklmnopqrstuvwxyz0123456789");
         assert!(replay_max_scroll(&taller_text, area) > 0);
+    }
+
+    #[test]
+    fn terminal_replay_end_padding_only_applies_to_last_frame() {
+        assert_eq!(terminal_replay_end_padding(0, 3), 0);
+        assert_eq!(terminal_replay_end_padding(2, 3), 20);
+    }
+
+    #[test]
+    fn terminal_replay_scroll_includes_end_padding_rows() {
+        let area = Rect::new(0, 0, 40, 12);
+        let frame = TerminalReplayFrame {
+            plain_text: String::new(),
+            lines: vec![Line::from(""); 30],
+            source_seq_end: Some(1),
+            rows: 30,
+            cols: 40,
+        };
+
+        assert_eq!(terminal_replay_scroll(&frame, area, 0), 20);
+        assert_eq!(terminal_replay_scroll(&frame, area, 20), 40);
+    }
+
+    #[test]
+    fn terminal_replay_non_final_frames_stay_top_aligned() {
+        let area = Rect::new(0, 0, 40, 12);
+        let frame = TerminalReplayFrame {
+            plain_text: String::new(),
+            lines: vec![Line::from(""); 30],
+            source_seq_end: Some(1),
+            rows: 30,
+            cols: 40,
+        };
+
+        let padding_rows = terminal_replay_end_padding(1, 3);
+        assert_eq!(padding_rows, 0);
+        let scroll = if padding_rows > 0 {
+            terminal_replay_scroll(&frame, area, padding_rows)
+        } else {
+            0
+        };
+        assert_eq!(scroll, 0);
     }
 
     #[test]
