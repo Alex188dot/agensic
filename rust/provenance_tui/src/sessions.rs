@@ -35,6 +35,8 @@ const TERMINAL_REPLAY_END_PADDING_ROWS: u16 = 20;
 const MAX_SESSION_DURATION_SECONDS: i64 = 24 * 60 * 60;
 const SESSION_COPY_BUTTON: &str = "[ Copy ]";
 const SESSION_COPIED_BUTTON: &str = "[   ✓   ]";
+const REPLAY_FULLSCREEN_BUTTON: &str = "[fullscreen]";
+const REPLAY_SPLIT_BUTTON: &str = "[split]";
 const TIMELINE_ORDINAL_WIDTH: u16 = 6;
 const TIMELINE_EVENT_TYPE_WIDTH: usize = 18;
 const TIMELINE_COLUMN_SPACING: u16 = 1;
@@ -184,6 +186,7 @@ struct DetailState {
     timeline_entries: Vec<TimelineEntry>,
     replay_mode: ReplayMode,
     focus: FocusPane,
+    replay_fullscreen: bool,
     timeline_index: usize,
     text_replay_chunks: Vec<String>,
     replay_timeline_indices: Vec<usize>,
@@ -239,6 +242,7 @@ impl DetailState {
             } else {
                 FocusPane::Timeline
             },
+            replay_fullscreen: false,
             timeline_index: initial_timeline_index,
             text_replay_chunks,
             replay_timeline_indices,
@@ -488,6 +492,12 @@ impl DetailState {
         };
     }
 
+    fn toggle_replay_fullscreen(&mut self) {
+        self.replay_fullscreen = !self.replay_fullscreen;
+        self.focus = FocusPane::Replay;
+        self.terminal_cache_key = None;
+    }
+
     fn scroll_replay_horizontal(&mut self, delta: i32) {
         if delta < 0 {
             self.replay_scroll_x = self
@@ -514,6 +524,7 @@ struct App {
     hovered_timeline_copy_row: Option<usize>,
     hovered_event_modal_copy: bool,
     hovered_header_copy: bool,
+    hovered_replay_toggle: bool,
     copy_feedback: Option<CopyFeedback>,
 }
 
@@ -584,6 +595,7 @@ impl App {
             hovered_timeline_copy_row: None,
             hovered_event_modal_copy: false,
             hovered_header_copy: false,
+            hovered_replay_toggle: false,
             copy_feedback: None,
         };
         app.refresh_sessions()?;
@@ -681,6 +693,7 @@ impl App {
         self.hovered_timeline_copy_row = None;
         self.hovered_event_modal_copy = false;
         self.hovered_header_copy = false;
+        self.hovered_replay_toggle = false;
         self.copy_feedback = None;
         self.needs_terminal_clear = true;
         Ok(())
@@ -863,6 +876,14 @@ fn handle_key(app: &mut App, key: KeyEvent) -> Result<bool, String> {
                     KeyCode::Char('t') => {
                         detail.toggle_replay_mode();
                         app.status = format!("Replay mode: {}", detail.replay_mode.label());
+                    }
+                    KeyCode::Char('f') => {
+                        detail.toggle_replay_fullscreen();
+                        app.status = if detail.replay_fullscreen {
+                            "Replay fullscreen enabled".to_string()
+                        } else {
+                            "Replay split view restored".to_string()
+                        };
                     }
                     KeyCode::Char(' ') => {
                         if detail.autoplay {
@@ -1071,50 +1092,37 @@ fn draw_browser(frame: &mut ratatui::Frame<'_>, app: &App) {
 fn draw_detail(frame: &mut ratatui::Frame<'_>, app: &App, detail: &DetailState) {
     let area = frame.area();
     frame.render_widget(Clear, area);
-    let header_height = detail_header_height(detail);
-    let chunks = Layout::default()
-        .direction(Direction::Vertical)
-        .constraints([
-            Constraint::Length(header_height),
-            Constraint::Min(12),
-            Constraint::Length(2),
-        ])
-        .split(area);
-    frame.render_widget(build_header(app, detail), chunks[0]);
-
-    let body = Layout::default()
-        .direction(Direction::Horizontal)
-        .constraints([Constraint::Percentage(52), Constraint::Percentage(48)])
-        .split(chunks[1]);
-    let right = Layout::default()
-        .direction(Direction::Vertical)
-        .constraints(changes_panel_constraints(detail))
-        .split(body[1]);
-    let timeline_view = timeline_viewport(detail, body[0].height);
-    let mut timeline_state = TableState::default();
-    if !detail.timeline_entries.is_empty() {
-        let selected = detail
-            .timeline_index
-            .min(detail.timeline_entries.len().saturating_sub(1));
-        timeline_state.select(Some(selected.saturating_sub(timeline_view.start)));
+    let Some(layout) = session_detail_layout_in_area(detail, area) else {
+        return;
+    };
+    frame.render_widget(build_header(app, detail), layout.header);
+    if !detail.replay_fullscreen {
+        let timeline_view = timeline_viewport(detail, layout.timeline.height);
+        let mut timeline_state = TableState::default();
+        if !detail.timeline_entries.is_empty() {
+            let selected = detail
+                .timeline_index
+                .min(detail.timeline_entries.len().saturating_sub(1));
+            timeline_state.select(Some(selected.saturating_sub(timeline_view.start)));
+        }
+        frame.render_stateful_widget(
+            build_timeline(app, detail, layout.timeline),
+            layout.timeline,
+            &mut timeline_state,
+        );
+        frame.render_widget(build_changes(detail), layout.changes);
     }
-    frame.render_stateful_widget(
-        build_timeline(app, detail, body[0]),
-        body[0],
-        &mut timeline_state,
-    );
-    frame.render_widget(build_changes(detail), right[0]);
-    frame.render_widget(build_replay(detail, right[1]), right[1]);
+    frame.render_widget(build_replay(app, detail, layout.replay), layout.replay);
     frame.render_widget(
         Paragraph::new(vec![
             Line::from(Span::styled(
-                "Space: Play/Pause   Mouse wheel / ↑↓: Move  ←/→: Replay horizontal scroll when needed  Tab/Shift+Tab: Jump 500  c: Copy command  E: Export(csv)  s: Switch pane  t: Toggle replay mode  Enter: Details  Esc: Back",
+                "Space: Play/Pause   ↑↓: Move  ←/→: Replay horizontal scroll when needed  Tab/Shift+Tab: Jump 500  c: Copy  E: Export(csv)  f: Toggle replay fullscreen  s: Switch pane  t: Toggle replay mode  Enter: Details  Esc: Back",
                 Style::default().fg(Color::Yellow),
             )),
             Line::from(app.status_text().to_string()),
         ])
         .style(Style::default().fg(Color::White)),
-        chunks[2],
+        layout.footer,
     );
 
     if app.deep_link && detail.session.session_id.is_empty() {
@@ -1449,7 +1457,7 @@ fn build_changes(detail: &DetailState) -> Paragraph<'static> {
         .wrap(Wrap { trim: true })
 }
 
-fn build_replay(detail: &DetailState, area: Rect) -> Paragraph<'static> {
+fn build_replay(app: &App, detail: &DetailState, area: Rect) -> Paragraph<'static> {
     let focused = detail.focus == FocusPane::Replay;
     let status_label = if detail.autoplay { "playing" } else { "paused" };
     let mode_label = match detail.replay_mode {
@@ -1467,10 +1475,25 @@ fn build_replay(detail: &DetailState, area: Rect) -> Paragraph<'static> {
         .filter(|frame| terminal_replay_max_scroll_x(frame, area) > 0)
         .map(|_| " ←/→ horizontal scroll")
         .unwrap_or("");
-    let title = format!(
-        "Replay ({}{}) [{}]{} ",
-        mode_label, frame_size_label, status_label, horizontal_scroll_hint
-    );
+    let toggle_label = if detail.replay_fullscreen {
+        REPLAY_SPLIT_BUTTON
+    } else {
+        REPLAY_FULLSCREEN_BUTTON
+    };
+    let title = Line::from(vec![
+        Span::raw(format!(
+            "Replay ({}{}) [{}]{} ",
+            mode_label, frame_size_label, status_label, horizontal_scroll_hint
+        )),
+        Span::styled(
+            toggle_label,
+            copy_button_style(
+                app.hovered_replay_toggle,
+                false,
+                detail.focus == FocusPane::Replay,
+            ),
+        ),
+    ]);
     let (text, scroll_y, scroll_x) = match detail.replay_mode {
         ReplayMode::Terminal => {
             let lines = if detail.replay_visible {
@@ -1566,7 +1589,7 @@ fn build_replay(detail: &DetailState, area: Rect) -> Paragraph<'static> {
         }
     };
     let paragraph = Paragraph::new(text)
-        .block(pane_block(&title, focused))
+        .block(pane_block_title(title, focused))
         .scroll((scroll_y, scroll_x));
     if detail.replay_mode == ReplayMode::Text {
         paragraph.wrap(Wrap { trim: false })
@@ -2508,6 +2531,18 @@ fn pane_block(title: &str, focused: bool) -> Block<'static> {
         .title(Line::from(Span::styled(title.to_string(), title_style)))
 }
 
+fn pane_block_title(title: Line<'static>, focused: bool) -> Block<'static> {
+    let border_style = if focused {
+        Style::default().fg(Color::LightGreen)
+    } else {
+        Style::default().fg(Color::DarkGray)
+    };
+    Block::default()
+        .borders(Borders::ALL)
+        .border_style(border_style)
+        .title(title)
+}
+
 pub(crate) fn copy_button_style(hovered: bool, copied: bool, selected: bool) -> Style {
     if selected {
         let mut style = Style::default()
@@ -2972,6 +3007,8 @@ fn handle_mouse(app: &mut App, mouse: MouseEvent) {
         {
             let detail = app.detail.as_mut().expect("detail checked above");
             app.hovered_header_copy = session_header_copy_hit(mouse, detail);
+            app.hovered_replay_toggle =
+                !app.event_modal_open && replay_toggle_hit(mouse, detail).is_some();
             if app.event_modal_open {
                 app.hovered_event_modal_copy = detail
                     .selected_event()
@@ -2995,6 +3032,15 @@ fn handle_mouse(app: &mut App, mouse: MouseEvent) {
                         }
                         Err(err) => flash_message = Some(err),
                     }
+                    handled = true;
+                }
+                if !handled && app.hovered_replay_toggle {
+                    detail.toggle_replay_fullscreen();
+                    flash_message = Some(if detail.replay_fullscreen {
+                        "Replay fullscreen enabled".to_string()
+                    } else {
+                        "Replay split view restored".to_string()
+                    });
                     handled = true;
                 }
             }
@@ -3179,13 +3225,17 @@ fn current_event_modal_rect() -> Option<Rect> {
 }
 
 struct SessionDetailLayout {
+    header: Rect,
+    footer: Rect,
     timeline: Rect,
+    changes: Rect,
     replay: Rect,
 }
 
-fn session_detail_layout(detail: &DetailState) -> Option<SessionDetailLayout> {
-    let (width, height) = terminal_size().ok()?;
-    let area = Rect::new(0, 0, width, height);
+fn session_detail_layout_in_area(detail: &DetailState, area: Rect) -> Option<SessionDetailLayout> {
+    if area.width == 0 || area.height == 0 {
+        return None;
+    }
     let header_height = detail_header_height(detail);
     let chunks = Layout::default()
         .direction(Direction::Vertical)
@@ -3195,6 +3245,15 @@ fn session_detail_layout(detail: &DetailState) -> Option<SessionDetailLayout> {
             Constraint::Length(2),
         ])
         .split(area);
+    if detail.replay_fullscreen {
+        return Some(SessionDetailLayout {
+            header: chunks[0],
+            footer: chunks[2],
+            timeline: Rect::default(),
+            changes: Rect::default(),
+            replay: chunks[1],
+        });
+    }
     let body = Layout::default()
         .direction(Direction::Horizontal)
         .constraints([Constraint::Percentage(52), Constraint::Percentage(48)])
@@ -3204,9 +3263,59 @@ fn session_detail_layout(detail: &DetailState) -> Option<SessionDetailLayout> {
         .constraints(changes_panel_constraints(detail))
         .split(body[1]);
     Some(SessionDetailLayout {
+        header: chunks[0],
+        footer: chunks[2],
         timeline: body[0],
+        changes: right[0],
         replay: right[1],
     })
+}
+
+fn session_detail_layout(detail: &DetailState) -> Option<SessionDetailLayout> {
+    let (width, height) = terminal_size().ok()?;
+    session_detail_layout_in_area(detail, Rect::new(0, 0, width, height))
+}
+
+fn replay_toggle_hit(mouse: MouseEvent, detail: &DetailState) -> Option<bool> {
+    let layout = session_detail_layout(detail)?;
+    if !rect_contains(layout.replay, mouse.column, mouse.row) {
+        return None;
+    }
+    let button = if detail.replay_fullscreen {
+        REPLAY_SPLIT_BUTTON
+    } else {
+        REPLAY_FULLSCREEN_BUTTON
+    };
+    let active_frame = detail
+        .terminal_replay_frames
+        .get(detail.replay_step)
+        .filter(|_| detail.replay_mode == ReplayMode::Terminal && detail.replay_visible);
+    let frame_size_label = active_frame
+        .map(|frame| format!(" {}x{}", frame.cols, frame.rows))
+        .unwrap_or_default();
+    let horizontal_scroll_hint = active_frame
+        .filter(|frame| terminal_replay_max_scroll_x(frame, layout.replay) > 0)
+        .map(|_| " ←/→ horizontal scroll")
+        .unwrap_or("");
+    let mode_label = match detail.replay_mode {
+        ReplayMode::Terminal => "Terminal, faithful screen state",
+        ReplayMode::Text => "Text, session transcript",
+    };
+    let status_label = if detail.autoplay { "playing" } else { "paused" };
+    let prefix = format!(
+        "Replay ({}{}) [{}]{} ",
+        mode_label, frame_size_label, status_label, horizontal_scroll_hint
+    );
+    let button_x = layout
+        .replay
+        .x
+        .saturating_add(1)
+        .saturating_add(display_width(&prefix) as u16);
+    let title_y = layout.replay.y;
+    (mouse.row == title_y
+        && mouse.column >= button_x
+        && mouse.column < button_x.saturating_add(display_width(button) as u16))
+    .then_some(true)
 }
 
 fn rect_contains(rect: Rect, column: u16, row: u16) -> bool {
@@ -3222,10 +3331,10 @@ mod tests {
         build_display_model, build_terminal_replay_frames, collect_terminal_lines, diff_stat_line,
         export_timeline_rows, format_duration, format_header_outcome, format_outcome,
         format_timeline_ordinal, rendered_text_height, replay_max_scroll, repo_display_name,
-        sanitize_inline_text, sanitize_terminal_output, strip_inline_progress_noise,
-        terminal_replay_end_padding, terminal_replay_max_scroll_x, terminal_replay_scroll,
-        vt100_color_to_ratatui, DetailState, FocusPane, ReplayMode, SessionEvent, SessionSummary,
-        TerminalReplayFrame, TimelineEntry, TranscriptChunk,
+        sanitize_inline_text, sanitize_terminal_output, session_detail_layout_in_area,
+        strip_inline_progress_noise, terminal_replay_end_padding, terminal_replay_max_scroll_x,
+        terminal_replay_scroll, vt100_color_to_ratatui, DetailState, FocusPane, ReplayMode,
+        SessionEvent, SessionSummary, TerminalReplayFrame, TimelineEntry, TranscriptChunk,
     };
     use ratatui::{
         layout::Rect,
@@ -3642,6 +3751,7 @@ mod tests {
             ],
             replay_mode: ReplayMode::Terminal,
             focus: FocusPane::Timeline,
+            replay_fullscreen: false,
             timeline_index: 0,
             text_replay_chunks: Vec::new(),
             replay_timeline_indices: vec![1],
@@ -3675,6 +3785,22 @@ mod tests {
         detail.set_timeline_index(2);
         assert!(detail.replay_visible);
         assert_eq!(detail.replay_step, 0);
+    }
+
+    #[test]
+    fn session_detail_layout_switches_to_replay_fullscreen() {
+        let mut detail = DetailState::new(SessionSummary::default(), Vec::new(), false);
+        let split = session_detail_layout_in_area(&detail, Rect::new(0, 0, 120, 40))
+            .expect("layout should exist");
+        assert!(split.timeline.width > 0);
+        assert!(split.changes.height > 0);
+
+        detail.toggle_replay_fullscreen();
+        let fullscreen = session_detail_layout_in_area(&detail, Rect::new(0, 0, 120, 40))
+            .expect("layout should exist");
+        assert_eq!(fullscreen.timeline.width, 0);
+        assert_eq!(fullscreen.changes.height, 0);
+        assert_eq!(fullscreen.replay, Rect::new(0, split.header.height, 120, 34));
     }
 
     #[test]

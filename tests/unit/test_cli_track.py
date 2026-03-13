@@ -236,6 +236,18 @@ class CliTrackTests(unittest.TestCase):
         launch = run_mock.call_args.args[0]
         self.assertEqual(launch.model, "gemini-2.5-pro")
 
+    def test_track_alias_launch_prefers_gemini_cli_model_flag(self):
+        with patch.object(cli_app, "_run_storage_preflight_if_enabled"), patch.object(
+            track_module,
+            "run_tracked_command",
+            return_value=0,
+        ) as run_mock:
+            result = self.runner.invoke(app, ["track", "gemini", "--model", "gemini-2.5-flash"])
+
+        self.assertEqual(result.exit_code, 0)
+        launch = run_mock.call_args.args[0]
+        self.assertEqual(launch.model, "gemini-2.5-flash")
+
     def test_track_raw_launch_infers_claude_model_from_workspace_settings_local_json(self):
         with tempfile.TemporaryDirectory() as temp_dir:
             workspace_dir = Path(temp_dir)
@@ -256,6 +268,19 @@ class CliTrackTests(unittest.TestCase):
         launch = run_mock.call_args.args[0]
         self.assertEqual(launch.agent, "claude_code")
         self.assertEqual(launch.model, "claude-sonnet-4-5")
+
+    def test_track_raw_launch_prefers_claude_model_flag(self):
+        with patch.object(cli_app, "_run_storage_preflight_if_enabled"), patch.object(
+            track_module,
+            "run_tracked_command",
+            return_value=0,
+        ) as run_mock:
+            result = self.runner.invoke(app, ["track", "--", "claude", "--model", "claude-opus-4-1"])
+
+        self.assertEqual(result.exit_code, 0)
+        launch = run_mock.call_args.args[0]
+        self.assertEqual(launch.agent, "claude_code")
+        self.assertEqual(launch.model, "claude-opus-4-1")
 
     def test_track_alias_launch_infers_opencode_model_from_jsonc_config(self):
         with tempfile.TemporaryDirectory() as temp_dir:
@@ -281,6 +306,19 @@ class CliTrackTests(unittest.TestCase):
         launch = run_mock.call_args.args[0]
         self.assertEqual(launch.agent, "opencode")
         self.assertEqual(launch.model, "claude-sonnet-4.5")
+
+    def test_track_alias_launch_prefers_opencode_model_flag(self):
+        with patch.object(cli_app, "_run_storage_preflight_if_enabled"), patch.object(
+            track_module,
+            "run_tracked_command",
+            return_value=0,
+        ) as run_mock:
+            result = self.runner.invoke(app, ["track", "opencode", "-m", "gpt-4.1"])
+
+        self.assertEqual(result.exit_code, 0)
+        launch = run_mock.call_args.args[0]
+        self.assertEqual(launch.agent, "opencode")
+        self.assertEqual(launch.model, "gpt-4.1")
 
     def test_track_raw_launch_infers_kilo_model_from_project_config(self):
         with tempfile.TemporaryDirectory() as temp_dir:
@@ -345,6 +383,33 @@ class CliTrackTests(unittest.TestCase):
         self.assertEqual(result.exit_code, 0)
         launch = run_mock.call_args.args[0]
         self.assertEqual(launch.model, "llama3.2")
+
+    def test_track_open_app_launch_recognizes_ollama_agent_and_model(self):
+        with patch.object(cli_app, "_run_storage_preflight_if_enabled"), patch.object(
+            track_module,
+            "run_tracked_command",
+            return_value=0,
+        ) as run_mock:
+            result = self.runner.invoke(
+                app,
+                [
+                    "track",
+                    "--",
+                    "open",
+                    "-j",
+                    "-a",
+                    "/Applications/Ollama.app",
+                    "--args",
+                    "run",
+                    "sam860/LFM2:1.2b",
+                ],
+            )
+
+        self.assertEqual(result.exit_code, 0)
+        launch = run_mock.call_args.args[0]
+        self.assertEqual(launch.agent, "ollama")
+        self.assertEqual(launch.agent_name, "Ollama")
+        self.assertEqual(launch.model, "sam860/LFM2:1.2b")
 
     def test_track_raw_launch_infers_openclaw_model_from_openclaw_config(self):
         with tempfile.TemporaryDirectory() as temp_dir:

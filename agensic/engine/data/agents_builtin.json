@@ -171,6 +171,19 @@
       ],
       "provider_hints": ["continue"],
       "status": "verified"
+    },
+    {
+      "agent_id": "ollama",
+      "display_name": "Ollama",
+      "aliases": ["ollama-cli", "ollama-app"],
+      "executables": ["ollama"],
+      "process_tokens": ["ollama"],
+      "window_tokens": ["ollama"],
+      "model_patterns": [
+        {"pattern": "(?:^|/)([\\w.-]+:[\\w.-]+|[\\w.-]+)$", "normalized": "ollama-local"}
+      ],
+      "provider_hints": ["ollama"],
+      "status": "verified"
     }
   ]
 }

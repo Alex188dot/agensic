@@ -400,6 +400,13 @@ def _find_command_descriptor(command: list[str]) -> dict[str, Any] | None:
     executable = os.path.basename(str(command[0] or "").strip()).lower()
     if executable == "gh" and len(command) > 1 and str(command[1] or "").strip().lower() == "copilot":
         return _find_registry_descriptor("copilot")
+    wrapped = _extract_open_app_context(command)
+    if wrapped is not None:
+        if wrapped["agent_id"]:
+            return _find_registry_descriptor(wrapped["agent_id"])
+        wrapped_args = wrapped["wrapped_args"]
+        if wrapped_args:
+            return _find_command_descriptor(wrapped_args)
     return _find_registry_descriptor(executable)
 
 
@@ -415,6 +422,44 @@ def _looks_like_github_copilot_launch(*, command: list[str], agent: str = "") ->
     if clean_agent in {"github_copilot", "github_copilot_cli"} or executable == "copilot":
         return True
     return executable == "gh" and len(command) > 1 and str(command[1] or "").strip().lower() == "copilot"
+
+
+def _extract_open_app_context(command: list[str]) -> dict[str, Any] | None:
+    if not command:
+        return None
+    executable = os.path.basename(str(command[0] or "").strip()).lower()
+    if executable != "open":
+        return None
+
+    app_target = ""
+    wrapped_args: list[str] = []
+    index = 1
+    while index < len(command):
+        token = str(command[index] or "").strip()
+        lowered = token.lower()
+        if lowered == "--args":
+            wrapped_args = [str(item or "").strip() for item in command[index + 1 :] if str(item or "").strip()]
+            break
+        if lowered == "-a" and index + 1 < len(command):
+            app_target = str(command[index + 1] or "").strip()
+            index += 2
+            continue
+        index += 1
+
+    app_name = Path(app_target).name.lower()
+    if app_name.endswith(".app"):
+        app_name = app_name[:-4]
+
+    agent_id = ""
+    if app_name == "ollama":
+        agent_id = "ollama"
+
+    return {
+        "app_target": app_target,
+        "app_name": app_name,
+        "agent_id": agent_id,
+        "wrapped_args": wrapped_args,
+    }
 
 
 def _resolve_codex_home(env: dict[str, str] | None = None) -> Path:
@@ -605,7 +650,17 @@ def _resolve_config_string(value: str, env: dict[str, str] | None = None) -> str
 
 
 def _read_model_value(payload: Any, env: dict[str, str] | None = None) -> str:
-    model = _read_string_path(payload, "model", "name") or _read_string_path(payload, "model")
+    model = (
+        _read_string_path(payload, "model", "name")
+        or _read_string_path(payload, "model")
+        or _read_string_path(payload, "modelName")
+        or _read_string_path(payload, "defaultModel")
+        or _read_string_path(payload, "default_model")
+        or _read_string_path(payload, "cli", "model")
+        or _read_string_path(payload, "cli", "defaultModel")
+        or _read_string_path(payload, "default", "model")
+        or _read_string_path(payload, "defaults", "model")
+    )
     return _resolve_config_string(model, env)
 
 
@@ -663,7 +718,11 @@ def _infer_gemini_model(env: dict[str, str] | None = None, cwd: str | None = Non
         candidates.append(workspace_path)
     candidates.append(_resolve_gemini_system_settings_path(env))
     merged = _merge_model_candidates(candidates, env)
-    env_model = str(source_env.get("GEMINI_MODEL", "") or "").strip()
+    env_model = (
+        str(source_env.get("GEMINI_MODEL", "") or "").strip()
+        or str(source_env.get("GOOGLE_GEMINI_MODEL", "") or "").strip()
+        or str(source_env.get("GEMINI_DEFAULT_MODEL", "") or "").strip()
+    )
     return env_model or merged
 
 
@@ -720,7 +779,8 @@ def _infer_opencode_model(env: dict[str, str] | None = None, cwd: str | None = N
             candidates.append(workspace_path)
     inline_payload = _load_json_text(str(source_env.get("OPENCODE_CONFIG_CONTENT", "") or "").strip())
     inline_model = _read_model_value(inline_payload, env)
-    return inline_model or _merge_model_candidates(candidates, env)
+    env_model = str(source_env.get("OPENCODE_MODEL", "") or "").strip()
+    return env_model or inline_model or _merge_model_candidates(candidates, env)
 
 
 def _infer_kilo_code_model(env: dict[str, str] | None = None, cwd: str | None = None) -> str:
@@ -825,6 +885,43 @@ def _infer_openclaw_model(env: dict[str, str] | None = None) -> str:
 def _infer_inline_track_model(command: list[str]) -> str:
     if not command:
         return ""
+    wrapped = _extract_open_app_context(command)
+    if wrapped is not None:
+        if wrapped["agent_id"] == "ollama":
+            wrapped_args = wrapped["wrapped_args"]
+            if wrapped_args:
+                if len(wrapped_args) >= 2 and wrapped_args[0].lower() in {
+                    "run",
+                    "chat",
+                    "show",
+                    "pull",
+                    "push",
+                    "create",
+                    "cp",
+                    "rm",
+                }:
+                    return wrapped_args[1]
+            return ""
+
+    executable = os.path.basename(str(command[0] or "").strip()).lower()
+    explicit_model = ""
+    if executable in {
+        "codex",
+        "gemini",
+        "claude",
+        "opencode",
+        "kilo",
+        "kilocode",
+        "ollama",
+        "aider",
+        "continue",
+        "openclaw",
+        "copilot",
+    } or (executable == "gh" and len(command) > 1 and str(command[1] or "").strip().lower() == "copilot"):
+        explicit_model = _read_cli_option_value(command, "--model", "-m")
+    if explicit_model:
+        return explicit_model
+
     command_text = shlex.join(command)
     registry = get_agent_registry(force_reload=False)
     model_meta = registry.extract_model_provider_from_command(command_text)
@@ -832,7 +929,6 @@ def _infer_inline_track_model(command: list[str]) -> str:
     if inline_model:
         return inline_model
 
-    executable = os.path.basename(str(command[0] or "").strip()).lower()
     if executable == "ollama" and len(command) >= 3:
         subcommand = str(command[1] or "").strip().lower()
         if subcommand in {"run", "chat", "show", "pull", "push", "create", "cp", "rm"}:

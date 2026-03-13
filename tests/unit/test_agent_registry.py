@@ -18,6 +18,7 @@ class AgentRegistryTests(unittest.TestCase):
         self.assertIn("kiro", agents)
         self.assertIn("gemini_cli", agents)
         self.assertIn("antigravity", agents)
+        self.assertIn("ollama", agents)
 
     def test_provider_model_inference(self):
         registry = AgentRegistry()
