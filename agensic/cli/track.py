@@ -3,6 +3,7 @@ import errno
 import fcntl
 import json
 import os
+import re
 import select
 import shlex
 import signal
@@ -393,10 +394,27 @@ def _find_registry_descriptor(token: str) -> dict[str, Any] | None:
     return None
 
 
+def _find_command_descriptor(command: list[str]) -> dict[str, Any] | None:
+    if not command:
+        return None
+    executable = os.path.basename(str(command[0] or "").strip()).lower()
+    if executable == "gh" and len(command) > 1 and str(command[1] or "").strip().lower() == "copilot":
+        return _find_registry_descriptor("copilot")
+    return _find_registry_descriptor(executable)
+
+
 def _looks_like_codex_launch(*, command: list[str], agent: str = "") -> bool:
     clean_agent = str(agent or "").strip().lower()
     executable = os.path.basename(str((command or [""])[0] or "").strip()).lower()
     return clean_agent == "codex" or executable == "codex"
+
+
+def _looks_like_github_copilot_launch(*, command: list[str], agent: str = "") -> bool:
+    clean_agent = str(agent or "").strip().lower()
+    executable = os.path.basename(str((command or [""])[0] or "").strip()).lower()
+    if clean_agent in {"github_copilot", "github_copilot_cli"} or executable == "copilot":
+        return True
+    return executable == "gh" and len(command) > 1 and str(command[1] or "").strip().lower() == "copilot"
 
 
 def _resolve_codex_home(env: dict[str, str] | None = None) -> Path:
@@ -415,9 +433,105 @@ def _resolve_home(env: dict[str, str] | None = None) -> Path:
     return Path.home()
 
 
+def _resolve_config_home(env: dict[str, str] | None = None) -> Path:
+    source_env = env or os.environ
+    raw = str(source_env.get("XDG_CONFIG_HOME", "") or "").strip()
+    if raw:
+        return Path(raw).expanduser()
+    return _resolve_home(env) / ".config"
+
+
+def _load_json_text(raw_text: str) -> Any:
+    text = str(raw_text or "")
+    if not text.strip():
+        return None
+    try:
+        return json.loads(text)
+    except Exception:
+        pass
+
+    def _strip_json_comments(source: str) -> str:
+        out: list[str] = []
+        in_string = False
+        escape = False
+        idx = 0
+        while idx < len(source):
+            ch = source[idx]
+            if in_string:
+                out.append(ch)
+                if escape:
+                    escape = False
+                elif ch == "\\":
+                    escape = True
+                elif ch == '"':
+                    in_string = False
+                idx += 1
+                continue
+            if ch == '"':
+                in_string = True
+                out.append(ch)
+                idx += 1
+                continue
+            if ch == "/" and idx + 1 < len(source):
+                nxt = source[idx + 1]
+                if nxt == "/":
+                    idx += 2
+                    while idx < len(source) and source[idx] not in "\r\n":
+                        idx += 1
+                    continue
+                if nxt == "*":
+                    idx += 2
+                    while idx + 1 < len(source) and not (source[idx] == "*" and source[idx + 1] == "/"):
+                        idx += 1
+                    idx += 2
+                    continue
+            out.append(ch)
+            idx += 1
+        return "".join(out)
+
+    def _strip_trailing_commas(source: str) -> str:
+        out: list[str] = []
+        in_string = False
+        escape = False
+        idx = 0
+        while idx < len(source):
+            ch = source[idx]
+            if in_string:
+                out.append(ch)
+                if escape:
+                    escape = False
+                elif ch == "\\":
+                    escape = True
+                elif ch == '"':
+                    in_string = False
+                idx += 1
+                continue
+            if ch == '"':
+                in_string = True
+                out.append(ch)
+                idx += 1
+                continue
+            if ch == ",":
+                lookahead = idx + 1
+                while lookahead < len(source) and source[lookahead].isspace():
+                    lookahead += 1
+                if lookahead < len(source) and source[lookahead] in "}]":
+                    idx += 1
+                    continue
+            out.append(ch)
+            idx += 1
+        return "".join(out)
+
+    cleaned = _strip_trailing_commas(_strip_json_comments(text))
+    try:
+        return json.loads(cleaned)
+    except Exception:
+        return None
+
+
 def _load_json_file(path: Path) -> Any:
     try:
-        return json.loads(path.read_text(encoding="utf-8"))
+        return _load_json_text(path.read_text(encoding="utf-8"))
     except Exception:
         return None
 
@@ -456,6 +570,78 @@ def _find_upward(start_dir: Path, *parts: str) -> Path | None:
     return None
 
 
+def _read_cli_option_value(command: list[str], *flags: str) -> str:
+    if not command:
+        return ""
+    normalized = {str(flag or "").strip().lower() for flag in flags if str(flag or "").strip()}
+    for index, token in enumerate(command):
+        current = str(token or "").strip()
+        lowered = current.lower()
+        if lowered in normalized:
+            if index + 1 < len(command):
+                return str(command[index + 1] or "").strip()
+            return ""
+        for flag in normalized:
+            prefix = f"{flag}="
+            if lowered.startswith(prefix):
+                return current[len(prefix) :].strip()
+    return ""
+
+
+def _resolve_config_string(value: str, env: dict[str, str] | None = None) -> str:
+    clean = str(value or "").strip()
+    if not clean:
+        return ""
+    source_env = env or os.environ
+    for pattern in (
+        r"^\{env:([A-Za-z_][A-Za-z0-9_]*)\}$",
+        r"^\$([A-Za-z_][A-Za-z0-9_]*)$",
+        r"^\$\{([A-Za-z_][A-Za-z0-9_]*)\}$",
+    ):
+        match = re.match(pattern, clean)
+        if match is not None:
+            return str(source_env.get(match.group(1), "") or "").strip()
+    return clean
+
+
+def _read_model_value(payload: Any, env: dict[str, str] | None = None) -> str:
+    model = _read_string_path(payload, "model", "name") or _read_string_path(payload, "model")
+    return _resolve_config_string(model, env)
+
+
+def _load_model_from_path(path: Path, env: dict[str, str] | None = None) -> str:
+    if not path.is_file():
+        return ""
+    return _read_model_value(_load_json_file(path), env)
+
+
+def _merge_model_candidates(paths: list[Path], env: dict[str, str] | None = None) -> str:
+    resolved = ""
+    seen: set[str] = set()
+    for path in paths:
+        key = str(path.expanduser())
+        if key in seen:
+            continue
+        seen.add(key)
+        model = _load_model_from_path(path, env)
+        if model:
+            resolved = model
+    return resolved
+
+
+def _resolve_gemini_system_settings_path(env: dict[str, str] | None = None) -> Path:
+    source_env = env or os.environ
+    override = str(source_env.get("GEMINI_CLI_SYSTEM_SETTINGS_PATH", "") or "").strip()
+    if override:
+        return Path(override).expanduser()
+    if sys.platform == "darwin":
+        return Path("/Library/Application Support/GeminiCli/settings.json")
+    if sys.platform.startswith("win"):
+        program_data = str(source_env.get("PROGRAMDATA", r"C:\ProgramData") or r"C:\ProgramData").strip()
+        return Path(program_data) / "gemini-cli" / "settings.json"
+    return Path("/etc/gemini-cli/settings.json")
+
+
 def _infer_codex_model(env: dict[str, str] | None = None) -> str:
     config_path = _resolve_codex_home(env) / "config.toml"
     if not config_path.is_file():
@@ -469,46 +655,110 @@ def _infer_codex_model(env: dict[str, str] | None = None) -> str:
 
 
 def _infer_gemini_model(env: dict[str, str] | None = None, cwd: str | None = None) -> str:
+    source_env = env or os.environ
     search_root = Path(cwd or os.getcwd())
-    candidates: list[Path] = []
+    candidates: list[Path] = [_resolve_home(env) / ".gemini" / "settings.json"]
     workspace_path = _find_upward(search_root, ".gemini", "settings.json")
     if workspace_path is not None:
         candidates.append(workspace_path)
-    candidates.append(_resolve_home(env) / ".gemini" / "settings.json")
+    candidates.append(_resolve_gemini_system_settings_path(env))
+    merged = _merge_model_candidates(candidates, env)
+    env_model = str(source_env.get("GEMINI_MODEL", "") or "").strip()
+    return env_model or merged
 
-    for path in candidates:
-        if not path.is_file():
-            continue
-        payload = _load_json_file(path)
-        model = _read_string_path(payload, "model", "name") or _read_string_path(payload, "model")
-        if model:
-            return model
-    return ""
+
+def _resolve_claude_managed_settings_path() -> Path:
+    if sys.platform == "darwin":
+        return Path("/Library/Application Support/ClaudeCode/managed-settings.json")
+    if sys.platform.startswith("win"):
+        return Path(r"C:\Program Files\ClaudeCode\managed-settings.json")
+    return Path("/etc/claude-code/managed-settings.json")
 
 
 def _infer_claude_code_model(env: dict[str, str] | None = None, cwd: str | None = None) -> str:
+    source_env = env or os.environ
     search_root = Path(cwd or os.getcwd())
-    candidates: list[Path] = []
-    for filename in ("settings.local.json", "settings.json"):
-        workspace_path = _find_upward(search_root, ".claude", filename)
+    candidates: list[Path] = [_resolve_home(env) / ".claude" / "settings.json"]
+    shared_project = _find_upward(search_root, ".claude", "settings.json")
+    if shared_project is not None:
+        candidates.append(shared_project)
+    local_project = _find_upward(search_root, ".claude", "settings.local.json")
+    if local_project is not None:
+        candidates.append(local_project)
+
+    merged = _merge_model_candidates(candidates, env)
+    env_model = (
+        str(source_env.get("ANTHROPIC_MODEL", "") or "").strip()
+        or str(source_env.get("CLAUDE_CODE_MODEL", "") or "").strip()
+    )
+    managed_model = _load_model_from_path(_resolve_claude_managed_settings_path(), env)
+    return managed_model or env_model or merged
+
+
+def _infer_opencode_model(env: dict[str, str] | None = None, cwd: str | None = None) -> str:
+    source_env = env or os.environ
+    search_root = Path(cwd or os.getcwd())
+    custom_dir = str(source_env.get("OPENCODE_CONFIG_DIR", "") or "").strip()
+    candidates: list[Path] = [
+        _resolve_config_home(env) / "opencode" / "opencode.json",
+        _resolve_config_home(env) / "opencode" / "opencode.jsonc",
+    ]
+    custom_path = str(source_env.get("OPENCODE_CONFIG", "") or "").strip()
+    if custom_path:
+        candidates.append(Path(custom_path).expanduser())
+    if custom_dir:
+        custom_root = Path(custom_dir).expanduser()
+        candidates.extend(
+            [
+                custom_root / "opencode.json",
+                custom_root / "opencode.jsonc",
+            ]
+        )
+    for filename in ("opencode.json", "opencode.jsonc"):
+        workspace_path = _find_upward(search_root, filename)
         if workspace_path is not None:
             candidates.append(workspace_path)
-    home_dir = _resolve_home(env) / ".claude"
-    candidates.extend([home_dir / "settings.local.json", home_dir / "settings.json"])
+    inline_payload = _load_json_text(str(source_env.get("OPENCODE_CONFIG_CONTENT", "") or "").strip())
+    inline_model = _read_model_value(inline_payload, env)
+    return inline_model or _merge_model_candidates(candidates, env)
 
-    for path in candidates:
-        if not path.is_file():
-            continue
-        payload = _load_json_file(path)
-        model = (
-            _read_string_path(payload, "model")
-            or _read_string_path(payload, "model", "name")
-            or _read_string_path(payload, "env", "ANTHROPIC_MODEL")
-            or _read_string_path(payload, "env", "CLAUDE_CODE_MODEL")
-        )
-        if model:
-            return model
-    return ""
+
+def _infer_kilo_code_model(env: dict[str, str] | None = None, cwd: str | None = None) -> str:
+    search_root = Path(cwd or os.getcwd())
+    candidates: list[Path] = [
+        _resolve_config_home(env) / "kilo" / "config.json",
+        _resolve_config_home(env) / "kilo" / "opencode.json",
+        _resolve_config_home(env) / "kilo" / "opencode.jsonc",
+        _resolve_config_home(env) / "kilocode" / "kilocode.json",
+        _resolve_home(env) / ".kilocode" / "config.json",
+    ]
+    for filename in ("opencode.json", "opencode.jsonc", "kilocode.json"):
+        workspace_path = _find_upward(search_root, filename)
+        if workspace_path is not None:
+            candidates.append(workspace_path)
+    for filename in ("opencode.json", "opencode.jsonc", "kilocode.json"):
+        workspace_path = _find_upward(search_root, ".opencode", filename)
+        if workspace_path is not None:
+            candidates.append(workspace_path)
+    return _merge_model_candidates(candidates, env)
+
+
+def _resolve_github_copilot_home(command: list[str], env: dict[str, str] | None = None) -> Path:
+    source_env = env or os.environ
+    config_dir = _read_cli_option_value(command, "--config-dir")
+    if config_dir:
+        return Path(config_dir).expanduser()
+    env_dir = str(source_env.get("COPILOT_HOME", "") or "").strip()
+    if env_dir:
+        return Path(env_dir).expanduser()
+    return _resolve_home(env) / ".copilot"
+
+
+def _infer_github_copilot_model(command: list[str], env: dict[str, str] | None = None) -> str:
+    source_env = env or os.environ
+    env_model = str(source_env.get("COPILOT_MODEL", "") or "").strip()
+    config_model = _load_model_from_path(_resolve_github_copilot_home(command, env) / "config.json", env)
+    return env_model or config_model
 
 
 def _infer_ollama_model(env: dict[str, str] | None = None) -> str:
@@ -603,6 +853,12 @@ def _infer_track_model(*, command: list[str], agent: str, env: dict[str, str] | 
         return _infer_gemini_model(env, cwd=os.getcwd())
     if clean_agent in {"claude", "claude_code"} or executable == "claude":
         return _infer_claude_code_model(env, cwd=os.getcwd())
+    if clean_agent == "opencode" or executable == "opencode":
+        return _infer_opencode_model(env, cwd=os.getcwd())
+    if clean_agent == "kilocode" or executable in {"kilo", "kilocode"}:
+        return _infer_kilo_code_model(env, cwd=os.getcwd())
+    if _looks_like_github_copilot_launch(command=command, agent=agent):
+        return _infer_github_copilot_model(command, env)
     if clean_agent == "openclaw" or executable == "openclaw":
         return _infer_openclaw_model(env)
     if clean_agent == "ollama" or executable == "ollama":
@@ -641,7 +897,7 @@ def prepare_track_launch(
         command = args[1:]
         if not command:
             raise ValueError("No command provided after '--'.")
-        descriptor = _find_registry_descriptor(os.path.basename(str(command[0] or "").strip()))
+        descriptor = _find_command_descriptor(command)
         inferred_agent = str((descriptor or {}).get("agent_id", "") or "").strip().lower()
         inferred_name = str((descriptor or {}).get("display_name", "") or "").strip()
         resolved_agent = clean_agent_override or inferred_agent or "unknown"
@@ -671,7 +927,7 @@ def prepare_track_launch(
             root_command=shlex.join(command),
         )
 
-    descriptor = _find_registry_descriptor(os.path.basename(str(args[0] or "").strip()))
+    descriptor = _find_command_descriptor(args)
     inferred_agent = str((descriptor or {}).get("agent_id", "") or "").strip().lower()
     inferred_name = str((descriptor or {}).get("display_name", "") or "").strip()
     resolved_agent = clean_agent_override or inferred_agent or "unknown"

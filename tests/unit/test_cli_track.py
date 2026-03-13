@@ -257,6 +257,83 @@ class CliTrackTests(unittest.TestCase):
         self.assertEqual(launch.agent, "claude_code")
         self.assertEqual(launch.model, "claude-sonnet-4-5")
 
+    def test_track_alias_launch_infers_opencode_model_from_jsonc_config(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            home_dir = Path(temp_dir)
+            config_dir = home_dir / ".config" / "opencode"
+            config_dir.mkdir(parents=True)
+            (config_dir / "opencode.jsonc").write_text(
+                '{\n  // preferred model\n  "model": "claude-sonnet-4.5",\n}\n',
+                encoding="utf-8",
+            )
+            with patch.object(cli_app, "_run_storage_preflight_if_enabled"), patch.object(
+                track_module,
+                "run_tracked_command",
+                return_value=0,
+            ) as run_mock, patch.dict(
+                os.environ,
+                {"HOME": str(home_dir), "XDG_CONFIG_HOME": str(home_dir / ".config")},
+                clear=False,
+            ):
+                result = self.runner.invoke(app, ["track", "opencode"])
+
+        self.assertEqual(result.exit_code, 0)
+        launch = run_mock.call_args.args[0]
+        self.assertEqual(launch.agent, "opencode")
+        self.assertEqual(launch.model, "claude-sonnet-4.5")
+
+    def test_track_raw_launch_infers_kilo_model_from_project_config(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            workspace_dir = Path(temp_dir)
+            (workspace_dir / "kilocode.json").write_text(
+                json.dumps({"model": "gemini-2.5-pro"}),
+                encoding="utf-8",
+            )
+            with patch.object(cli_app, "_run_storage_preflight_if_enabled"), patch.object(
+                track_module,
+                "run_tracked_command",
+                return_value=0,
+            ) as run_mock, patch("os.getcwd", return_value=str(workspace_dir)):
+                result = self.runner.invoke(app, ["track", "--", "kilo"])
+
+        self.assertEqual(result.exit_code, 0)
+        launch = run_mock.call_args.args[0]
+        self.assertEqual(launch.agent, "kilocode")
+        self.assertEqual(launch.model, "gemini-2.5-pro")
+
+    def test_track_raw_launch_infers_github_copilot_model_from_config_dir(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            copilot_home = Path(temp_dir) / ".copilot"
+            copilot_home.mkdir()
+            (copilot_home / "config.json").write_text(
+                json.dumps({"model": "gpt-5"}),
+                encoding="utf-8",
+            )
+            with patch.object(cli_app, "_run_storage_preflight_if_enabled"), patch.object(
+                track_module,
+                "run_tracked_command",
+                return_value=0,
+            ) as run_mock, patch.dict(os.environ, {"HOME": str(Path(temp_dir))}, clear=False):
+                result = self.runner.invoke(app, ["track", "--", "gh", "copilot"])
+
+        self.assertEqual(result.exit_code, 0)
+        launch = run_mock.call_args.args[0]
+        self.assertEqual(launch.agent, "github_copilot")
+        self.assertEqual(launch.model, "gpt-5")
+
+    def test_track_raw_launch_does_not_treat_generic_gh_as_copilot(self):
+        with patch.object(cli_app, "_run_storage_preflight_if_enabled"), patch.object(
+            track_module,
+            "run_tracked_command",
+            return_value=0,
+        ) as run_mock:
+            result = self.runner.invoke(app, ["track", "--", "gh", "repo", "list"])
+
+        self.assertEqual(result.exit_code, 0)
+        launch = run_mock.call_args.args[0]
+        self.assertEqual(launch.agent, "unknown")
+        self.assertEqual(launch.model, "unknown-model")
+
     def test_track_raw_launch_infers_ollama_model_from_run_subcommand(self):
         with patch.object(cli_app, "_run_storage_preflight_if_enabled"), patch.object(
             track_module,

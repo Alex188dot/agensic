@@ -1,5 +1,5 @@
 {
-  "version": "builtin-2026-02-28",
+  "version": "builtin-2026-03-13",
   "agents": [
     {
       "agent_id": "cursor",
@@ -53,6 +53,32 @@
         {"pattern": "(?:^|/)(gpt-[\\w.-]+|claude[\\w.-]+|gemini[\\w.-]+)$", "normalized": "llm-generic"}
       ],
       "provider_hints": ["opencode"],
+      "status": "verified"
+    },
+    {
+      "agent_id": "kilocode",
+      "display_name": "Kilo Code",
+      "aliases": ["kilo-code", "kilo"],
+      "executables": ["kilo", "kilocode"],
+      "process_tokens": ["kilo code", "kilocode"],
+      "window_tokens": ["kilo", "kilocode"],
+      "model_patterns": [
+        {"pattern": "(?:^|/)(gpt-[\\w.-]+|claude[\\w.-]+|gemini[\\w.-]+)$", "normalized": "llm-generic"}
+      ],
+      "provider_hints": ["kilo", "kilocode"],
+      "status": "community"
+    },
+    {
+      "agent_id": "github_copilot",
+      "display_name": "GitHub Copilot CLI",
+      "aliases": ["github-copilot", "copilot-cli", "github-cli"],
+      "executables": ["copilot"],
+      "process_tokens": ["github copilot", "copilot cli", "copilot"],
+      "window_tokens": ["copilot"],
+      "model_patterns": [
+        {"pattern": "(?:^|/)(gpt-[\\w.-]+|claude[\\w.-]+|gemini[\\w.-]+)$", "normalized": "llm-generic"}
+      ],
+      "provider_hints": ["github", "copilot"],
       "status": "verified"
     },
     {
