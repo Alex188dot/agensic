@@ -4,7 +4,7 @@ use chrono::TimeZone;
 use clap::Parser;
 use crossterm::event::{
     self, DisableMouseCapture, EnableMouseCapture, Event, KeyCode, KeyEvent, KeyEventKind,
-    MouseButton, MouseEvent, MouseEventKind,
+    KeyModifiers, MouseButton, MouseEvent, MouseEventKind,
 };
 use crossterm::execute;
 use crossterm::terminal::{
@@ -20,10 +20,13 @@ use ratatui::Terminal;
 use reqwest::blocking::Client;
 use serde::Deserialize;
 use serde_json::Value;
+use std::collections::HashMap;
 use std::cmp::{max, min};
 use std::fs;
 use std::io::{self, Write};
 use std::path::Path;
+use std::sync::mpsc::{self, Receiver, TryRecvError};
+use std::thread;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
 use vt100::Parser as VtParser;
@@ -37,6 +40,7 @@ const SESSION_COPY_BUTTON: &str = "[ Copy ]";
 const SESSION_COPIED_BUTTON: &str = "[   ✓   ]";
 const REPLAY_FULLSCREEN_BUTTON: &str = "[fullscreen]";
 const REPLAY_SPLIT_BUTTON: &str = "[split]";
+const REPLAY_LOADING_FRAMES: [&str; 4] = ["[-]", "[\\]", "[|]", "[/]"];
 const TIMELINE_ORDINAL_WIDTH: u16 = 6;
 const TIMELINE_EVENT_TYPE_WIDTH: usize = 18;
 const TIMELINE_COLUMN_SPACING: u16 = 1;
@@ -174,7 +178,7 @@ struct TranscriptChunk {
     cols: Option<u16>,
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 enum TerminalReplayCacheKey {
     RecordedGeometry,
     Viewport(u16, u16),
@@ -192,8 +196,12 @@ struct DetailState {
     replay_timeline_indices: Vec<usize>,
     transcript_chunks: Vec<TranscriptChunk>,
     terminal_replay_frames: Vec<TerminalReplayFrame>,
+    terminal_replay_cache: HashMap<TerminalReplayCacheKey, Vec<TerminalReplayFrame>>,
     terminal_cache_key: Option<TerminalReplayCacheKey>,
+    pending_replay_cache_key: Option<TerminalReplayCacheKey>,
+    replay_cache_rx: Option<Receiver<(TerminalReplayCacheKey, Vec<TerminalReplayFrame>)>>,
     replay_notice: Option<String>,
+    replay_loading: bool,
     replay_step: usize,
     replay_text: String,
     replay_visible: bool,
@@ -248,8 +256,12 @@ impl DetailState {
             replay_timeline_indices,
             transcript_chunks,
             terminal_replay_frames: Vec::new(),
+            terminal_replay_cache: HashMap::new(),
             terminal_cache_key: None,
+            pending_replay_cache_key: None,
+            replay_cache_rx: None,
             replay_notice,
+            replay_loading: false,
             replay_step: 0,
             replay_text: String::new(),
             replay_visible: false,
@@ -277,10 +289,8 @@ impl DetailState {
         }
     }
 
-    fn ensure_terminal_replay_cache(&mut self) {
-        let Some(layout) = session_detail_layout(self) else {
-            return;
-        };
+    fn current_terminal_cache_request(&self) -> Option<(TerminalReplayCacheKey, u16, u16)> {
+        let layout = session_detail_layout(self)?;
         let viewport_rows = layout.replay.height.saturating_sub(2).max(1);
         let viewport_cols = layout.replay.width.saturating_sub(2).max(1);
         let cache_key = if transcript_has_recorded_geometry(&self.transcript_chunks) {
@@ -288,17 +298,81 @@ impl DetailState {
         } else {
             TerminalReplayCacheKey::Viewport(viewport_rows, viewport_cols)
         };
-        if self.terminal_cache_key == Some(cache_key) && !self.terminal_replay_frames.is_empty() {
-            return;
-        }
         let (rows, cols) = first_recorded_terminal_size(&self.transcript_chunks)
             .unwrap_or((viewport_rows, viewport_cols));
-        self.terminal_replay_frames =
-            build_terminal_replay_frames(&self.transcript_chunks, rows, cols);
-        self.terminal_cache_key = Some(cache_key);
-        if self.replay_mode == ReplayMode::Terminal && self.terminal_replay_frames.is_empty() {
-            self.replay_mode = ReplayMode::Text;
+        Some((cache_key, rows, cols))
+    }
+
+    fn spawn_terminal_replay_cache_build(
+        &mut self,
+        cache_key: TerminalReplayCacheKey,
+        rows: u16,
+        cols: u16,
+    ) {
+        let transcript_chunks = self.transcript_chunks.clone();
+        let (tx, rx) = mpsc::channel();
+        thread::spawn(move || {
+            let frames = build_terminal_replay_frames(&transcript_chunks, rows, cols);
+            let _ = tx.send((cache_key, frames));
+        });
+        self.pending_replay_cache_key = Some(cache_key);
+        self.replay_cache_rx = Some(rx);
+        self.replay_loading = true;
+    }
+
+    fn poll_terminal_replay_cache(&mut self) {
+        let Some(rx) = self.replay_cache_rx.as_ref() else {
+            return;
+        };
+        match rx.try_recv() {
+            Ok((cache_key, frames)) => {
+                self.terminal_replay_cache.insert(cache_key, frames);
+                self.pending_replay_cache_key = None;
+                self.replay_cache_rx = None;
+                self.replay_loading = false;
+            }
+            Err(TryRecvError::Empty) => {}
+            Err(TryRecvError::Disconnected) => {
+                self.pending_replay_cache_key = None;
+                self.replay_cache_rx = None;
+                self.replay_loading = false;
+            }
         }
+    }
+
+    fn ensure_terminal_replay_cache(&mut self) {
+        self.poll_terminal_replay_cache();
+        let Some((cache_key, rows, cols)) = self.current_terminal_cache_request() else {
+            return;
+        };
+        if let Some(cached) = self.terminal_replay_cache.get(&cache_key) {
+            self.terminal_replay_frames = cached.clone();
+            self.terminal_cache_key = Some(cache_key);
+            self.replay_loading = false;
+            if self.replay_mode == ReplayMode::Terminal && self.terminal_replay_frames.is_empty() {
+                self.replay_mode = ReplayMode::Text;
+            }
+            return;
+        }
+        if self.pending_replay_cache_key != Some(cache_key) {
+            self.spawn_terminal_replay_cache_build(cache_key, rows, cols);
+        }
+        self.terminal_cache_key = None;
+    }
+
+    fn replay_loading_for_active_view(&self) -> bool {
+        self.replay_mode == ReplayMode::Terminal
+            && self.pending_replay_cache_key.is_some()
+            && self.terminal_cache_key != self.pending_replay_cache_key
+    }
+
+    fn clear_terminal_replay_caches(&mut self) {
+        self.terminal_replay_frames.clear();
+        self.terminal_replay_cache.clear();
+        self.terminal_cache_key = None;
+        self.pending_replay_cache_key = None;
+        self.replay_cache_rx = None;
+        self.replay_loading = false;
     }
 
     fn set_replay_mode(&mut self, mode: ReplayMode) {
@@ -495,7 +569,7 @@ impl DetailState {
     fn toggle_replay_fullscreen(&mut self) {
         self.replay_fullscreen = !self.replay_fullscreen;
         self.focus = FocusPane::Replay;
-        self.terminal_cache_key = None;
+        self.ensure_terminal_replay_cache();
     }
 
     fn scroll_replay_horizontal(&mut self, delta: i32) {
@@ -817,10 +891,18 @@ fn run(client: Client, args: SessionsArgs) -> Result<(), String> {
 }
 
 fn handle_key(app: &mut App, key: KeyEvent) -> Result<bool, String> {
+    if key.modifiers.contains(KeyModifiers::CONTROL) && matches!(key.code, KeyCode::Char('c')) {
+        if let Some(detail) = app.detail.as_mut() {
+            detail.clear_terminal_replay_caches();
+        }
+        app.detail = None;
+        return Ok(true);
+    }
     if app.detail.is_some() {
         let mut flash_message: Option<String> = None;
         let mut copy_target: Option<CopyFeedbackTarget> = None;
         let mut export_timeline_csv = false;
+        let mut close_detail = false;
         {
             let detail = app.detail.as_mut().expect("detail checked above");
             if app.event_modal_open {
@@ -866,11 +948,11 @@ fn handle_key(app: &mut App, key: KeyEvent) -> Result<bool, String> {
                 match key.code {
                     KeyCode::Esc => {
                         if app.deep_link {
+                            detail.clear_terminal_replay_caches();
                             return Ok(true);
                         }
-                        app.detail = None;
-                        app.status = "Back to sessions".to_string();
-                        app.needs_terminal_clear = true;
+                        detail.clear_terminal_replay_caches();
+                        close_detail = true;
                     }
                     KeyCode::Char('s') => detail.cycle_focus(),
                     KeyCode::Char('t') => {
@@ -948,6 +1030,11 @@ fn handle_key(app: &mut App, key: KeyEvent) -> Result<bool, String> {
                 }
             }
         }
+        if close_detail {
+            app.detail = None;
+            app.status = "Back to sessions".to_string();
+            app.needs_terminal_clear = true;
+        }
         if export_timeline_csv {
             match app.export_timeline_csv() {
                 Ok(out) => flash_message = Some(format!("Exported timeline CSV to {}", out)),
@@ -964,6 +1051,7 @@ fn handle_key(app: &mut App, key: KeyEvent) -> Result<bool, String> {
     }
 
     match key.code {
+        KeyCode::Char('c') if key.modifiers.contains(KeyModifiers::CONTROL) => return Ok(true),
         KeyCode::Esc => return Ok(true),
         KeyCode::Up => {
             if app.selected > 0 {
@@ -1113,14 +1201,21 @@ fn draw_detail(frame: &mut ratatui::Frame<'_>, app: &App, detail: &DetailState) 
         frame.render_widget(build_changes(detail), layout.changes);
     }
     frame.render_widget(build_replay(app, detail, layout.replay), layout.replay);
+    let mut footer_lines = vec![
+        Line::from(Span::styled(
+            "Space: Play/Pause   ↑↓: Move  ←/→: Horizontal scroll  Tab/Shift+Tab: Jump 500  c: Copy  E: Export(csv)  f: Toggle fullscreen  s: Switch pane  t: Toggle replay mode  Enter: Details  Esc: Back",
+            Style::default().fg(Color::Yellow),
+        )),
+        Line::from(app.status_text().to_string()),
+    ];
+    if detail.replay_loading {
+        footer_lines.push(Line::from(Span::styled(
+            format!("Loading replay cache {} ", loading_spinner_frame()),
+            Style::default().fg(Color::LightCyan),
+        )));
+    }
     frame.render_widget(
-        Paragraph::new(vec![
-            Line::from(Span::styled(
-                "Space: Play/Pause   ↑↓: Move  ←/→: Replay horizontal scroll when needed  Tab/Shift+Tab: Jump 500  c: Copy  E: Export(csv)  f: Toggle replay fullscreen  s: Switch pane  t: Toggle replay mode  Enter: Details  Esc: Back",
-                Style::default().fg(Color::Yellow),
-            )),
-            Line::from(app.status_text().to_string()),
-        ])
+        Paragraph::new(footer_lines)
         .style(Style::default().fg(Color::White)),
         layout.footer,
     );
@@ -1139,6 +1234,14 @@ fn draw_detail(frame: &mut ratatui::Frame<'_>, app: &App, detail: &DetailState) 
             draw_event_modal(frame, app, event, entry, detail, app.event_modal_scroll);
         }
     }
+}
+
+fn loading_spinner_frame() -> &'static str {
+    let millis = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|duration| duration.as_millis() as usize)
+        .unwrap_or(0);
+    REPLAY_LOADING_FRAMES[(millis / 120) % REPLAY_LOADING_FRAMES.len()]
 }
 
 fn build_header(app: &App, detail: &DetailState) -> Paragraph<'static> {
@@ -1485,18 +1588,21 @@ fn build_replay(app: &App, detail: &DetailState, area: Rect) -> Paragraph<'stati
             "Replay ({}{}) [{}]{} ",
             mode_label, frame_size_label, status_label, horizontal_scroll_hint
         )),
+        Span::raw("  "),
         Span::styled(
             toggle_label,
-            copy_button_style(
-                app.hovered_replay_toggle,
-                false,
-                detail.focus == FocusPane::Replay,
-            ),
+            replay_toggle_style(app.hovered_replay_toggle),
         ),
+        Span::raw("  "),
     ]);
     let (text, scroll_y, scroll_x) = match detail.replay_mode {
         ReplayMode::Terminal => {
-            let lines = if detail.replay_visible {
+            let lines = if detail.replay_loading_for_active_view() {
+                vec![Line::from(Span::styled(
+                    "Loading replay cache...",
+                    Style::default().fg(Color::LightCyan),
+                ))]
+            } else if detail.replay_visible {
                 detail
                     .terminal_replay_frames
                     .get(detail.replay_step)
@@ -1983,6 +2089,10 @@ fn detail_header_height(detail: &DetailState) -> u16 {
         line_count += 1;
     }
     line_count + 2
+}
+
+fn detail_footer_height(detail: &DetailState) -> u16 {
+    if detail.replay_loading { 3 } else { 2 }
 }
 
 fn changes_panel_constraints(detail: &DetailState) -> [Constraint; 2] {
@@ -2541,6 +2651,16 @@ fn pane_block_title(title: Line<'static>, focused: bool) -> Block<'static> {
         .borders(Borders::ALL)
         .border_style(border_style)
         .title(title)
+}
+
+fn replay_toggle_style(hovered: bool) -> Style {
+    if hovered {
+        Style::default()
+            .fg(Color::LightCyan)
+            .add_modifier(Modifier::UNDERLINED | Modifier::BOLD)
+    } else {
+        Style::default().fg(Color::Cyan).add_modifier(Modifier::BOLD)
+    }
 }
 
 pub(crate) fn copy_button_style(hovered: bool, copied: bool, selected: bool) -> Style {
@@ -3136,7 +3256,7 @@ fn session_header_copy_hit(mouse: MouseEvent, detail: &DetailState) -> bool {
         .constraints([
             Constraint::Length(header_height),
             Constraint::Min(12),
-            Constraint::Length(2),
+            Constraint::Length(detail_footer_height(detail)),
         ])
         .split(area);
     let header = chunks[0];
@@ -3242,7 +3362,7 @@ fn session_detail_layout_in_area(detail: &DetailState, area: Rect) -> Option<Ses
         .constraints([
             Constraint::Length(header_height),
             Constraint::Min(12),
-            Constraint::Length(2),
+            Constraint::Length(detail_footer_height(detail)),
         ])
         .split(area);
     if detail.replay_fullscreen {
@@ -3303,7 +3423,7 @@ fn replay_toggle_hit(mouse: MouseEvent, detail: &DetailState) -> Option<bool> {
     };
     let status_label = if detail.autoplay { "playing" } else { "paused" };
     let prefix = format!(
-        "Replay ({}{}) [{}]{} ",
+        "Replay ({}{}) [{}]{}  ",
         mode_label, frame_size_label, status_label, horizontal_scroll_hint
     );
     let button_x = layout
@@ -3342,7 +3462,7 @@ mod tests {
         text::Line,
     };
     use serde_json::json;
-    use std::{env, fs, time::Instant};
+    use std::{collections::HashMap, env, fs, time::Instant};
 
     #[test]
     fn sanitize_terminal_output_strips_ansi_sequences() {
@@ -3763,8 +3883,12 @@ mod tests {
                 rows: 1,
                 cols: 4,
             }],
+            terminal_replay_cache: HashMap::new(),
             terminal_cache_key: None,
+            pending_replay_cache_key: None,
+            replay_cache_rx: None,
             replay_notice: None,
+            replay_loading: false,
             replay_step: 0,
             replay_text: String::new(),
             replay_visible: false,
@@ -3800,7 +3924,13 @@ mod tests {
             .expect("layout should exist");
         assert_eq!(fullscreen.timeline.width, 0);
         assert_eq!(fullscreen.changes.height, 0);
-        assert_eq!(fullscreen.replay, Rect::new(0, split.header.height, 120, 34));
+        assert_eq!(fullscreen.replay.x, 0);
+        assert_eq!(fullscreen.replay.y, split.header.height);
+        assert_eq!(fullscreen.replay.width, 120);
+        assert_eq!(
+            fullscreen.replay.height + split.header.height + split.footer.height,
+            40
+        );
     }
 
     #[test]
