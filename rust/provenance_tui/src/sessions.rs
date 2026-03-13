@@ -25,15 +25,15 @@ use std::fs;
 use std::io::{self, Write};
 use std::path::Path;
 use std::time::{Duration, Instant};
+use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
 use vt100::Parser as VtParser;
 
 const TIMELINE_PAGE_STEP: usize = 500;
 const TEXT_REPLAY_TICK_MS: u64 = 60;
 const TERMINAL_REPLAY_TICK_MS: u64 = TEXT_REPLAY_TICK_MS / 3;
-const SESSION_COPY_ICON: &str = "⧉";
+const SESSION_COPY_BUTTON: &str = "[ Copy ]";
+const SESSION_COPIED_BUTTON: &str = "[   ✓   ]";
 const TIMELINE_EVENT_TYPE_WIDTH: usize = 18;
-const TIMELINE_COPY_ICON_OFFSET: u16 = 29;
-const EVENT_MODAL_COMMAND_ICON_OFFSET: u16 = 9;
 
 #[derive(Debug, Parser, Clone)]
 #[command(name = "agensic-provenance-tui sessions")]
@@ -404,6 +404,10 @@ struct App {
     needs_terminal_clear: bool,
     event_modal_open: bool,
     event_modal_scroll: u16,
+    hovered_timeline_copy_row: Option<usize>,
+    hovered_event_modal_copy: bool,
+    hovered_header_copy: bool,
+    copy_feedback: Option<CopyFeedback>,
 }
 
 #[derive(Clone, Debug, Default)]
@@ -425,6 +429,25 @@ struct TimelineViewport {
     end: usize,
 }
 
+#[derive(Clone, Debug)]
+struct CopyFeedback {
+    target: CopyFeedbackTarget,
+    expires_at: Instant,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum CopyFeedbackTarget {
+    TimelineRow(usize),
+    EventModalCommand(i64),
+    SessionId,
+}
+
+impl CopyFeedback {
+    fn active_target(&self) -> Option<CopyFeedbackTarget> {
+        (Instant::now() <= self.expires_at).then_some(self.target)
+    }
+}
+
 impl App {
     fn new(client: Client, args: SessionsArgs) -> Result<Self, String> {
         let mut app = Self {
@@ -439,6 +462,10 @@ impl App {
             needs_terminal_clear: true,
             event_modal_open: false,
             event_modal_scroll: 0,
+            hovered_timeline_copy_row: None,
+            hovered_event_modal_copy: false,
+            hovered_header_copy: false,
+            copy_feedback: None,
         };
         app.refresh_sessions()?;
         if !args.session_id.trim().is_empty() {
@@ -532,6 +559,10 @@ impl App {
         self.detail = Some(detail);
         self.event_modal_open = false;
         self.event_modal_scroll = 0;
+        self.hovered_timeline_copy_row = None;
+        self.hovered_event_modal_copy = false;
+        self.hovered_header_copy = false;
+        self.copy_feedback = None;
         self.needs_terminal_clear = true;
         Ok(())
     }
@@ -545,6 +576,35 @@ impl App {
 
     fn set_flash(&mut self, message: impl Into<String>) {
         self.flash_status = Some(crate::FlashStatus::new(message));
+    }
+
+    fn active_copy_feedback(&self) -> Option<CopyFeedbackTarget> {
+        self.copy_feedback
+            .as_ref()
+            .and_then(CopyFeedback::active_target)
+    }
+
+    fn set_copy_feedback(&mut self, target: CopyFeedbackTarget) {
+        self.copy_feedback = Some(CopyFeedback {
+            target,
+            expires_at: Instant::now() + crate::COPY_FLASH_DURATION,
+        });
+    }
+
+    fn timeline_copy_hovered(&self, row_index: usize) -> bool {
+        self.hovered_timeline_copy_row == Some(row_index)
+    }
+
+    fn timeline_copy_copied(&self, row_index: usize) -> bool {
+        self.active_copy_feedback() == Some(CopyFeedbackTarget::TimelineRow(row_index))
+    }
+
+    fn event_modal_copy_copied(&self, event_seq: i64) -> bool {
+        self.active_copy_feedback() == Some(CopyFeedbackTarget::EventModalCommand(event_seq))
+    }
+
+    fn header_copy_copied(&self) -> bool {
+        self.active_copy_feedback() == Some(CopyFeedbackTarget::SessionId)
     }
 }
 
@@ -615,92 +675,143 @@ fn run(client: Client, args: SessionsArgs) -> Result<(), String> {
 }
 
 fn handle_key(app: &mut App, key: KeyEvent) -> Result<bool, String> {
-    if let Some(detail) = app.detail.as_mut() {
-        if app.event_modal_open {
-            match key.code {
-                KeyCode::Esc | KeyCode::Enter => {
-                    app.event_modal_open = false;
-                    app.event_modal_scroll = 0;
-                }
-                KeyCode::Up | KeyCode::Char('k') => {
-                    app.event_modal_scroll = app.event_modal_scroll.saturating_sub(1);
-                }
-                KeyCode::Down | KeyCode::Char('j') => {
-                    app.event_modal_scroll = app.event_modal_scroll.saturating_add(1);
-                }
-                KeyCode::PageUp => {
-                    app.event_modal_scroll = app.event_modal_scroll.saturating_sub(10);
-                }
-                KeyCode::PageDown => {
-                    app.event_modal_scroll = app.event_modal_scroll.saturating_add(10);
-                }
-                KeyCode::Home => app.event_modal_scroll = 0,
-                _ => {}
-            }
-            return Ok(false);
-        }
-
-        match key.code {
-            KeyCode::Esc => {
-                if app.deep_link {
-                    return Ok(true);
-                }
-                app.detail = None;
-                app.status = "Back to sessions".to_string();
-                app.needs_terminal_clear = true;
-            }
-            KeyCode::Char('s') => detail.cycle_focus(),
-            KeyCode::Char('t') => {
-                detail.toggle_replay_mode();
-                app.status = format!("Replay mode: {}", detail.replay_mode.label());
-            }
-            KeyCode::Char(' ') => {
-                if detail.autoplay {
-                    detail.autoplay = false;
-                } else if detail.active_replay_len() > 0 {
-                    if detail.replay_step + 1 >= detail.active_replay_len() {
-                        detail.rebuild_replay_text(0);
+    if app.detail.is_some() {
+        let mut flash_message: Option<String> = None;
+        let mut copy_target: Option<CopyFeedbackTarget> = None;
+        {
+            let detail = app.detail.as_mut().expect("detail checked above");
+            if app.event_modal_open {
+                match key.code {
+                    KeyCode::Esc | KeyCode::Enter => {
+                        app.event_modal_open = false;
+                        app.event_modal_scroll = 0;
                     }
-                    detail.autoplay = true;
-                    detail.focus = FocusPane::Replay;
-                    detail.replay_follow_end = detail.replay_mode == ReplayMode::Text;
-                    detail.replay_scroll = if detail.replay_follow_end {
-                        u16::MAX
-                    } else {
-                        0
-                    };
-                    detail.last_tick = Instant::now();
+                    KeyCode::Char('c') => {
+                        if let Some((command, event_seq)) = detail
+                            .selected_event()
+                            .and_then(|event| event_command(event).map(|command| (command, event.seq)))
+                        {
+                            match crate::copy_to_clipboard(&command) {
+                                Ok(()) => {
+                                    flash_message = Some("✓ Copied command".to_string());
+                                    copy_target =
+                                        Some(CopyFeedbackTarget::EventModalCommand(event_seq));
+                                }
+                                Err(err) => flash_message = Some(err),
+                            }
+                        } else {
+                            flash_message = Some("No command to copy".to_string());
+                        }
+                    }
+                    KeyCode::Up | KeyCode::Char('k') => {
+                        app.event_modal_scroll = app.event_modal_scroll.saturating_sub(1);
+                    }
+                    KeyCode::Down | KeyCode::Char('j') => {
+                        app.event_modal_scroll = app.event_modal_scroll.saturating_add(1);
+                    }
+                    KeyCode::PageUp => {
+                        app.event_modal_scroll = app.event_modal_scroll.saturating_sub(10);
+                    }
+                    KeyCode::PageDown => {
+                        app.event_modal_scroll = app.event_modal_scroll.saturating_add(10);
+                    }
+                    KeyCode::Home => app.event_modal_scroll = 0,
+                    _ => {}
+                }
+            } else {
+                match key.code {
+                    KeyCode::Esc => {
+                        if app.deep_link {
+                            return Ok(true);
+                        }
+                        app.detail = None;
+                        app.status = "Back to sessions".to_string();
+                        app.needs_terminal_clear = true;
+                    }
+                    KeyCode::Char('s') => detail.cycle_focus(),
+                    KeyCode::Char('t') => {
+                        detail.toggle_replay_mode();
+                        app.status = format!("Replay mode: {}", detail.replay_mode.label());
+                    }
+                    KeyCode::Char(' ') => {
+                        if detail.autoplay {
+                            detail.autoplay = false;
+                        } else if detail.active_replay_len() > 0 {
+                            if detail.replay_step + 1 >= detail.active_replay_len() {
+                                detail.rebuild_replay_text(0);
+                            }
+                            detail.autoplay = true;
+                            detail.focus = FocusPane::Replay;
+                            detail.replay_follow_end = detail.replay_mode == ReplayMode::Text;
+                            detail.replay_scroll = if detail.replay_follow_end {
+                                u16::MAX
+                            } else {
+                                0
+                            };
+                            detail.last_tick = Instant::now();
+                        }
+                    }
+                    KeyCode::Enter => {
+                        if detail.selected_event().is_some() {
+                            app.event_modal_open = true;
+                            app.event_modal_scroll = 0;
+                        }
+                    }
+                    KeyCode::Char('c') => {
+                        if let Some((row_index, command)) = detail
+                            .timeline_entries
+                            .get(detail.timeline_index)
+                            .and_then(|entry| {
+                                entry
+                                    .copy_command
+                                    .clone()
+                                    .map(|command| (detail.timeline_index, command))
+                            })
+                        {
+                            match crate::copy_to_clipboard(&command) {
+                                Ok(()) => {
+                                    flash_message = Some("✓ Copied command".to_string());
+                                    copy_target = Some(CopyFeedbackTarget::TimelineRow(row_index));
+                                }
+                                Err(err) => flash_message = Some(err),
+                            }
+                        } else {
+                            flash_message = Some("No command to copy".to_string());
+                        }
+                    }
+                    KeyCode::Up | KeyCode::Char('k') if detail.focus == FocusPane::Timeline => {
+                        detail.move_selection(-1);
+                    }
+                    KeyCode::Down | KeyCode::Char('j') if detail.focus == FocusPane::Timeline => {
+                        detail.move_selection(1);
+                    }
+                    KeyCode::Up | KeyCode::Char('k') if detail.focus == FocusPane::Replay => {
+                        detail.scroll_replay(-1);
+                    }
+                    KeyCode::Down | KeyCode::Char('j') if detail.focus == FocusPane::Replay => {
+                        detail.scroll_replay(1);
+                    }
+                    KeyCode::BackTab if detail.focus == FocusPane::Timeline => {
+                        detail.page_selection(-1)
+                    }
+                    KeyCode::Tab if detail.focus == FocusPane::Timeline => detail.page_selection(1),
+                    KeyCode::Left | KeyCode::Char('h') if detail.focus == FocusPane::Replay => {
+                        detail.replay_follow_end = false;
+                        detail.seek_relative(-1);
+                    }
+                    KeyCode::Right | KeyCode::Char('l') if detail.focus == FocusPane::Replay => {
+                        detail.replay_follow_end = false;
+                        detail.seek_relative(1);
+                    }
+                    _ => {}
                 }
             }
-            KeyCode::Enter => {
-                if detail.selected_event().is_some() {
-                    app.event_modal_open = true;
-                    app.event_modal_scroll = 0;
-                }
-            }
-            KeyCode::Up | KeyCode::Char('k') if detail.focus == FocusPane::Timeline => {
-                detail.move_selection(-1);
-            }
-            KeyCode::Down | KeyCode::Char('j') if detail.focus == FocusPane::Timeline => {
-                detail.move_selection(1);
-            }
-            KeyCode::Up | KeyCode::Char('k') if detail.focus == FocusPane::Replay => {
-                detail.scroll_replay(-1);
-            }
-            KeyCode::Down | KeyCode::Char('j') if detail.focus == FocusPane::Replay => {
-                detail.scroll_replay(1);
-            }
-            KeyCode::BackTab if detail.focus == FocusPane::Timeline => detail.page_selection(-1),
-            KeyCode::Tab if detail.focus == FocusPane::Timeline => detail.page_selection(1),
-            KeyCode::Left | KeyCode::Char('h') if detail.focus == FocusPane::Replay => {
-                detail.replay_follow_end = false;
-                detail.seek_relative(-1);
-            }
-            KeyCode::Right | KeyCode::Char('l') if detail.focus == FocusPane::Replay => {
-                detail.replay_follow_end = false;
-                detail.seek_relative(1);
-            }
-            _ => {}
+        }
+        if let Some(message) = flash_message {
+            app.set_flash(message);
+        }
+        if let Some(target) = copy_target {
+            app.set_copy_feedback(target);
         }
         return Ok(false);
     }
@@ -843,7 +954,7 @@ fn draw_detail(frame: &mut ratatui::Frame<'_>, app: &App, detail: &DetailState) 
             Constraint::Length(2),
         ])
         .split(area);
-    frame.render_widget(build_header(detail), chunks[0]);
+    frame.render_widget(build_header(app, detail), chunks[0]);
 
     let body = Layout::default()
         .direction(Direction::Horizontal)
@@ -853,13 +964,13 @@ fn draw_detail(frame: &mut ratatui::Frame<'_>, app: &App, detail: &DetailState) 
         .direction(Direction::Vertical)
         .constraints(changes_panel_constraints(detail))
         .split(body[1]);
-    frame.render_widget(build_timeline(detail, body[0].height), body[0]);
+    frame.render_widget(build_timeline(app, detail, body[0]), body[0]);
     frame.render_widget(build_changes(detail), right[0]);
     frame.render_widget(build_replay(detail, right[1]), right[1]);
     frame.render_widget(
         Paragraph::new(vec![
             Line::from(
-                "↑↓ timeline/text scroll or terminal seek  mouse wheel scrolls active pane  Tab/Shift+Tab jump 500  s switch pane  t toggle replay mode  ←→ seek replay  Enter details  space play/pause  Esc back",
+                "↑↓ timeline/text scroll or terminal seek  mouse wheel scrolls active pane  Tab/Shift+Tab jump 500  c copy command  s switch pane  t toggle replay mode  ←→ seek replay  Enter details  space play/pause  Esc back",
             ),
             Line::from(app.status_text().to_string()),
         ])
@@ -876,17 +987,18 @@ fn draw_detail(frame: &mut ratatui::Frame<'_>, app: &App, detail: &DetailState) 
 
     if app.event_modal_open {
         if let Some(event) = detail.selected_event() {
-            draw_event_modal(frame, event, detail, app.event_modal_scroll);
+            draw_event_modal(frame, app, event, detail, app.event_modal_scroll);
         }
     }
 }
 
-fn build_header(detail: &DetailState) -> Paragraph<'static> {
+fn build_header(app: &App, detail: &DetailState) -> Paragraph<'static> {
     let actor = if detail.session.agent_name.trim().is_empty() {
         detail.session.agent.as_str()
     } else {
         detail.session.agent_name.as_str()
     };
+    let header_copy_button = copy_button_label(app.header_copy_copied());
     let mut lines = vec![
         Line::from(vec![
             Span::styled(
@@ -903,12 +1015,24 @@ fn build_header(detail: &DetailState) -> Paragraph<'static> {
                 Style::default().fg(Color::Yellow),
             ),
         ]),
-        Line::from(format!(
-            "session {}    duration {}    started {}",
-            detail.session.session_id,
-            format_duration(detail.session.started_at, detail.session.ended_at),
-            format_ts(detail.session.started_at),
-        )),
+        Line::from(vec![
+            Span::raw("session ".to_string()),
+            Span::raw(detail.session.session_id.clone()),
+            Span::raw("  ".to_string()),
+            Span::styled(
+                header_copy_button,
+                copy_button_style(
+                    app.hovered_header_copy,
+                    app.header_copy_copied(),
+                    false,
+                ),
+            ),
+            Span::raw(format!(
+                "    duration {}    started {}",
+                format_duration(detail.session.started_at, detail.session.ended_at),
+                format_ts(detail.session.started_at),
+            )),
+        ]),
     ];
     if !detail.session.repo_root.trim().is_empty() {
         lines.push(Line::from(format!(
@@ -941,22 +1065,21 @@ fn build_header(detail: &DetailState) -> Paragraph<'static> {
         .wrap(Wrap { trim: true })
 }
 
-fn build_timeline(detail: &DetailState, height: u16) -> Paragraph<'static> {
+fn build_timeline(app: &App, detail: &DetailState, area: Rect) -> Paragraph<'static> {
     let total = detail.timeline_entries.len();
     let selected = detail.timeline_index.min(total.saturating_sub(1));
-    let viewport = timeline_viewport(detail, height);
+    let viewport = timeline_viewport(detail, area.height);
+    let content_width = area.width.saturating_sub(2) as usize;
     let mut lines: Vec<Line<'static>> = Vec::new();
     for row_index in viewport.start..viewport.end {
         let entry = &detail.timeline_entries[row_index];
-        let marker = if row_index == selected { ">>" } else { "  " };
         let style = if row_index == selected {
             Style::default().fg(Color::Black).bg(Color::LightGreen)
         } else {
             Style::default()
         };
         let prefix = format!(
-            "{} {:>4}  {:<width$}  ",
-            marker,
+            "{:>4}  {:<width$}  ",
             row_index + 1,
             truncate(
                 &sanitize_inline_text(&entry.event_type),
@@ -964,20 +1087,33 @@ fn build_timeline(detail: &DetailState, height: u16) -> Paragraph<'static> {
             ),
             width = TIMELINE_EVENT_TYPE_WIDTH,
         );
-        let icon = if entry.copy_command.is_some() {
-            Span::styled(SESSION_COPY_ICON, copy_icon_style())
+        let mut spans = vec![Span::raw(prefix.clone())];
+        let mut summary = entry.summary.clone();
+        let reserved_width = if entry.copy_command.is_some() {
+            copy_icon_width() + 2
         } else {
-            Span::raw(" ")
+            0
         };
-        lines.push(
-            Line::from(vec![
-                Span::raw(prefix),
-                icon,
-                Span::raw("  "),
-                Span::raw(entry.summary.clone()),
-            ])
-            .style(style),
-        );
+        let available_summary_width =
+            content_width.saturating_sub(display_width(&prefix) + reserved_width);
+        summary = truncate_display_width(&summary, available_summary_width);
+        spans.push(Span::raw(summary.clone()));
+        if entry.copy_command.is_some() {
+            let copied = app.timeline_copy_copied(row_index);
+            let hovered = app.timeline_copy_hovered(row_index);
+            let selected_row = row_index == selected;
+            let button = copy_button_label(copied);
+            let used_width =
+                display_width(&prefix) + display_width(&summary) + display_width(button);
+            spans.push(Span::raw(
+                " ".repeat(content_width.saturating_sub(used_width)),
+            ));
+            spans.push(Span::styled(
+                button,
+                copy_button_style(hovered, copied, selected_row),
+            ));
+        }
+        lines.push(Line::from(spans).style(style));
     }
     if lines.is_empty() {
         lines.push(Line::from("(no recorded events)"));
@@ -1185,12 +1321,19 @@ fn build_replay(detail: &DetailState, area: Rect) -> Paragraph<'static> {
 
 fn draw_event_modal(
     frame: &mut ratatui::Frame<'_>,
+    app: &App,
     event: &SessionEvent,
     detail: &DetailState,
     scroll: u16,
 ) {
     let popup = centered_rect(74, 72, frame.area());
-    let content = build_event_modal_content(event, detail);
+    let content = build_event_modal_content(
+        event,
+        detail,
+        popup.width.saturating_sub(2) as usize,
+        app.hovered_event_modal_copy,
+        app.event_modal_copy_copied(event.seq),
+    );
     let panel = Paragraph::new(content.lines)
         .block(
             Block::default()
@@ -1305,6 +1448,73 @@ fn truncate(value: &str, max_chars: usize) -> String {
         + "…"
 }
 
+fn display_width(value: &str) -> usize {
+    UnicodeWidthStr::width(value)
+}
+
+fn copy_icon_width() -> usize {
+    display_width(SESSION_COPY_BUTTON)
+        .max(display_width(SESSION_COPIED_BUTTON))
+        .max(1)
+}
+
+fn truncate_display_width(value: &str, max_width: usize) -> String {
+    if max_width == 0 {
+        return String::new();
+    }
+    if display_width(value) <= max_width {
+        return value.to_string();
+    }
+    if max_width == 1 {
+        return "…".to_string();
+    }
+
+    let mut out = String::new();
+    let mut width = 0usize;
+    for ch in value.chars() {
+        let ch_width = UnicodeWidthChar::width(ch).unwrap_or(0);
+        if width + ch_width + 1 > max_width {
+            break;
+        }
+        out.push(ch);
+        width += ch_width;
+    }
+    out.push('…');
+    out
+}
+
+fn copy_button_label(copied: bool) -> &'static str {
+    if copied {
+        SESSION_COPIED_BUTTON
+    } else {
+        SESSION_COPY_BUTTON
+    }
+}
+
+fn right_aligned_copy_line(
+    label: &str,
+    content_width: usize,
+    hovered: bool,
+    copied: bool,
+) -> Line<'static> {
+    let label_width = display_width(label);
+    let button = copy_button_label(copied);
+    let icon_width = display_width(button).max(1);
+    let gap_width = content_width
+        .saturating_sub(label_width + icon_width)
+        .max(1);
+    Line::from(vec![
+        Span::styled(
+            label.to_string(),
+            Style::default()
+                .fg(Color::Cyan)
+                .add_modifier(Modifier::BOLD),
+        ),
+        Span::raw(" ".repeat(gap_width)),
+        Span::styled(button, copy_button_style(hovered, copied, false)),
+    ])
+}
+
 fn event_summary(event: &SessionEvent) -> String {
     match event.event_type.as_str() {
         "process.spawned" | "process.exited" | "command.recorded" | "git.push.attempted" => event
@@ -1350,7 +1560,13 @@ fn event_summary(event: &SessionEvent) -> String {
     }
 }
 
-fn build_event_modal_content(event: &SessionEvent, detail: &DetailState) -> EventModalContent {
+fn build_event_modal_content(
+    event: &SessionEvent,
+    detail: &DetailState,
+    content_width: usize,
+    hovered_copy: bool,
+    copied: bool,
+) -> EventModalContent {
     let mut lines = vec![
         Line::from(format!("session: {}", detail.session.session_id)),
         Line::from(format!("seq: {}", event.seq)),
@@ -1392,15 +1608,12 @@ fn build_event_modal_content(event: &SessionEvent, detail: &DetailState) -> Even
     if let Some(command) = command.as_ref() {
         lines.push(Line::from(""));
         command_line_index = Some(lines.len() as u16);
-        lines.push(Line::from(vec![
-            Span::styled(
-                "command  ",
-                Style::default()
-                    .fg(Color::Cyan)
-                    .add_modifier(Modifier::BOLD),
-            ),
-            Span::styled(SESSION_COPY_ICON, copy_icon_style()),
-        ]));
+        lines.push(right_aligned_copy_line(
+            "command",
+            content_width,
+            hovered_copy,
+            copied,
+        ));
         push_text_block(&mut lines, &sanitize_multiline_text(command));
     }
 
@@ -1903,10 +2116,29 @@ fn pane_block(title: &str, focused: bool) -> Block<'static> {
         .title(Line::from(Span::styled(title.to_string(), title_style)))
 }
 
-fn copy_icon_style() -> Style {
-    Style::default()
-        .fg(Color::LightGreen)
-        .add_modifier(Modifier::BOLD)
+fn copy_button_style(hovered: bool, copied: bool, selected: bool) -> Style {
+    if selected {
+        let mut style = Style::default()
+            .fg(Color::Black)
+            .add_modifier(Modifier::BOLD);
+        if hovered {
+            style = style.add_modifier(Modifier::UNDERLINED);
+        }
+        return style;
+    }
+    if copied {
+        Style::default()
+            .fg(Color::LightGreen)
+            .add_modifier(Modifier::BOLD)
+    } else if hovered {
+        Style::default()
+            .fg(Color::LightCyan)
+            .add_modifier(Modifier::BOLD | Modifier::UNDERLINED)
+    } else {
+        Style::default()
+            .fg(Color::LightGreen)
+            .add_modifier(Modifier::BOLD)
+    }
 }
 
 fn flush_terminal_span(spans: &mut Vec<Span<'static>>, buffer: &mut String, style: Option<Style>) {
@@ -2161,58 +2393,109 @@ fn sanitize_terminal_output(value: &str) -> String {
 }
 
 fn handle_mouse(app: &mut App, mouse: MouseEvent) {
-    if let Some(detail) = app.detail.as_mut() {
-        if let MouseEventKind::Down(MouseButton::Left) = mouse.kind {
+    if app.detail.is_some() {
+        let mut flash_message: Option<String> = None;
+        let mut copy_target: Option<CopyFeedbackTarget> = None;
+        let mut handled = false;
+        {
+            let detail = app.detail.as_mut().expect("detail checked above");
+            app.hovered_header_copy = session_header_copy_hit(mouse, detail);
             if app.event_modal_open {
-                if let Some(event) = detail.selected_event() {
-                    if let Some(command) =
+                app.hovered_event_modal_copy = detail
+                    .selected_event()
+                    .and_then(|event| {
                         event_modal_copy_command(mouse, event, detail, app.event_modal_scroll)
-                    {
-                        match crate::copy_to_clipboard(&command) {
-                            Ok(()) => app.set_flash("✓ Copied command"),
-                            Err(err) => app.set_flash(err),
-                        }
-                    }
-                }
-                return;
+                    })
+                    .is_some();
+                app.hovered_timeline_copy_row = None;
+            } else {
+                app.hovered_event_modal_copy = false;
+                app.hovered_timeline_copy_row = timeline_mouse_hit(mouse, detail)
+                    .and_then(|(row_index, clicked_copy)| clicked_copy.then_some(row_index));
             }
-            if let Some((row_index, clicked_copy)) = timeline_mouse_hit(mouse, detail) {
-                detail.timeline_index = row_index;
-                if clicked_copy {
-                    if let Some(command) = detail.timeline_entries[row_index].copy_command.clone() {
+
+            if let MouseEventKind::Down(MouseButton::Left) = mouse.kind {
+                if app.hovered_header_copy {
+                    match crate::copy_to_clipboard(&detail.session.session_id) {
+                        Ok(()) => {
+                            flash_message = Some("✓ Copied session ID".to_string());
+                            copy_target = Some(CopyFeedbackTarget::SessionId);
+                        }
+                        Err(err) => flash_message = Some(err),
+                    }
+                    handled = true;
+                }
+            }
+
+            if !handled && matches!(mouse.kind, MouseEventKind::Down(MouseButton::Left)) {
+                if app.event_modal_open {
+                    if let Some((command, event_seq)) = detail.selected_event().and_then(|event| {
+                        event_modal_copy_command(mouse, event, detail, app.event_modal_scroll)
+                            .map(|command| (command, event.seq))
+                    }) {
                         match crate::copy_to_clipboard(&command) {
-                            Ok(()) => app.set_flash("✓ Copied command"),
-                            Err(err) => app.set_flash(err),
+                            Ok(()) => {
+                                flash_message = Some("✓ Copied command".to_string());
+                                copy_target =
+                                    Some(CopyFeedbackTarget::EventModalCommand(event_seq));
+                            }
+                            Err(err) => flash_message = Some(err),
                         }
                     }
+                    handled = true;
+                } else if let Some((row_index, clicked_copy)) = timeline_mouse_hit(mouse, detail) {
+                    if clicked_copy {
+                        if let Some(command) = detail.timeline_entries[row_index].copy_command.clone()
+                        {
+                            match crate::copy_to_clipboard(&command) {
+                                Ok(()) => {
+                                    flash_message = Some("✓ Copied command".to_string());
+                                    copy_target =
+                                        Some(CopyFeedbackTarget::TimelineRow(row_index));
+                                }
+                                Err(err) => flash_message = Some(err),
+                            }
+                        }
+                    } else {
+                        detail.timeline_index = row_index;
+                    }
+                    handled = true;
                 }
-                return;
+            }
+
+            if !handled {
+                match mouse.kind {
+                    MouseEventKind::ScrollDown => {
+                        if app.event_modal_open {
+                            app.event_modal_scroll = app.event_modal_scroll.saturating_add(1);
+                        } else if mouse_is_in_replay_pane(mouse, detail) {
+                            detail.scroll_replay(2);
+                        } else if mouse_is_in_timeline_pane(mouse, detail) {
+                            detail.move_selection(1);
+                        } else {
+                            detail.scroll_replay(2);
+                        }
+                    }
+                    MouseEventKind::ScrollUp => {
+                        if app.event_modal_open {
+                            app.event_modal_scroll = app.event_modal_scroll.saturating_sub(1);
+                        } else if mouse_is_in_replay_pane(mouse, detail) {
+                            detail.scroll_replay(-2);
+                        } else if mouse_is_in_timeline_pane(mouse, detail) {
+                            detail.move_selection(-1);
+                        } else {
+                            detail.scroll_replay(-2);
+                        }
+                    }
+                    _ => {}
+                }
             }
         }
-        match mouse.kind {
-            MouseEventKind::ScrollDown => {
-                if app.event_modal_open {
-                    app.event_modal_scroll = app.event_modal_scroll.saturating_add(1);
-                } else if mouse_is_in_replay_pane(mouse, detail) {
-                    detail.scroll_replay(2);
-                } else if mouse_is_in_timeline_pane(mouse, detail) {
-                    detail.move_selection(1);
-                } else {
-                    detail.scroll_replay(2);
-                }
-            }
-            MouseEventKind::ScrollUp => {
-                if app.event_modal_open {
-                    app.event_modal_scroll = app.event_modal_scroll.saturating_sub(1);
-                } else if mouse_is_in_replay_pane(mouse, detail) {
-                    detail.scroll_replay(-2);
-                } else if mouse_is_in_timeline_pane(mouse, detail) {
-                    detail.move_selection(-1);
-                } else {
-                    detail.scroll_replay(-2);
-                }
-            }
-            _ => {}
+        if let Some(message) = flash_message {
+            app.set_flash(message);
+        }
+        if let Some(target) = copy_target {
+            app.set_copy_feedback(target);
         }
         return;
     }
@@ -2232,6 +2515,35 @@ fn handle_mouse(app: &mut App, mouse: MouseEvent) {
     }
 }
 
+fn session_header_copy_hit(mouse: MouseEvent, detail: &DetailState) -> bool {
+    let Ok((width, height)) = terminal_size() else {
+        return false;
+    };
+    let area = Rect::new(0, 0, width, height);
+    let header_height = detail_header_height(detail);
+    let chunks = Layout::default()
+        .direction(Direction::Vertical)
+        .constraints([
+            Constraint::Length(header_height),
+            Constraint::Min(12),
+            Constraint::Length(2),
+        ])
+        .split(area);
+    let header = chunks[0];
+    if !rect_contains(header, mouse.column, mouse.row) {
+        return false;
+    }
+    let line_y = header.y.saturating_add(2);
+    let prefix = format!("session {}  ", detail.session.session_id);
+    let button_x = header
+        .x
+        .saturating_add(1)
+        .saturating_add(display_width(&prefix) as u16);
+    mouse.row == line_y
+        && mouse.column >= button_x
+        && mouse.column < button_x.saturating_add(copy_icon_width() as u16)
+}
+
 fn timeline_mouse_hit(mouse: MouseEvent, detail: &DetailState) -> Option<(usize, bool)> {
     let layout = session_detail_layout(detail)?;
     if !rect_contains(layout.timeline, mouse.column, mouse.row) {
@@ -2248,9 +2560,15 @@ fn timeline_mouse_hit(mouse: MouseEvent, detail: &DetailState) -> Option<(usize,
     if row_index >= viewport.end {
         return None;
     }
-    let copy_x = inner_x.saturating_add(TIMELINE_COPY_ICON_OFFSET);
-    let clicked_copy =
-        mouse.column == copy_x && detail.timeline_entries[row_index].copy_command.is_some();
+    let copy_x = layout.timeline.x.saturating_add(
+        layout
+            .timeline
+            .width
+            .saturating_sub(1 + copy_icon_width() as u16),
+    );
+    let clicked_copy = detail.timeline_entries[row_index].copy_command.is_some()
+        && mouse.column >= copy_x
+        && mouse.column < copy_x.saturating_add(copy_icon_width() as u16);
     Some((row_index, clicked_copy))
 }
 
@@ -2264,17 +2582,28 @@ fn event_modal_copy_command(
     if !rect_contains(popup, mouse.column, mouse.row) {
         return None;
     }
-    let content = build_event_modal_content(event, detail);
+    let content = build_event_modal_content(
+        event,
+        detail,
+        popup.width.saturating_sub(2) as usize,
+        false,
+        false,
+    );
     let command_line = content.command_line_index?;
     let visible_row = popup
         .y
         .saturating_add(1)
         .saturating_add(command_line)
         .saturating_sub(scroll);
-    let icon_x = popup.x.saturating_add(1 + EVENT_MODAL_COMMAND_ICON_OFFSET);
-    (mouse.row == visible_row && mouse.column == icon_x)
-        .then_some(content.command)
-        .flatten()
+    let icon_x = popup
+        .x
+        .saturating_add(1)
+        .saturating_add(popup.width.saturating_sub(2 + copy_icon_width() as u16));
+    (mouse.row == visible_row
+        && mouse.column >= icon_x
+        && mouse.column < icon_x.saturating_add(copy_icon_width() as u16))
+    .then_some(content.command)
+    .flatten()
 }
 
 fn current_event_modal_rect() -> Option<Rect> {

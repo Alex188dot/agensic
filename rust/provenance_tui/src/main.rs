@@ -29,7 +29,7 @@ use std::path::Path;
 use std::process::{Command, Stdio};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
-const COPY_FLASH_DURATION: Duration = Duration::from_secs(3);
+pub(crate) const COPY_FLASH_DURATION: Duration = Duration::from_secs(3);
 const COPY_ICON: &str = "⧉";
 
 #[derive(Clone)]

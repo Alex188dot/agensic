@@ -29,8 +29,20 @@ mkdir -p "$USER_BIN_DIR"
 cp agensic.zsh "$INSTALL_DIR/"
 cp shell_client.py "$INSTALL_DIR/"
 
-# 2b. Install local provenance TUI sidecar if already built
+# 2b. Build the local provenance TUI sidecar from source when cargo is available.
+TUI_MANIFEST_PATH="$PWD/rust/provenance_tui/Cargo.toml"
 LOCAL_TUI_BIN="$PWD/rust/provenance_tui/target/release/agensic-provenance-tui"
+if [ -f "$TUI_MANIFEST_PATH" ] && command -v cargo >/dev/null 2>&1; then
+    echo "🛠️ Building provenance TUI sidecar from source..."
+    cargo build --manifest-path "$TUI_MANIFEST_PATH" --release || {
+        echo "❌ Failed to build provenance TUI sidecar from source."
+        echo "   Fix the Rust build or install without local sidecar changes."
+        exit 1
+    }
+elif [ -f "$TUI_MANIFEST_PATH" ]; then
+    echo "⚠️ cargo not found; local Rust sidecar changes will not be included."
+fi
+
 if [ -x "$LOCAL_TUI_BIN" ]; then
     cp "$LOCAL_TUI_BIN" "$INSTALL_BIN_DIR/agensic-provenance-tui"
     chmod +x "$INSTALL_BIN_DIR/agensic-provenance-tui"
