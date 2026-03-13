@@ -397,6 +397,7 @@ class CliTrackTests(unittest.TestCase):
             self.assertTrue(transcripts)
             transcript_payload = transcripts[0].read_text(encoding="utf-8")
             self.assertIn('"direction":"pty"', transcript_payload)
+            self.assertIn('"seq":', transcript_payload)
 
             store = SQLiteStateStore(temp_paths.state_sqlite_path, journal=None)
             runs = store.list_command_runs(limit=20)

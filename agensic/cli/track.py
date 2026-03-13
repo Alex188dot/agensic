@@ -1152,12 +1152,20 @@ def inspect_track_session(session_id: str = "", *, replay: bool = False, tail_ev
     return 0
 
 
-def _write_transcript_event(handle: Any, direction: str, data: bytes) -> None:
+def _write_transcript_event(
+    handle: Any,
+    direction: str,
+    data: bytes,
+    *,
+    seq: int | None = None,
+) -> None:
     event = {
         "ts": round(time.time(), 6),
         "direction": str(direction or "").strip(),
         "data_b64": base64.b64encode(bytes(data)).decode("ascii"),
     }
+    if seq is not None:
+        event["seq"] = int(seq)
     handle.write(json.dumps(event, separators=(",", ":")) + "\n")
     handle.flush()
 
@@ -1369,10 +1377,10 @@ class TrackRuntime:
     def set_event_handle(self, handle: Any) -> None:
         self._event_handle = handle
 
-    def emit_event(self, event_type: str, payload: dict[str, Any] | None = None) -> None:
+    def emit_event(self, event_type: str, payload: dict[str, Any] | None = None) -> int | None:
         handle = self._event_handle
         if handle is None or bool(getattr(handle, "closed", False)):
-            return
+            return None
         with self._lock:
             self._event_seq += 1
             seq = self._event_seq
@@ -1386,7 +1394,8 @@ class TrackRuntime:
                 payload=payload,
             )
         except ValueError:
-            return
+            return None
+        return seq
 
     def persist_summary(
         self,
@@ -1742,9 +1751,7 @@ def _drain_master_output(
             raise
         if not data:
             return
-        _write_transcript_event(transcript, "pty", data)
-        runtime.transcript_event_count += 1
-        runtime.emit_event(
+        seq = runtime.emit_event(
             "terminal.stdout",
             {
                 "stream": "stdout",
@@ -1752,6 +1759,8 @@ def _drain_master_output(
                 "size": len(data),
             },
         )
+        _write_transcript_event(transcript, "pty", data, seq=seq)
+        runtime.transcript_event_count += 1
         if stdout_fd is not None:
             os.write(stdout_fd, data)
         else:
@@ -1882,9 +1891,7 @@ def run_tracked_command(launch: TrackLaunch) -> int:
                 if stdin_fd is not None and stdin_fd in ready:
                     data = os.read(stdin_fd, 4096)
                     if data:
-                        _write_transcript_event(transcript, "stdin", data)
-                        runtime.transcript_event_count += 1
-                        runtime.emit_event(
+                        seq = runtime.emit_event(
                             "terminal.stdin",
                             {
                                 "stream": "stdin",
@@ -1892,6 +1899,8 @@ def run_tracked_command(launch: TrackLaunch) -> int:
                                 "size": len(data),
                             },
                         )
+                        _write_transcript_event(transcript, "stdin", data, seq=seq)
+                        runtime.transcript_event_count += 1
                         os.write(master_fd, data)
 
                 if master_fd in ready:
@@ -1903,9 +1912,7 @@ def run_tracked_command(launch: TrackLaunch) -> int:
                         else:
                             raise
                     if data:
-                        _write_transcript_event(transcript, "pty", data)
-                        runtime.transcript_event_count += 1
-                        runtime.emit_event(
+                        seq = runtime.emit_event(
                             "terminal.stdout",
                             {
                                 "stream": "stdout",
@@ -1913,6 +1920,8 @@ def run_tracked_command(launch: TrackLaunch) -> int:
                                 "size": len(data),
                             },
                         )
+                        _write_transcript_event(transcript, "pty", data, seq=seq)
+                        runtime.transcript_event_count += 1
                         if stdout_fd is not None:
                             os.write(stdout_fd, data)
                         else:

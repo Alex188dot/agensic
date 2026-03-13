@@ -1445,7 +1445,10 @@ fn build_provenance_detail_content(
         Line::from(format!("tier: {}", row.evidence_tier)),
         Line::from(format!("model: {}", row.model)),
         Line::from(format!("exit: {}", App::format_exit(row.exit_code))),
-        Line::from(format!("duration: {}", App::format_duration(row.duration_ms))),
+        Line::from(format!(
+            "duration: {}",
+            App::format_duration(row.duration_ms)
+        )),
         Line::from(format!("cwd: {}", row.working_directory)),
         Line::from(""),
     ];
@@ -2164,7 +2167,11 @@ fn runs_table_hovered_copy_row(app: &App, mouse: MouseEvent) -> Option<usize> {
     let layout = runs_table_hit_layout(app)?;
     let row_offset = mouse.row.saturating_sub(layout.data_start_y) as usize;
     if mouse.column < layout.copy_column.x
-        || mouse.column >= layout.copy_column.x.saturating_add(layout.copy_column.width)
+        || mouse.column
+            >= layout
+                .copy_column
+                .x
+                .saturating_add(layout.copy_column.width)
         || row_offset >= layout.row_count
     {
         return None;
