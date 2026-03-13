@@ -32,6 +32,7 @@ const TIMELINE_PAGE_STEP: usize = 500;
 const TEXT_REPLAY_TICK_MS: u64 = 60;
 const TERMINAL_REPLAY_TICK_MS: u64 = TEXT_REPLAY_TICK_MS / 3;
 const TERMINAL_REPLAY_END_PADDING_ROWS: u16 = 20;
+const MAX_SESSION_DURATION_SECONDS: i64 = 24 * 60 * 60;
 const SESSION_COPY_BUTTON: &str = "[ Copy ]";
 const SESSION_COPIED_BUTTON: &str = "[   ✓   ]";
 const TIMELINE_ORDINAL_WIDTH: u16 = 6;
@@ -1650,7 +1651,29 @@ fn format_duration(started_at: i64, ended_at: i64) -> String {
     }
     let end = if ended_at > 0 { ended_at } else { started_at };
     let secs = max(0, end - started_at);
+    if secs >= MAX_SESSION_DURATION_SECONDS {
+        return "24h+".to_string();
+    }
+    if secs >= 3600 {
+        return format_duration_hours_minutes(secs);
+    }
+    if secs >= 60 {
+        return format_duration_minutes_seconds(secs);
+    }
     format!("{}s", secs)
+}
+
+fn format_duration_minutes_seconds(total_seconds: i64) -> String {
+    let minutes = total_seconds / 60;
+    let seconds = total_seconds % 60;
+    format!("{minutes}m {seconds}s")
+}
+
+fn format_duration_hours_minutes(total_seconds: i64) -> String {
+    let total_minutes = total_seconds / 60;
+    let hours = total_minutes / 60;
+    let minutes = total_minutes % 60;
+    format!("{hours}h {minutes}m")
 }
 
 fn format_outcome(exit_code: Option<i64>, status: &str, violation_code: &str) -> String {
@@ -3197,12 +3220,12 @@ fn rect_contains(rect: Rect, column: u16, row: u16) -> bool {
 mod tests {
     use super::{
         build_display_model, build_terminal_replay_frames, collect_terminal_lines, diff_stat_line,
-        export_timeline_rows, format_header_outcome, format_outcome, format_timeline_ordinal,
-        rendered_text_height, replay_max_scroll, repo_display_name, sanitize_inline_text,
-        sanitize_terminal_output, strip_inline_progress_noise, terminal_replay_end_padding,
-        terminal_replay_max_scroll_x, terminal_replay_scroll, vt100_color_to_ratatui, DetailState,
-        FocusPane, ReplayMode, SessionEvent, SessionSummary, TerminalReplayFrame, TimelineEntry,
-        TranscriptChunk,
+        export_timeline_rows, format_duration, format_header_outcome, format_outcome,
+        format_timeline_ordinal, rendered_text_height, replay_max_scroll, repo_display_name,
+        sanitize_inline_text, sanitize_terminal_output, strip_inline_progress_noise,
+        terminal_replay_end_padding, terminal_replay_max_scroll_x, terminal_replay_scroll,
+        vt100_color_to_ratatui, DetailState, FocusPane, ReplayMode, SessionEvent, SessionSummary,
+        TerminalReplayFrame, TimelineEntry, TranscriptChunk,
     };
     use ratatui::{
         layout::Rect,
@@ -3222,6 +3245,16 @@ mod tests {
     fn sanitize_inline_text_collapses_whitespace() {
         let input = "hello\tthere\n\u{1b}[31mworld\u{1b}[0m";
         assert_eq!(sanitize_inline_text(input), "hello there world");
+    }
+
+    #[test]
+    fn format_duration_standardizes_session_units_and_24h_cap() {
+        assert_eq!(format_duration(100, 100), "0s");
+        assert_eq!(format_duration(100, 145), "45s");
+        assert_eq!(format_duration(100, 274), "2m 54s");
+        assert_eq!(format_duration(100, 4_420), "1h 12m");
+        assert_eq!(format_duration(100, 86_500), "24h+");
+        assert_eq!(format_duration(100, 86_501), "24h+");
     }
 
     #[test]

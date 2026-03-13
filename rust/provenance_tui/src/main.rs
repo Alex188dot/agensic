@@ -473,9 +473,9 @@ impl App {
 
     fn format_duration(ms: Option<i64>) -> String {
         match ms {
-            Some(v) if v >= MAX_COMMAND_DURATION_MS => ">24h".to_string(),
-            Some(v) if v >= 3_600_000 => format_duration_unit((v as f64) / 3_600_000.0, "h"),
-            Some(v) if v >= 60_000 => format_duration_unit((v as f64) / 60_000.0, "m"),
+            Some(v) if v >= MAX_COMMAND_DURATION_MS => "24h+".to_string(),
+            Some(v) if v >= 3_600_000 => format_duration_hours_minutes(v),
+            Some(v) if v >= 60_000 => format_duration_minutes_seconds(v),
             Some(v) if v >= 1000 => format_duration_unit((v as f64) / 1000.0, "s"),
             Some(v) if v >= 0 => format!("{}ms", v),
             _ => "-".to_string(),
@@ -1353,6 +1353,20 @@ fn format_duration_unit(value: f64, suffix: &str) -> String {
     } else {
         format!("{:.1}{}", rounded, suffix)
     }
+}
+
+fn format_duration_minutes_seconds(ms: i64) -> String {
+    let total_seconds = ms / 1000;
+    let minutes = total_seconds / 60;
+    let seconds = total_seconds % 60;
+    format!("{minutes}m {seconds}s")
+}
+
+fn format_duration_hours_minutes(ms: i64) -> String {
+    let total_minutes = ms / 60_000;
+    let hours = total_minutes / 60;
+    let minutes = total_minutes % 60;
+    format!("{hours}h {minutes}m")
 }
 
 fn truncate_cell(value: &str, max: usize) -> String {
@@ -2635,12 +2649,17 @@ mod tests {
     }
 
     #[test]
-    fn format_duration_uses_minutes_hours_and_24h_cap() {
+    fn format_duration_uses_seconds_mixed_units_and_24h_cap() {
         assert_eq!(App::format_duration(Some(999)), "999ms");
         assert_eq!(App::format_duration(Some(10_240)), "10.2s");
-        assert_eq!(App::format_duration(Some(162_910)), "2.7m");
-        assert_eq!(App::format_duration(Some(5_400_000)), "1.5h");
-        assert_eq!(App::format_duration(Some(MAX_COMMAND_DURATION_MS)), ">24h");
+        assert_eq!(App::format_duration(Some(162_910)), "2m 42s");
+        assert_eq!(App::format_duration(Some(174_000)), "2m 54s");
+        assert_eq!(App::format_duration(Some(4_320_000)), "1h 12m");
+        assert_eq!(App::format_duration(Some(MAX_COMMAND_DURATION_MS)), "24h+");
+        assert_eq!(
+            App::format_duration(Some(MAX_COMMAND_DURATION_MS + 1)),
+            "24h+"
+        );
     }
 
     fn sample_run_entry() -> RunEntry {
