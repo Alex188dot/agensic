@@ -1453,12 +1453,14 @@ fn build_provenance_detail_content(
         Line::from(""),
     ];
     let command_line_index = lines.len();
-    lines.push(sessions::right_aligned_copy_line(
-        "command",
-        content_width,
-        app.hovered_details_copy,
-        app.details_copy_copied(),
-    ));
+    lines.push(Line::from(vec![
+        Span::styled("command", App::header_style()),
+        Span::raw(" "),
+        Span::styled(
+            sessions::copy_button_label(app.details_copy_copied()),
+            sessions::copy_button_style(app.hovered_details_copy, app.details_copy_copied(), false),
+        ),
+    ]));
     lines.push(Line::from(Span::styled(
         row.command.clone(),
         App::command_style(),
@@ -1747,7 +1749,7 @@ fn draw_ui(terminal: &mut Terminal<CrosstermBackend<Stdout>>, app: &App) -> io::
         let footer = Paragraph::new(vec![
             Line::from(Span::styled(
                 format!(
-                "↑↓ select  Tab/Shift+Tab page  c copy  Ctrl+F search  f filters  s sort={}  Enter details  r refresh  e export(json)  E export(csv)  Esc quit",
+                "↑↓: Select  Tab/Shift+Tab: Page  c: Copy  Ctrl+F: Search  f: Filters  s: Sort={}  Enter: Details  r: Refresh  e: Export(json)  E: Export(csv)  Esc: Quit",
                 app.sort_mode.label(),
                 ),
                 App::key_hint_style(),
@@ -2204,7 +2206,7 @@ fn provenance_details_copy_hit(app: &App, row: &RunEntry, mouse: MouseEvent) -> 
     let button_x = popup
         .x
         .saturating_add(1)
-        .saturating_add(content_width.saturating_sub(button_width as usize) as u16);
+        .saturating_add(sessions::display_width("command ") as u16);
     mouse.row == command_line_row
         && mouse.column >= button_x
         && mouse.column < button_x.saturating_add(button_width)

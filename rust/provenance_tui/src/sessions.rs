@@ -954,7 +954,7 @@ fn draw_browser(frame: &mut ratatui::Frame<'_>, app: &App) {
                     session.agent_name.clone()
                 }),
                 Cell::from(session.model.clone()),
-                Cell::from(truncate(&session.repo_root, 28)),
+                Cell::from(truncate(&repo_display_name(&session.repo_root), 28)),
                 Cell::from(if session.branch_end.trim().is_empty() {
                     session.branch_start.clone()
                 } else {
@@ -1068,7 +1068,7 @@ fn draw_detail(frame: &mut ratatui::Frame<'_>, app: &App, detail: &DetailState) 
     frame.render_widget(
         Paragraph::new(vec![
             Line::from(Span::styled(
-                "mouse wheel / ↑↓ move timeline + replay  Tab/Shift+Tab jump 500  c copy command  E export(csv)  s switch pane  t toggle replay mode  Enter details  space play/pause  Esc back",
+                "Space: Play/Pause   Mouse wheel / ↑↓: Move  Tab/Shift+Tab: Jump 500  c: Copy command  E: Export(csv)  s: Switch pane  t: Toggle replay mode  Enter: Details  Esc: Back",
                 Style::default().fg(Color::Yellow),
             )),
             Line::from(app.status_text().to_string()),
@@ -1094,6 +1094,7 @@ fn draw_detail(frame: &mut ratatui::Frame<'_>, app: &App, detail: &DetailState) 
 }
 
 fn build_header(app: &App, detail: &DetailState) -> Paragraph<'static> {
+    let metadata_key_style = Style::default().fg(Color::Yellow);
     let actor = if detail.session.agent_name.trim().is_empty() {
         detail.session.agent.as_str()
     } else {
@@ -1117,38 +1118,54 @@ fn build_header(app: &App, detail: &DetailState) -> Paragraph<'static> {
             ),
         ]),
         Line::from(vec![
-            Span::raw("session ".to_string()),
+            Span::styled("session ", metadata_key_style),
             Span::raw(detail.session.session_id.clone()),
             Span::raw("  ".to_string()),
             Span::styled(
                 header_copy_button,
                 copy_button_style(app.hovered_header_copy, app.header_copy_copied(), false),
             ),
-            Span::raw(format!(
-                "    duration {}    started {}",
-                format_duration(detail.session.started_at, detail.session.ended_at),
-                format_ts(detail.session.started_at),
+            Span::raw("    ".to_string()),
+            Span::styled("duration ", metadata_key_style),
+            Span::raw(format_duration(
+                detail.session.started_at,
+                detail.session.ended_at,
             )),
+            Span::raw("    ".to_string()),
+            Span::styled("started ", metadata_key_style),
+            Span::raw(format_ts(detail.session.started_at)),
         ]),
     ];
     if !detail.session.repo_root.trim().is_empty() {
-        lines.push(Line::from(format!(
-            "repo {}",
-            sanitize_inline_text(&detail.session.repo_root)
-        )));
+        let repo_name = repo_display_name(&detail.session.repo_root);
+        lines.push(Line::from(vec![
+            Span::styled("repo ", metadata_key_style),
+            Span::raw(repo_name),
+            Span::raw("    ".to_string()),
+            Span::styled("path ", metadata_key_style),
+            Span::raw(sanitize_inline_text(&detail.session.repo_root)),
+        ]));
     }
     if !detail.session.branch_start.trim().is_empty()
         || !detail.session.branch_end.trim().is_empty()
         || !detail.session.head_start.trim().is_empty()
         || !detail.session.head_end.trim().is_empty()
     {
-        lines.push(Line::from(format!(
-            "branch {} -> {}    head {} -> {}",
-            fallback_text(&sanitize_inline_text(&detail.session.branch_start)),
-            fallback_text(&sanitize_inline_text(&detail.session.branch_end)),
-            truncate(&sanitize_inline_text(&detail.session.head_start), 12),
-            truncate(&sanitize_inline_text(&detail.session.head_end), 12),
-        )));
+        let branch_start = sanitize_inline_text(&detail.session.branch_start);
+        let branch_end = sanitize_inline_text(&detail.session.branch_end);
+        let head_start = sanitize_inline_text(&detail.session.head_start);
+        let head_end = sanitize_inline_text(&detail.session.head_end);
+        lines.push(Line::from(vec![
+            Span::styled("branch ", metadata_key_style),
+            Span::raw(fallback_text(&branch_start).to_string()),
+            Span::raw(" -> ".to_string()),
+            Span::raw(fallback_text(&branch_end).to_string()),
+            Span::raw("    ".to_string()),
+            Span::styled("head ", metadata_key_style),
+            Span::raw(truncate(&head_start, 12)),
+            Span::raw(" -> ".to_string()),
+            Span::raw(truncate(&head_end, 12)),
+        ]));
     }
     Paragraph::new(lines)
         .block(
@@ -1362,7 +1379,7 @@ fn build_changes(detail: &DetailState) -> Paragraph<'static> {
                     .fg(Color::Cyan)
                     .add_modifier(Modifier::BOLD),
             )));
-            push_text_block(&mut lines, &committed_diff);
+            push_diff_stat_block(&mut lines, &committed_diff);
         }
         if !worktree_diff.is_empty() {
             lines.push(Line::from(""));
@@ -1372,7 +1389,7 @@ fn build_changes(detail: &DetailState) -> Paragraph<'static> {
                     .fg(Color::Cyan)
                     .add_modifier(Modifier::BOLD),
             )));
-            push_text_block(&mut lines, &worktree_diff);
+            push_diff_stat_block(&mut lines, &worktree_diff);
         }
         if !commits.is_empty() {
             lines.push(Line::from(""));
@@ -1552,8 +1569,8 @@ fn format_outcome(exit_code: Option<i64>, status: &str, violation_code: &str) ->
             .map(|value| value.to_string())
             .unwrap_or_else(|| "-".to_string())
     );
-    if !violation_code.trim().is_empty() {
-        out.push_str(&format!(" violation={}", violation_code));
+    if let Some(violation) = outcome_violation_label(violation_code) {
+        out.push_str(&format!(" violation={}", violation));
     }
     out
 }
@@ -1577,6 +1594,28 @@ fn fallback_text(value: &str) -> &str {
         "-"
     } else {
         value
+    }
+}
+
+fn repo_display_name(repo_root: &str) -> String {
+    let trimmed = repo_root.trim().trim_end_matches(['/', '\\']);
+    if trimmed.is_empty() {
+        return "-".to_string();
+    }
+    Path::new(trimmed)
+        .file_name()
+        .and_then(|name| name.to_str())
+        .filter(|name| !name.trim().is_empty())
+        .map(sanitize_inline_text)
+        .unwrap_or_else(|| sanitize_inline_text(trimmed))
+}
+
+fn outcome_violation_label(violation_code: &str) -> Option<String> {
+    let sanitized = sanitize_inline_text(violation_code);
+    if sanitized.is_empty() || sanitized == "session_boundary_escape" {
+        None
+    } else {
+        Some(sanitized)
     }
 }
 
@@ -1635,18 +1674,8 @@ pub(crate) fn copy_button_label(copied: bool) -> &'static str {
     }
 }
 
-pub(crate) fn right_aligned_copy_line(
-    label: &str,
-    content_width: usize,
-    hovered: bool,
-    copied: bool,
-) -> Line<'static> {
-    let label_width = display_width(label);
+fn inline_copy_line(label: &str, hovered: bool, copied: bool) -> Line<'static> {
     let button = copy_button_label(copied);
-    let icon_width = display_width(button).max(1);
-    let gap_width = content_width
-        .saturating_sub(label_width + icon_width)
-        .max(1);
     Line::from(vec![
         Span::styled(
             label.to_string(),
@@ -1654,7 +1683,7 @@ pub(crate) fn right_aligned_copy_line(
                 .fg(Color::Cyan)
                 .add_modifier(Modifier::BOLD),
         ),
-        Span::raw(" ".repeat(gap_width)),
+        Span::raw(" "),
         Span::styled(button, copy_button_style(hovered, copied, false)),
     ])
 }
@@ -1708,7 +1737,7 @@ fn build_event_modal_content(
     event: &SessionEvent,
     entry: &TimelineEntry,
     detail: &DetailState,
-    content_width: usize,
+    _content_width: usize,
     hovered_copy: bool,
     copied: bool,
 ) -> EventModalContent {
@@ -1767,12 +1796,7 @@ fn build_event_modal_content(
     if let Some(command) = command.as_ref() {
         lines.push(Line::from(""));
         command_line_index = Some(lines.len() as u16);
-        lines.push(right_aligned_copy_line(
-            "command",
-            content_width,
-            hovered_copy,
-            copied,
-        ));
+        lines.push(inline_copy_line("command", hovered_copy, copied));
         push_text_block(&mut lines, &sanitize_multiline_text(command));
     }
 
@@ -2417,6 +2441,61 @@ fn push_text_block(lines: &mut Vec<Line<'static>>, text: &str) {
     }
 }
 
+fn push_diff_stat_block(lines: &mut Vec<Line<'static>>, text: &str) {
+    for line in text.lines() {
+        lines.push(diff_stat_line(line));
+    }
+    if text.lines().next().is_none() {
+        lines.push(Line::from("-"));
+    }
+}
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum DiffStatSegmentKind {
+    Default,
+    Addition,
+    Deletion,
+}
+
+fn diff_stat_line(line: &str) -> Line<'static> {
+    let mut spans = Vec::new();
+    let mut buffer = String::new();
+    let mut current_kind = DiffStatSegmentKind::Default;
+
+    for ch in line.chars() {
+        let next_kind = match ch {
+            '+' => DiffStatSegmentKind::Addition,
+            '-' => DiffStatSegmentKind::Deletion,
+            _ => DiffStatSegmentKind::Default,
+        };
+        if !buffer.is_empty() && next_kind != current_kind {
+            push_diff_stat_span(&mut spans, &mut buffer, current_kind);
+        }
+        current_kind = next_kind;
+        buffer.push(ch);
+    }
+    push_diff_stat_span(&mut spans, &mut buffer, current_kind);
+
+    Line::from(spans)
+}
+
+fn push_diff_stat_span(
+    spans: &mut Vec<Span<'static>>,
+    buffer: &mut String,
+    kind: DiffStatSegmentKind,
+) {
+    if buffer.is_empty() {
+        return;
+    }
+    let text = std::mem::take(buffer);
+    let span = match kind {
+        DiffStatSegmentKind::Default => Span::raw(text),
+        DiffStatSegmentKind::Addition => Span::styled(text, Style::default().fg(Color::Green)),
+        DiffStatSegmentKind::Deletion => Span::styled(text, Style::default().fg(Color::Red)),
+    };
+    spans.push(span);
+}
+
 fn metric(value: Option<&Value>) -> String {
     match value {
         Some(Value::Number(number)) => number.to_string(),
@@ -2895,7 +2974,7 @@ fn event_modal_copy_command(
     let icon_x = popup
         .x
         .saturating_add(1)
-        .saturating_add(popup.width.saturating_sub(2 + copy_icon_width() as u16));
+        .saturating_add(display_width("command ") as u16);
     (mouse.row == visible_row
         && mouse.column >= icon_x
         && mouse.column < icon_x.saturating_add(copy_icon_width() as u16))
@@ -2949,11 +3028,12 @@ fn rect_contains(rect: Rect, column: u16, row: u16) -> bool {
 #[cfg(test)]
 mod tests {
     use super::{
-        build_display_model, build_terminal_replay_frames, collect_terminal_lines,
-        export_timeline_rows, format_header_outcome, format_timeline_ordinal, rendered_text_height,
-        replay_max_scroll, sanitize_inline_text, sanitize_terminal_output,
-        strip_inline_progress_noise, vt100_color_to_ratatui, DetailState, FocusPane, ReplayMode,
-        SessionEvent, SessionSummary, TerminalReplayFrame, TimelineEntry, TranscriptChunk,
+        build_display_model, build_terminal_replay_frames, collect_terminal_lines, diff_stat_line,
+        export_timeline_rows, format_header_outcome, format_outcome, format_timeline_ordinal,
+        rendered_text_height, replay_max_scroll, repo_display_name, sanitize_inline_text,
+        sanitize_terminal_output, strip_inline_progress_noise, vt100_color_to_ratatui, DetailState,
+        FocusPane, ReplayMode, SessionEvent, SessionSummary, TerminalReplayFrame, TimelineEntry,
+        TranscriptChunk,
     };
     use ratatui::{
         layout::Rect,
@@ -3263,6 +3343,39 @@ mod tests {
     #[test]
     fn format_header_outcome_omits_violation() {
         assert_eq!(format_header_outcome(Some(0), "exited"), "exited exit=0");
+    }
+
+    #[test]
+    fn format_outcome_hides_session_boundary_escape() {
+        assert_eq!(
+            format_outcome(Some(0), "exited", "session_boundary_escape"),
+            "exited exit=0"
+        );
+        assert_eq!(
+            format_outcome(Some(1), "failed", "escape_primitive_blocked"),
+            "failed exit=1 violation=escape_primitive_blocked"
+        );
+    }
+
+    #[test]
+    fn repo_display_name_uses_repo_basename() {
+        assert_eq!(
+            repo_display_name("/Users/alessioleodori/HelloWorld/ai_terminal2"),
+            "ai_terminal2"
+        );
+        assert_eq!(repo_display_name("/tmp/example-repo/"), "example-repo");
+    }
+
+    #[test]
+    fn diff_stat_line_colors_plus_and_minus_segments() {
+        let line = diff_stat_line("README.md | 242 +++++---");
+
+        assert_eq!(line.spans.len(), 3);
+        assert_eq!(line.spans[0].content.as_ref(), "README.md | 242 ");
+        assert_eq!(line.spans[1].content.as_ref(), "+++++");
+        assert_eq!(line.spans[1].style.fg, Some(Color::Green));
+        assert_eq!(line.spans[2].content.as_ref(), "---");
+        assert_eq!(line.spans[2].style.fg, Some(Color::Red));
     }
 
     #[test]
