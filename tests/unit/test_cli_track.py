@@ -488,6 +488,27 @@ class CliTrackTests(unittest.TestCase):
             self.assertTrue(any(str(item.get("track_session_id", "") or "").strip() for item in payloads))
             self.assertTrue(any(item.get("track_launch_mode") == "raw_command" for item in payloads))
 
+    def test_write_transcript_resize_event_records_rows_and_cols(self):
+        handle = tempfile.NamedTemporaryFile("w+", encoding="utf-8", delete=False)
+        handle.close()
+        try:
+            with open(handle.name, "a", encoding="utf-8") as transcript:
+                track_module._write_transcript_resize_event(
+                    transcript,
+                    rows=33,
+                    cols=120,
+                    seq=7,
+                )
+
+            payload = Path(handle.name).read_text(encoding="utf-8").strip()
+            event = json.loads(payload)
+            self.assertEqual(event["direction"], "resize")
+            self.assertEqual(event["rows"], 33)
+            self.assertEqual(event["cols"], 120)
+            self.assertEqual(event["seq"], 7)
+        finally:
+            Path(handle.name).unlink(missing_ok=True)
+
     def test_run_tracked_command_records_session_summary_and_events(self):
         with self._temp_app_paths() as (_, temp_paths), tempfile.TemporaryDirectory() as repo_dir:
             subprocess.run(["git", "init"], cwd=repo_dir, check=True, capture_output=True, text=True)

@@ -157,6 +157,8 @@ struct TranscriptRecord {
     #[serde(default)]
     data_b64: String,
     seq: Option<i64>,
+    rows: Option<u16>,
+    cols: Option<u16>,
 }
 
 #[derive(Clone, Debug, Default)]
@@ -164,6 +166,14 @@ struct TranscriptChunk {
     direction: String,
     data: Vec<u8>,
     seq: Option<i64>,
+    rows: Option<u16>,
+    cols: Option<u16>,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum TerminalReplayCacheKey {
+    RecordedGeometry,
+    Viewport(u16, u16),
 }
 
 struct DetailState {
@@ -177,7 +187,7 @@ struct DetailState {
     replay_timeline_indices: Vec<usize>,
     transcript_chunks: Vec<TranscriptChunk>,
     terminal_replay_frames: Vec<TerminalReplayFrame>,
-    terminal_cache_size: Option<(u16, u16)>,
+    terminal_cache_key: Option<TerminalReplayCacheKey>,
     replay_notice: Option<String>,
     replay_step: usize,
     replay_text: String,
@@ -231,7 +241,7 @@ impl DetailState {
             replay_timeline_indices,
             transcript_chunks,
             terminal_replay_frames: Vec::new(),
-            terminal_cache_size: None,
+            terminal_cache_key: None,
             replay_notice,
             replay_step: 0,
             replay_text: String::new(),
@@ -260,21 +270,24 @@ impl DetailState {
     }
 
     fn ensure_terminal_replay_cache(&mut self) {
-        if self.replay_mode != ReplayMode::Terminal && self.terminal_cache_size.is_some() {
-            return;
-        }
         let Some(layout) = session_detail_layout(self) else {
             return;
         };
-        let rows = layout.replay.height.saturating_sub(2).max(1);
-        let cols = layout.replay.width.saturating_sub(2).max(1);
-        if self.terminal_cache_size == Some((rows, cols)) && !self.terminal_replay_frames.is_empty()
-        {
+        let viewport_rows = layout.replay.height.saturating_sub(2).max(1);
+        let viewport_cols = layout.replay.width.saturating_sub(2).max(1);
+        let cache_key = if transcript_has_recorded_geometry(&self.transcript_chunks) {
+            TerminalReplayCacheKey::RecordedGeometry
+        } else {
+            TerminalReplayCacheKey::Viewport(viewport_rows, viewport_cols)
+        };
+        if self.terminal_cache_key == Some(cache_key) && !self.terminal_replay_frames.is_empty() {
             return;
         }
+        let (rows, cols) = first_recorded_terminal_size(&self.transcript_chunks)
+            .unwrap_or((viewport_rows, viewport_cols));
         self.terminal_replay_frames =
             build_terminal_replay_frames(&self.transcript_chunks, rows, cols);
-        self.terminal_cache_size = Some((rows, cols));
+        self.terminal_cache_key = Some(cache_key);
         if self.replay_mode == ReplayMode::Terminal && self.terminal_replay_frames.is_empty() {
             self.replay_mode = ReplayMode::Text;
         }
@@ -490,6 +503,8 @@ struct TerminalReplayFrame {
     plain_text: String,
     lines: Vec<Line<'static>>,
     source_seq_end: Option<i64>,
+    rows: u16,
+    cols: u16,
 }
 
 #[derive(Clone, Debug, Default)]
@@ -1416,8 +1431,17 @@ fn build_replay(detail: &DetailState, area: Rect) -> Paragraph<'static> {
         ReplayMode::Terminal => "Terminal, faithful screen state",
         ReplayMode::Text => "Text, session transcript",
     };
-    let title = format!("Replay ({}) {} ", mode_label, status_icon);
-    let (text, scroll) = match detail.replay_mode {
+    let frame_size_label = detail
+        .terminal_replay_frames
+        .get(detail.replay_step)
+        .filter(|_| detail.replay_mode == ReplayMode::Terminal && detail.replay_visible)
+        .map(|frame| format!(" {}x{}", frame.cols, frame.rows))
+        .unwrap_or_default();
+    let title = format!(
+        "Replay ({}{}) {} ",
+        mode_label, frame_size_label, status_icon
+    );
+    let (text, scroll_y, scroll_x) = match detail.replay_mode {
         ReplayMode::Terminal => {
             let lines = if detail.replay_visible {
                 detail
@@ -1431,7 +1455,7 @@ fn build_replay(detail: &DetailState, area: Rect) -> Paragraph<'static> {
             } else {
                 vec![Line::from("")]
             };
-            (Text::from(lines), 0)
+            (Text::from(lines), 0, 0)
         }
         ReplayMode::Text => {
             let collapsed = if detail.replay_visible {
@@ -1469,13 +1493,17 @@ fn build_replay(detail: &DetailState, area: Rect) -> Paragraph<'static> {
             } else {
                 detail.replay_scroll.min(max_scroll)
             };
-            (Text::from(lines), scroll)
+            (Text::from(lines), scroll, 0)
         }
     };
-    Paragraph::new(text)
+    let paragraph = Paragraph::new(text)
         .block(pane_block(&title, focused))
-        .scroll((scroll, 0))
-        .wrap(Wrap { trim: false })
+        .scroll((scroll_y, scroll_x));
+    if detail.replay_mode == ReplayMode::Text {
+        paragraph.wrap(Wrap { trim: false })
+    } else {
+        paragraph
+    }
 }
 
 fn draw_event_modal(
@@ -1989,41 +2017,90 @@ fn load_transcript_chunks(path: &str) -> Vec<TranscriptChunk> {
         .lines()
         .filter_map(|line| serde_json::from_str::<TranscriptRecord>(line).ok())
         .filter_map(|record| {
-            let data = BASE64_STANDARD.decode(record.data_b64.as_bytes()).ok()?;
+            let data = if record.data_b64.is_empty() {
+                Vec::new()
+            } else {
+                BASE64_STANDARD.decode(record.data_b64.as_bytes()).ok()?
+            };
             Some(TranscriptChunk {
                 direction: record.direction.trim().to_string(),
                 data,
                 seq: record.seq,
+                rows: record.rows,
+                cols: record.cols,
             })
         })
         .collect()
 }
 
+fn transcript_has_recorded_geometry(transcript_chunks: &[TranscriptChunk]) -> bool {
+    transcript_chunks
+        .iter()
+        .any(|chunk| transcript_chunk_size(chunk).is_some())
+}
+
+fn first_recorded_terminal_size(transcript_chunks: &[TranscriptChunk]) -> Option<(u16, u16)> {
+    transcript_chunks.iter().find_map(transcript_chunk_size)
+}
+
+fn transcript_chunk_size(chunk: &TranscriptChunk) -> Option<(u16, u16)> {
+    let rows = chunk.rows.filter(|value| *value > 0)?;
+    let cols = chunk.cols.filter(|value| *value > 0)?;
+    Some((rows, cols))
+}
+
 fn build_terminal_replay_frames(
     transcript_chunks: &[TranscriptChunk],
-    rows: u16,
-    cols: u16,
+    fallback_rows: u16,
+    fallback_cols: u16,
 ) -> Vec<TerminalReplayFrame> {
-    let mut parser = VtParser::new(rows.max(1), cols.max(1), 10_000);
+    let initial_size =
+        first_recorded_terminal_size(transcript_chunks).unwrap_or((fallback_rows, fallback_cols));
+    let mut parser = VtParser::new(initial_size.0.max(1), initial_size.1.max(1), 10_000);
     let mut frames = Vec::new();
     let mut last_frame = Vec::new();
 
     for chunk in transcript_chunks {
-        if chunk.direction != "pty" || chunk.data.is_empty() {
-            continue;
-        }
-        parser.process(&chunk.data);
-        let formatted = parser.screen().contents_formatted();
-        let frame = render_terminal_frame(parser.screen(), rows.max(1), cols.max(1), chunk.seq);
-        if formatted != last_frame {
-            last_frame = formatted;
-            frames.push(frame);
-        } else if let (Some(seq), Some(last)) = (chunk.seq, frames.last_mut()) {
-            last.source_seq_end = Some(seq);
+        match chunk.direction.as_str() {
+            "resize" => {
+                if let Some((rows, cols)) = transcript_chunk_size(chunk) {
+                    parser.set_size(rows.max(1), cols.max(1));
+                    maybe_push_terminal_frame(&mut frames, &mut last_frame, &parser, chunk.seq);
+                }
+            }
+            "pty" => {
+                if chunk.data.is_empty() {
+                    continue;
+                }
+                parser.process(&chunk.data);
+                maybe_push_terminal_frame(&mut frames, &mut last_frame, &parser, chunk.seq);
+            }
+            _ => {}
         }
     }
 
     frames
+}
+
+fn maybe_push_terminal_frame(
+    frames: &mut Vec<TerminalReplayFrame>,
+    last_frame: &mut Vec<u8>,
+    parser: &VtParser,
+    source_seq_end: Option<i64>,
+) {
+    let screen = parser.screen();
+    let formatted = screen.contents_formatted();
+    let (rows, cols) = screen.size();
+    let frame = render_terminal_frame(screen, rows.max(1), cols.max(1), source_seq_end);
+    if formatted != *last_frame {
+        if frames.is_empty() && frame.plain_text.trim().is_empty() {
+            return;
+        }
+        *last_frame = formatted;
+        frames.push(frame);
+    } else if let (Some(seq), Some(last)) = (source_seq_end, frames.last_mut()) {
+        last.source_seq_end = Some(seq);
+    }
 }
 
 fn render_terminal_frame(
@@ -2071,6 +2148,8 @@ fn render_terminal_frame(
         plain_text,
         lines,
         source_seq_end,
+        rows,
+        cols,
     }
 }
 
@@ -3219,6 +3298,8 @@ mod tests {
                 direction: "pty".to_string(),
                 data: b"Hello\r\x1b[6Cthere".to_vec(),
                 seq: Some(10),
+                rows: None,
+                cols: None,
             }],
             4,
             20,
@@ -3239,6 +3320,8 @@ mod tests {
                 direction: "pty".to_string(),
                 data: b"\x1b[31;1mERR\x1b[0m".to_vec(),
                 seq: Some(11),
+                rows: None,
+                cols: None,
             }],
             2,
             8,
@@ -3254,6 +3337,84 @@ mod tests {
         assert_eq!(
             vt100_color_to_ratatui(vt100::Color::Idx(42)),
             Color::Indexed(42)
+        );
+    }
+
+    #[test]
+    fn terminal_replay_uses_recorded_terminal_geometry() {
+        let frames = build_terminal_replay_frames(
+            &[
+                TranscriptChunk {
+                    direction: "resize".to_string(),
+                    data: Vec::new(),
+                    seq: Some(1),
+                    rows: Some(6),
+                    cols: Some(24),
+                },
+                TranscriptChunk {
+                    direction: "pty".to_string(),
+                    data: b"Hello\r\x1b[6Cthere".to_vec(),
+                    seq: Some(2),
+                    rows: None,
+                    cols: None,
+                },
+            ],
+            4,
+            8,
+        );
+
+        assert_eq!(frames.len(), 1);
+        assert_eq!(frames[0].rows, 6);
+        assert_eq!(frames[0].cols, 24);
+        assert_eq!(
+            frames[0].plain_text.lines().next().unwrap_or_default(),
+            "Hello there"
+        );
+    }
+
+    #[test]
+    fn terminal_replay_applies_recorded_resize_events_mid_session() {
+        let frames = build_terminal_replay_frames(
+            &[
+                TranscriptChunk {
+                    direction: "resize".to_string(),
+                    data: Vec::new(),
+                    seq: Some(1),
+                    rows: Some(2),
+                    cols: Some(5),
+                },
+                TranscriptChunk {
+                    direction: "pty".to_string(),
+                    data: b"abcde".to_vec(),
+                    seq: Some(2),
+                    rows: None,
+                    cols: None,
+                },
+                TranscriptChunk {
+                    direction: "resize".to_string(),
+                    data: Vec::new(),
+                    seq: Some(3),
+                    rows: Some(2),
+                    cols: Some(10),
+                },
+                TranscriptChunk {
+                    direction: "pty".to_string(),
+                    data: b"\x1b[H1234567890".to_vec(),
+                    seq: Some(4),
+                    rows: None,
+                    cols: None,
+                },
+            ],
+            2,
+            5,
+        );
+
+        assert_eq!(frames.len(), 2);
+        assert_eq!(frames[0].cols, 5);
+        assert_eq!(frames[1].cols, 10);
+        assert_eq!(
+            frames[1].plain_text.lines().next().unwrap_or_default(),
+            "1234567890"
         );
     }
 
@@ -3310,8 +3471,10 @@ mod tests {
                 plain_text: "/tmp".to_string(),
                 lines: vec![Line::from("/tmp")],
                 source_seq_end: Some(2),
+                rows: 1,
+                cols: 4,
             }],
-            terminal_cache_size: None,
+            terminal_cache_key: None,
             replay_notice: None,
             replay_step: 0,
             replay_text: String::new(),

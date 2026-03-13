@@ -1426,6 +1426,25 @@ def _write_transcript_event(
     handle.flush()
 
 
+def _write_transcript_resize_event(
+    handle: Any,
+    *,
+    rows: int,
+    cols: int,
+    seq: int | None = None,
+) -> None:
+    event = {
+        "ts": round(time.time(), 6),
+        "direction": "resize",
+        "rows": max(1, int(rows or 0)),
+        "cols": max(1, int(cols or 0)),
+    }
+    if seq is not None:
+        event["seq"] = int(seq)
+    handle.write(json.dumps(event, separators=(",", ":")) + "\n")
+    handle.flush()
+
+
 def _write_session_event(
     handle: Any,
     *,
@@ -1975,12 +1994,14 @@ def _watch_tracked_process_tree(runtime: TrackRuntime) -> None:
         time.sleep(TRACK_POLL_INTERVAL_SECONDS)
 
 
-def _apply_winsize(master_fd: int, stdin_fd: int) -> None:
+def _apply_winsize(master_fd: int, stdin_fd: int) -> tuple[int, int] | None:
     try:
         raw = fcntl.ioctl(stdin_fd, termios.TIOCGWINSZ, struct.pack("HHHH", 0, 0, 0, 0))
         fcntl.ioctl(master_fd, termios.TIOCSWINSZ, raw)
+        rows, cols, _, _ = struct.unpack("HHHH", raw)
+        return max(1, int(rows or 0)), max(1, int(cols or 0))
     except Exception:
-        return
+        return None
 
 
 def _drain_master_output(
@@ -2105,6 +2126,9 @@ def run_tracked_command(launch: TrackLaunch) -> int:
     stdin_fd = None
     stdout_fd = None
     resize_handler = None
+    resize_pending = False
+    pending_initial_winsize: tuple[int, int] | None = None
+    last_transcript_winsize: tuple[int, int] | None = None
     try:
         if sys.stdin.isatty():
             stdin_fd = sys.stdin.fileno()
@@ -2112,10 +2136,11 @@ def run_tracked_command(launch: TrackLaunch) -> int:
             console.print(f"agensic session id {session_id}", highlight=False)
             old_tty = termios.tcgetattr(stdin_fd)
             tty.setraw(stdin_fd)
-            _apply_winsize(master_fd, stdin_fd)
+            pending_initial_winsize = _apply_winsize(master_fd, stdin_fd)
 
             def _on_resize(signum: int, frame: Any) -> None:
-                _apply_winsize(master_fd, stdin_fd)
+                nonlocal resize_pending
+                resize_pending = True
 
             resize_handler = signal.getsignal(signal.SIGWINCH)
             signal.signal(signal.SIGWINCH, _on_resize)
@@ -2136,9 +2161,46 @@ def run_tracked_command(launch: TrackLaunch) -> int:
                 },
             )
             runtime.emit_event("git.snapshot.start", dict(runtime.start_snapshot))
+            if pending_initial_winsize is not None:
+                rows, cols = pending_initial_winsize
+                seq = runtime.emit_event(
+                    "terminal.resize",
+                    {
+                        "rows": rows,
+                        "cols": cols,
+                    },
+                )
+                _write_transcript_resize_event(
+                    transcript,
+                    rows=rows,
+                    cols=cols,
+                    seq=seq,
+                )
+                runtime.transcript_event_count += 1
+                last_transcript_winsize = (rows, cols)
             watcher.start()
             watcher_started = True
             while True:
+                if stdin_fd is not None and resize_pending:
+                    resize_pending = False
+                    next_winsize = _apply_winsize(master_fd, stdin_fd)
+                    if next_winsize is not None and next_winsize != last_transcript_winsize:
+                        rows, cols = next_winsize
+                        seq = runtime.emit_event(
+                            "terminal.resize",
+                            {
+                                "rows": rows,
+                                "cols": cols,
+                            },
+                        )
+                        _write_transcript_resize_event(
+                            transcript,
+                            rows=rows,
+                            cols=cols,
+                            seq=seq,
+                        )
+                        runtime.transcript_event_count += 1
+                        last_transcript_winsize = next_winsize
                 read_fds = [master_fd]
                 if stdin_fd is not None:
                     read_fds.append(stdin_fd)
