@@ -30,7 +30,21 @@ use std::process::{Command, Stdio};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 pub(crate) const COPY_FLASH_DURATION: Duration = Duration::from_secs(3);
-const COPY_ICON: &str = "⧉";
+
+pub(crate) fn format_compact_count(value: usize) -> String {
+    let numeric = value as f64;
+    if value < 10_000 {
+        value.to_string()
+    } else if value < 1_000_000 {
+        format!("{:.1}k", numeric / 1_000.0)
+    } else if value < 1_000_000_000 {
+        format!("{:.1}m", numeric / 1_000_000.0)
+    } else if value < 1_000_000_000_000 {
+        format!("{:.1}b", numeric / 1_000_000_000.0)
+    } else {
+        format!("{:.1}t", numeric / 1_000_000_000_000.0)
+    }
+}
 
 #[derive(Clone)]
 pub(crate) struct FlashStatus {
@@ -194,6 +208,24 @@ struct RunsResponse {
 struct RunsPage {
     rows: Vec<RunEntry>,
     total_matching: usize,
+}
+
+#[derive(Clone, Copy, Debug)]
+struct CopyFeedback {
+    target: CopyFeedbackTarget,
+    expires_at: Instant,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum CopyFeedbackTarget {
+    TableRow(usize),
+    DetailsCommand,
+}
+
+impl CopyFeedback {
+    fn active_target(&self) -> Option<CopyFeedbackTarget> {
+        (Instant::now() <= self.expires_at).then_some(self.target)
+    }
 }
 
 fn collect_all_runs_pages<F>(page_limit: usize, mut fetch_page: F) -> Result<RunsPage, String>
@@ -368,6 +400,7 @@ struct App {
     total_matching: usize,
     status: String,
     flash_status: Option<FlashStatus>,
+    copy_feedback: Option<CopyFeedback>,
     last_edit: Instant,
     semantic_dirty: bool,
     sort_mode: SortMode,
@@ -379,6 +412,8 @@ struct App {
     time_popup_error: String,
     time_popup_start_replace_on_type: bool,
     time_popup_end_replace_on_type: bool,
+    hovered_run_copy_row: Option<usize>,
+    hovered_details_copy: bool,
 }
 
 impl App {
@@ -406,6 +441,7 @@ impl App {
             total_matching: 0,
             status: "Ready".to_string(),
             flash_status: None,
+            copy_feedback: None,
             last_edit: Instant::now(),
             semantic_dirty: false,
             sort_mode: SortMode::TimeDesc,
@@ -417,6 +453,8 @@ impl App {
             time_popup_error: String::new(),
             time_popup_start_replace_on_type: false,
             time_popup_end_replace_on_type: false,
+            hovered_run_copy_row: None,
+            hovered_details_copy: false,
         }
     }
 
@@ -436,7 +474,9 @@ impl App {
     fn format_duration(ms: Option<i64>) -> String {
         match ms {
             Some(v) if v >= MAX_COMMAND_DURATION_MS => ">24h".to_string(),
-            Some(v) if v >= 1000 => format!("{:.2}s", (v as f64) / 1000.0),
+            Some(v) if v >= 3_600_000 => format_duration_unit((v as f64) / 3_600_000.0, "h"),
+            Some(v) if v >= 60_000 => format_duration_unit((v as f64) / 60_000.0, "m"),
+            Some(v) if v >= 1000 => format_duration_unit((v as f64) / 1000.0, "s"),
             Some(v) if v >= 0 => format!("{}ms", v),
             _ => "-".to_string(),
         }
@@ -477,12 +517,6 @@ impl App {
         Style::default().fg(Color::Yellow)
     }
 
-    fn copy_icon_style() -> Style {
-        Style::default()
-            .fg(Color::LightGreen)
-            .add_modifier(Modifier::BOLD)
-    }
-
     fn header_style() -> Style {
         Style::default()
             .fg(Color::Cyan)
@@ -498,6 +532,31 @@ impl App {
 
     fn set_flash(&mut self, message: impl Into<String>) {
         self.flash_status = Some(FlashStatus::new(message));
+    }
+
+    fn active_copy_feedback(&self) -> Option<CopyFeedbackTarget> {
+        self.copy_feedback
+            .as_ref()
+            .and_then(CopyFeedback::active_target)
+    }
+
+    fn set_copy_feedback(&mut self, target: CopyFeedbackTarget) {
+        self.copy_feedback = Some(CopyFeedback {
+            target,
+            expires_at: Instant::now() + COPY_FLASH_DURATION,
+        });
+    }
+
+    fn run_copy_hovered(&self, global_idx: usize) -> bool {
+        self.hovered_run_copy_row == Some(global_idx)
+    }
+
+    fn run_copy_copied(&self, global_idx: usize) -> bool {
+        self.active_copy_feedback() == Some(CopyFeedbackTarget::TableRow(global_idx))
+    }
+
+    fn details_copy_copied(&self) -> bool {
+        self.active_copy_feedback() == Some(CopyFeedbackTarget::DetailsCommand)
     }
 
     fn search_hit(row: &RunEntry, query: &str) -> bool {
@@ -1287,6 +1346,15 @@ fn default_export_path(ext: &str) -> String {
     )
 }
 
+fn format_duration_unit(value: f64, suffix: &str) -> String {
+    let rounded = (value * 10.0).round() / 10.0;
+    if (rounded.fract()).abs() < f64::EPSILON {
+        format!("{}{}", rounded as i64, suffix)
+    } else {
+        format!("{:.1}{}", rounded, suffix)
+    }
+}
+
 fn truncate_cell(value: &str, max: usize) -> String {
     let chars: Vec<char> = value.chars().collect();
     if chars.len() <= max {
@@ -1330,6 +1398,79 @@ fn push_text_block(lines: &mut Vec<Line<'static>>, text: &str) {
     }
 }
 
+struct ProvenanceDetailContent {
+    lines: Vec<Line<'static>>,
+    command_row_offset: Option<u16>,
+}
+
+fn build_provenance_detail_content(
+    app: &App,
+    row: &RunEntry,
+    content_width: usize,
+) -> ProvenanceDetailContent {
+    let payload_without_output = match &row.payload {
+        Value::Object(map) => {
+            let mut filtered = map.clone();
+            filtered.remove("captured_stdout_tail");
+            filtered.remove("captured_stderr_tail");
+            filtered.remove("captured_output_truncated");
+            Value::Object(filtered)
+        }
+        other => other.clone(),
+    };
+    let payload_summary = match &payload_without_output {
+        Value::Object(_) | Value::Array(_) => {
+            let text = serde_json::to_string_pretty(&payload_without_output)
+                .unwrap_or_else(|_| "{}".to_string());
+            truncate_cell(&text, 1200)
+        }
+        other => other.to_string(),
+    };
+    let mut lines: Vec<Line<'static>> = vec![
+        Line::from(format!("run_id: {}", row.run_id)),
+        Line::from(format!("time: {}", App::format_time(row.ts))),
+        Line::from(format!("actor: {}", App::actor_of(row))),
+        Line::from(format!(
+            "agent_name: {}",
+            if row.agent_name.trim().is_empty() {
+                "-"
+            } else {
+                row.agent_name.as_str()
+            }
+        )),
+        Line::from(vec![
+            Span::raw("label: "),
+            Span::styled(row.label.clone(), App::label_style(&row.label)),
+        ]),
+        Line::from(format!("tier: {}", row.evidence_tier)),
+        Line::from(format!("model: {}", row.model)),
+        Line::from(format!("exit: {}", App::format_exit(row.exit_code))),
+        Line::from(format!("duration: {}", App::format_duration(row.duration_ms))),
+        Line::from(format!("cwd: {}", row.working_directory)),
+        Line::from(""),
+    ];
+    let command_line_index = lines.len();
+    lines.push(sessions::right_aligned_copy_line(
+        "command",
+        content_width,
+        app.hovered_details_copy,
+        app.details_copy_copied(),
+    ));
+    lines.push(Line::from(Span::styled(
+        row.command.clone(),
+        App::command_style(),
+    )));
+    lines.push(Line::from(""));
+    lines.push(Line::from("payload:"));
+    push_text_block(&mut lines, &payload_summary);
+    let command_row_offset = rendered_content_height(&lines[..command_line_index], content_width)
+        .min(u16::MAX as usize) as u16;
+    ProvenanceDetailContent {
+        lines,
+        command_row_offset: Some(command_row_offset),
+    }
+}
+
 fn rendered_line_height(line: &Line<'_>, width: usize) -> usize {
     if width == 0 {
         return 1;
@@ -1355,28 +1496,29 @@ fn rendered_content_height(lines: &[Line<'_>], width: usize) -> usize {
 }
 
 fn run_table_constraints(compact: bool) -> Vec<Constraint> {
+    let copy_width = sessions::copy_icon_width() as u16;
     if compact {
         vec![
-            Constraint::Length(5),
-            Constraint::Length(18),
-            Constraint::Length(16),
-            Constraint::Min(30),
-            Constraint::Length(4),
             Constraint::Length(6),
-            Constraint::Length(10),
+            Constraint::Length(18),
+            Constraint::Length(12),
+            Constraint::Min(30),
+            Constraint::Length(copy_width),
+            Constraint::Length(6),
+            Constraint::Length(8),
         ]
     } else {
         vec![
-            Constraint::Length(5),
-            Constraint::Length(18),
-            Constraint::Length(18),
-            Constraint::Min(48),
-            Constraint::Length(4),
             Constraint::Length(6),
-            Constraint::Length(10),
-            Constraint::Length(16),
-            Constraint::Length(20),
             Constraint::Length(18),
+            Constraint::Length(12),
+            Constraint::Min(48),
+            Constraint::Length(copy_width),
+            Constraint::Length(6),
+            Constraint::Length(8),
+            Constraint::Length(14),
+            Constraint::Length(18),
+            Constraint::Length(14),
         ]
     }
 }
@@ -1510,6 +1652,7 @@ fn draw_ui(terminal: &mut Terminal<CrosstermBackend<Stdout>>, app: &App) -> io::
         } else {
             &[]
         };
+        let selected_global_idx = app.selected_global_index();
         let rows: Vec<Row> = page_rows
             .iter()
             .enumerate()
@@ -1525,12 +1668,21 @@ fn draw_ui(terminal: &mut Terminal<CrosstermBackend<Stdout>>, app: &App) -> io::
                 } else {
                     truncate_cell(&row.command, 80)
                 };
+                let copy_hovered = app.run_copy_hovered(global_idx);
+                let copy_copied = app.run_copy_copied(global_idx);
+                let selected_row = selected_global_idx == Some(global_idx);
                 let mut cells = vec![
-                    Cell::from((global_idx + 1).to_string()),
+                    Cell::from(sessions::truncate_display_width(
+                        &format_compact_count(global_idx + 1),
+                        6,
+                    )),
                     Cell::from(time_str),
-                    Cell::from(truncate_cell(&App::actor_of(row), 18)),
+                    Cell::from(sessions::truncate_display_width(&App::actor_of(row), 12)),
                     Cell::from(command_text).style(App::command_style()),
-                    Cell::from(Span::styled(COPY_ICON, App::copy_icon_style())),
+                    Cell::from(Span::styled(
+                        sessions::copy_button_label(copy_copied),
+                        sessions::copy_button_style(copy_hovered, copy_copied, selected_row),
+                    )),
                     Cell::from(App::format_exit(row.exit_code)),
                     Cell::from(App::format_duration(row.duration_ms)),
                 ];
@@ -1556,14 +1708,14 @@ fn draw_ui(terminal: &mut Terminal<CrosstermBackend<Stdout>>, app: &App) -> io::
         let constraints = run_table_constraints(compact);
 
         let header_cells = if compact {
-            vec!["n.", "time", "actor", "command", COPY_ICON, "exit", "duration"]
+            vec!["n.", "time", "actor", "command", "copy", "exit", "duration"]
         } else {
             vec![
                 "n.",
                 "time",
                 "actor",
                 "command",
-                COPY_ICON,
+                "copy",
                 "exit",
                 "duration",
                 "label",
@@ -1592,7 +1744,7 @@ fn draw_ui(terminal: &mut Terminal<CrosstermBackend<Stdout>>, app: &App) -> io::
         let footer = Paragraph::new(vec![
             Line::from(Span::styled(
                 format!(
-                "↑↓ select  Tab/Shift+Tab page  Ctrl+F search  f filters  s sort={}  Enter details  r refresh  e export(json)  E export(csv)  Esc quit",
+                "↑↓ select  Tab/Shift+Tab page  c copy  Ctrl+F search  f filters  s sort={}  Enter details  r refresh  e export(json)  E export(csv)  Esc quit",
                 app.sort_mode.label(),
                 ),
                 App::key_hint_style(),
@@ -1682,56 +1834,9 @@ fn draw_ui(terminal: &mut Terminal<CrosstermBackend<Stdout>>, app: &App) -> io::
             let popup = centered_rect(90, 80, area);
             if let Some(global_idx) = app.selected_global_index() {
                 if let Some(row) = app.view_rows.get(global_idx) {
-                    let payload_without_output = match &row.payload {
-                        Value::Object(map) => {
-                            let mut filtered = map.clone();
-                            filtered.remove("captured_stdout_tail");
-                            filtered.remove("captured_stderr_tail");
-                            filtered.remove("captured_output_truncated");
-                            Value::Object(filtered)
-                        }
-                        other => other.clone(),
-                    };
-                    let payload_summary = match &payload_without_output {
-                        Value::Object(_) | Value::Array(_) => {
-                            let text = serde_json::to_string_pretty(&payload_without_output)
-                                .unwrap_or_else(|_| "{}".to_string());
-                            truncate_cell(&text, 1200)
-                        }
-                        other => other.to_string(),
-                    };
-                    let mut details: Vec<Line<'static>> = vec![
-                        Line::from(format!("run_id: {}", row.run_id)),
-                        Line::from(format!("time: {}", App::format_time(row.ts))),
-                        Line::from(format!("actor: {}", App::actor_of(row))),
-                        Line::from(format!(
-                            "agent_name: {}",
-                            if row.agent_name.trim().is_empty() {
-                                "-"
-                            } else {
-                                row.agent_name.as_str()
-                            }
-                        )),
-                        Line::from(vec![
-                            Span::raw("label: "),
-                            Span::styled(row.label.clone(), App::label_style(&row.label)),
-                        ]),
-                        Line::from(format!("tier: {}", row.evidence_tier)),
-                        Line::from(format!("model: {}", row.model)),
-                        Line::from(format!("exit: {}", App::format_exit(row.exit_code))),
-                        Line::from(format!("duration: {}", App::format_duration(row.duration_ms))),
-                        Line::from(format!("cwd: {}", row.working_directory)),
-                        Line::from(""),
-                        Line::from(vec![
-                            Span::raw("command:  "),
-                            Span::styled(COPY_ICON, App::copy_icon_style()),
-                        ]),
-                        Line::from(Span::styled(row.command.clone(), App::command_style())),
-                    ];
-                    details.push(Line::from(""));
-                    details.push(Line::from("payload:"));
-                    push_text_block(&mut details, &payload_summary);
                     let content_width = popup.width.saturating_sub(2) as usize;
+                    let detail_content = build_provenance_detail_content(app, row, content_width);
+                    let details = detail_content.lines;
                     let content_height = popup.height.saturating_sub(2) as usize;
                     let total_height = rendered_content_height(&details, content_width);
                     let has_overflow = total_height > content_height;
@@ -1744,7 +1849,7 @@ fn draw_ui(terminal: &mut Terminal<CrosstermBackend<Stdout>>, app: &App) -> io::
                     };
                     let mut title_spans = vec![
                         Span::styled("Run details ", App::header_style()),
-                        Span::styled("(Enter/Esc close)", App::key_hint_style()),
+                        Span::styled("(Enter/Esc close, c copy)", App::key_hint_style()),
                     ];
                     if has_overflow {
                         title_spans.push(Span::raw("  "));
@@ -1882,6 +1987,20 @@ fn handle_key(app: &mut App, key: KeyEvent) -> bool {
             KeyCode::Esc | KeyCode::Enter => {
                 app.details_open = false;
                 app.details_scroll = 0;
+                app.hovered_details_copy = false;
+            }
+            KeyCode::Char('c') => {
+                if let Some(global_idx) = app.selected_global_index() {
+                    if let Some(row) = app.view_rows.get(global_idx) {
+                        match copy_to_clipboard(&row.command) {
+                            Ok(()) => {
+                                app.set_flash("✓ Copied command");
+                                app.set_copy_feedback(CopyFeedbackTarget::DetailsCommand);
+                            }
+                            Err(err) => app.set_flash(err),
+                        }
+                    }
+                }
             }
             KeyCode::Up | KeyCode::Char('k') => {
                 app.details_scroll = app.details_scroll.saturating_sub(1);
@@ -1942,6 +2061,19 @@ fn handle_key(app: &mut App, key: KeyEvent) -> bool {
         KeyCode::PageDown => app.next_page(),
         KeyCode::BackTab => app.previous_page(),
         KeyCode::Tab => app.next_page(),
+        KeyCode::Char('c') => {
+            if let Some(global_idx) = app.selected_global_index() {
+                if let Some(row) = app.view_rows.get(global_idx) {
+                    match copy_to_clipboard(&row.command) {
+                        Ok(()) => {
+                            app.set_flash("✓ Copied command");
+                            app.set_copy_feedback(CopyFeedbackTarget::TableRow(global_idx));
+                        }
+                        Err(err) => app.set_flash(err),
+                    }
+                }
+            }
+        }
         KeyCode::Enter => {
             if app.selected_global_index().is_some() {
                 app.details_open = true;
@@ -1980,12 +2112,21 @@ fn handle_mouse(app: &mut App, mouse: MouseEvent) {
         return;
     }
     if app.details_open {
+        app.hovered_run_copy_row = None;
+        app.hovered_details_copy = app
+            .selected_global_index()
+            .and_then(|global_idx| app.view_rows.get(global_idx))
+            .map(|row| provenance_details_copy_hit(app, row, mouse))
+            .unwrap_or(false);
         if let MouseEventKind::Down(MouseButton::Left) = mouse.kind {
             if let Some(global_idx) = app.selected_global_index() {
                 if let Some(row) = app.view_rows.get(global_idx) {
-                    if provenance_details_copy_hit(mouse) {
+                    if app.hovered_details_copy {
                         match copy_to_clipboard(&row.command) {
-                            Ok(()) => app.set_flash("✓ Copied command"),
+                            Ok(()) => {
+                                app.set_flash("✓ Copied command");
+                                app.set_copy_feedback(CopyFeedbackTarget::DetailsCommand);
+                            }
                             Err(err) => app.set_flash(err),
                         }
                     }
@@ -1994,26 +2135,21 @@ fn handle_mouse(app: &mut App, mouse: MouseEvent) {
         }
         return;
     }
+    app.hovered_details_copy = false;
+    app.hovered_run_copy_row = runs_table_hovered_copy_row(app, mouse);
     if let MouseEventKind::Down(MouseButton::Left) = mouse.kind {
-        if let Some(layout) = runs_table_hit_layout(app) {
-            let row_offset = mouse.row.saturating_sub(layout.data_start_y) as usize;
-            if mouse.column >= layout.copy_column.x
-                && mouse.column
-                    < layout
-                        .copy_column
-                        .x
-                        .saturating_add(layout.copy_column.width)
-                && row_offset < layout.row_count
-            {
-                let global_idx = layout.page_start + row_offset;
-                if let Some(row) = app.view_rows.get(global_idx) {
-                    app.selected = row_offset;
-                    match copy_to_clipboard(&row.command) {
-                        Ok(()) => app.set_flash("✓ Copied command"),
-                        Err(err) => app.set_flash(err),
+        if let Some(global_idx) = app.hovered_run_copy_row {
+            if let Some(row) = app.view_rows.get(global_idx) {
+                let (page_start, _) = app.current_page_bounds();
+                app.selected = global_idx.saturating_sub(page_start);
+                match copy_to_clipboard(&row.command) {
+                    Ok(()) => {
+                        app.set_flash("✓ Copied command");
+                        app.set_copy_feedback(CopyFeedbackTarget::TableRow(global_idx));
                     }
-                    return;
+                    Err(err) => app.set_flash(err),
                 }
+                return;
             }
         }
     }
@@ -2024,16 +2160,47 @@ fn handle_mouse(app: &mut App, mouse: MouseEvent) {
     }
 }
 
-fn provenance_details_copy_hit(mouse: MouseEvent) -> bool {
+fn runs_table_hovered_copy_row(app: &App, mouse: MouseEvent) -> Option<usize> {
+    let layout = runs_table_hit_layout(app)?;
+    let row_offset = mouse.row.saturating_sub(layout.data_start_y) as usize;
+    if mouse.column < layout.copy_column.x
+        || mouse.column >= layout.copy_column.x.saturating_add(layout.copy_column.width)
+        || row_offset >= layout.row_count
+    {
+        return None;
+    }
+    Some(layout.page_start + row_offset)
+}
+
+fn provenance_details_copy_hit(app: &App, row: &RunEntry, mouse: MouseEvent) -> bool {
     let Ok((width, height)) = terminal_size() else {
         return false;
     };
     let popup = centered_rect(90, 80, Rect::new(0, 0, width, height));
-    let command_line_row = popup.y.saturating_add(1 + 11);
-    let icon_x = popup.x.saturating_add(11);
+    let content_width = popup.width.saturating_sub(2) as usize;
+    let detail_content = build_provenance_detail_content(app, row, content_width);
+    let Some(command_row_offset) = detail_content.command_row_offset else {
+        return false;
+    };
+    let max_scroll = rendered_content_height(&detail_content.lines, content_width)
+        .saturating_sub(popup.height.saturating_sub(2) as usize)
+        .min(u16::MAX as usize) as u16;
+    let scroll_offset = app.details_scroll.min(max_scroll);
+    if command_row_offset < scroll_offset {
+        return false;
+    }
+    let command_line_row = popup
+        .y
+        .saturating_add(1)
+        .saturating_add(command_row_offset.saturating_sub(scroll_offset));
+    let button_width = sessions::copy_icon_width() as u16;
+    let button_x = popup
+        .x
+        .saturating_add(1)
+        .saturating_add(content_width.saturating_sub(button_width as usize) as u16);
     mouse.row == command_line_row
-        && mouse.column >= icon_x
-        && mouse.column <= icon_x.saturating_add(1)
+        && mouse.column >= button_x
+        && mouse.column < button_x.saturating_add(button_width)
 }
 
 fn export_rows(rows: &[RunEntry], export_format: &str, out_path: &str) -> Result<(), String> {
@@ -2449,6 +2616,22 @@ mod tests {
         assert_eq!(page.rows[0].run_id, "run-3");
         assert_eq!(page.rows[1].run_id, "run-2");
         assert_eq!(page.rows[2].run_id, "run-1");
+    }
+
+    #[test]
+    fn compact_count_formats_large_values_for_ui() {
+        assert_eq!(format_compact_count(42), "42");
+        assert_eq!(format_compact_count(12_345), "12.3k");
+        assert_eq!(format_compact_count(3_100_000), "3.1m");
+    }
+
+    #[test]
+    fn format_duration_uses_minutes_hours_and_24h_cap() {
+        assert_eq!(App::format_duration(Some(999)), "999ms");
+        assert_eq!(App::format_duration(Some(10_240)), "10.2s");
+        assert_eq!(App::format_duration(Some(162_910)), "2.7m");
+        assert_eq!(App::format_duration(Some(5_400_000)), "1.5h");
+        assert_eq!(App::format_duration(Some(MAX_COMMAND_DURATION_MS)), ">24h");
     }
 
     fn sample_run_entry() -> RunEntry {

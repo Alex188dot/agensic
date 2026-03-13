@@ -1210,19 +1210,10 @@ fn timeline_table_layout(area_width: u16) -> TimelineTableLayout {
 }
 
 fn format_timeline_ordinal(value: usize) -> String {
-    let numeric = value as f64;
-    let compact = if value < 10_000 {
-        value.to_string()
-    } else if value < 1_000_000 {
-        format!("{:.1}k", numeric / 1_000.0)
-    } else if value < 1_000_000_000 {
-        format!("{:.1}m", numeric / 1_000_000.0)
-    } else if value < 1_000_000_000_000 {
-        format!("{:.1}b", numeric / 1_000_000_000.0)
-    } else {
-        format!("{:.1}t", numeric / 1_000_000_000_000.0)
-    };
-    truncate_display_width(&compact, TIMELINE_ORDINAL_WIDTH as usize)
+    truncate_display_width(
+        &crate::format_compact_count(value),
+        TIMELINE_ORDINAL_WIDTH as usize,
+    )
 }
 
 fn build_changes(detail: &DetailState) -> Paragraph<'static> {
@@ -1552,17 +1543,17 @@ fn truncate(value: &str, max_chars: usize) -> String {
         + "…"
 }
 
-fn display_width(value: &str) -> usize {
+pub(crate) fn display_width(value: &str) -> usize {
     UnicodeWidthStr::width(value)
 }
 
-fn copy_icon_width() -> usize {
+pub(crate) fn copy_icon_width() -> usize {
     display_width(SESSION_COPY_BUTTON)
         .max(display_width(SESSION_COPIED_BUTTON))
         .max(1)
 }
 
-fn truncate_display_width(value: &str, max_width: usize) -> String {
+pub(crate) fn truncate_display_width(value: &str, max_width: usize) -> String {
     if max_width == 0 {
         return String::new();
     }
@@ -1587,7 +1578,7 @@ fn truncate_display_width(value: &str, max_width: usize) -> String {
     out
 }
 
-fn copy_button_label(copied: bool) -> &'static str {
+pub(crate) fn copy_button_label(copied: bool) -> &'static str {
     if copied {
         SESSION_COPIED_BUTTON
     } else {
@@ -1595,7 +1586,7 @@ fn copy_button_label(copied: bool) -> &'static str {
     }
 }
 
-fn right_aligned_copy_line(
+pub(crate) fn right_aligned_copy_line(
     label: &str,
     content_width: usize,
     hovered: bool,
@@ -2259,7 +2250,7 @@ fn pane_block(title: &str, focused: bool) -> Block<'static> {
         .title(Line::from(Span::styled(title.to_string(), title_style)))
 }
 
-fn copy_button_style(hovered: bool, copied: bool, selected: bool) -> Style {
+pub(crate) fn copy_button_style(hovered: bool, copied: bool, selected: bool) -> Style {
     if selected {
         let mut style = Style::default()
             .fg(Color::Black)
