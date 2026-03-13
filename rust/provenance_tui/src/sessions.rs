@@ -24,7 +24,7 @@ use std::cmp::{max, min};
 use std::fs;
 use std::io::{self, Write};
 use std::path::Path;
-use std::time::{Duration, Instant};
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
 use vt100::Parser as VtParser;
 
@@ -33,7 +33,9 @@ const TEXT_REPLAY_TICK_MS: u64 = 60;
 const TERMINAL_REPLAY_TICK_MS: u64 = TEXT_REPLAY_TICK_MS / 3;
 const SESSION_COPY_BUTTON: &str = "[ Copy ]";
 const SESSION_COPIED_BUTTON: &str = "[   ✓   ]";
+const TIMELINE_ORDINAL_WIDTH: u16 = 6;
 const TIMELINE_EVENT_TYPE_WIDTH: usize = 18;
+const TIMELINE_COLUMN_SPACING: u16 = 1;
 
 #[derive(Debug, Parser, Clone)]
 #[command(name = "agensic-provenance-tui sessions")]
@@ -137,6 +139,12 @@ impl ReplayMode {
 #[derive(Clone, Debug)]
 struct TimelineEntry {
     event_index: usize,
+    event_start_index: usize,
+    event_end_index: usize,
+    seq_start: i64,
+    seq_end: i64,
+    ts_wall: f64,
+    ts_monotonic_ms: i64,
     event_type: String,
     summary: String,
     copy_command: Option<String>,
@@ -362,9 +370,12 @@ impl DetailState {
         self.move_selection(delta.saturating_mul(TIMELINE_PAGE_STEP as isize));
     }
 
+    fn selected_timeline_entry(&self) -> Option<&TimelineEntry> {
+        self.timeline_entries.get(self.timeline_index)
+    }
+
     fn selected_event(&self) -> Option<&SessionEvent> {
-        self.timeline_entries
-            .get(self.timeline_index)
+        self.selected_timeline_entry()
             .and_then(|entry| self.events.get(entry.event_index))
     }
 
@@ -427,6 +438,15 @@ struct EventModalContent {
 struct TimelineViewport {
     start: usize,
     end: usize,
+}
+
+#[derive(Clone, Copy, Debug)]
+struct TimelineTableLayout {
+    ordinal_width: u16,
+    kind_width: u16,
+    preview_width: u16,
+    action_width: u16,
+    spacing: u16,
 }
 
 #[derive(Clone, Debug)]
@@ -606,6 +626,16 @@ impl App {
     fn header_copy_copied(&self) -> bool {
         self.active_copy_feedback() == Some(CopyFeedbackTarget::SessionId)
     }
+
+    fn export_timeline_csv(&mut self) -> Result<String, String> {
+        let detail = self
+            .detail
+            .as_ref()
+            .ok_or_else(|| "No open session".to_string())?;
+        let out = default_timeline_export_path(&detail.session.session_id, "csv");
+        export_timeline_rows(detail, &out)?;
+        Ok(out)
+    }
 }
 
 pub fn run_from_env(argv: &[String]) -> Result<(), String> {
@@ -678,6 +708,7 @@ fn handle_key(app: &mut App, key: KeyEvent) -> Result<bool, String> {
     if app.detail.is_some() {
         let mut flash_message: Option<String> = None;
         let mut copy_target: Option<CopyFeedbackTarget> = None;
+        let mut export_timeline_csv = false;
         {
             let detail = app.detail.as_mut().expect("detail checked above");
             if app.event_modal_open {
@@ -687,9 +718,10 @@ fn handle_key(app: &mut App, key: KeyEvent) -> Result<bool, String> {
                         app.event_modal_scroll = 0;
                     }
                     KeyCode::Char('c') => {
-                        if let Some((command, event_seq)) = detail
-                            .selected_event()
-                            .and_then(|event| event_command(event).map(|command| (command, event.seq)))
+                        if let Some((command, event_seq)) =
+                            detail.selected_event().and_then(|event| {
+                                event_command(event).map(|command| (command, event.seq))
+                            })
                         {
                             match crate::copy_to_clipboard(&command) {
                                 Ok(()) => {
@@ -779,6 +811,7 @@ fn handle_key(app: &mut App, key: KeyEvent) -> Result<bool, String> {
                             flash_message = Some("No command to copy".to_string());
                         }
                     }
+                    KeyCode::Char('E') => export_timeline_csv = true,
                     KeyCode::Up | KeyCode::Char('k') if detail.focus == FocusPane::Timeline => {
                         detail.move_selection(-1);
                     }
@@ -805,6 +838,12 @@ fn handle_key(app: &mut App, key: KeyEvent) -> Result<bool, String> {
                     }
                     _ => {}
                 }
+            }
+        }
+        if export_timeline_csv {
+            match app.export_timeline_csv() {
+                Ok(out) => flash_message = Some(format!("Exported timeline CSV to {}", out)),
+                Err(err) => flash_message = Some(err),
             }
         }
         if let Some(message) = flash_message {
@@ -964,14 +1003,27 @@ fn draw_detail(frame: &mut ratatui::Frame<'_>, app: &App, detail: &DetailState) 
         .direction(Direction::Vertical)
         .constraints(changes_panel_constraints(detail))
         .split(body[1]);
-    frame.render_widget(build_timeline(app, detail, body[0]), body[0]);
+    let mut timeline_state = TableState::default();
+    if !detail.timeline_entries.is_empty() {
+        timeline_state.select(Some(
+            detail
+                .timeline_index
+                .min(detail.timeline_entries.len().saturating_sub(1)),
+        ));
+    }
+    frame.render_stateful_widget(
+        build_timeline(app, detail, body[0]),
+        body[0],
+        &mut timeline_state,
+    );
     frame.render_widget(build_changes(detail), right[0]);
     frame.render_widget(build_replay(detail, right[1]), right[1]);
     frame.render_widget(
         Paragraph::new(vec![
-            Line::from(
-                "↑↓ timeline/text scroll or terminal seek  mouse wheel scrolls active pane  Tab/Shift+Tab jump 500  c copy command  s switch pane  t toggle replay mode  ←→ seek replay  Enter details  space play/pause  Esc back",
-            ),
+            Line::from(Span::styled(
+                "↑↓ timeline/text scroll  Tab/Shift+Tab jump 500  c copy command  E export(csv)  s switch pane  t toggle replay mode  ←→ seek replay  Enter details  space play/pause  Esc back",
+                Style::default().fg(Color::Yellow),
+            )),
             Line::from(app.status_text().to_string()),
         ])
         .style(Style::default().fg(Color::White)),
@@ -986,8 +1038,10 @@ fn draw_detail(frame: &mut ratatui::Frame<'_>, app: &App, detail: &DetailState) 
     }
 
     if app.event_modal_open {
-        if let Some(event) = detail.selected_event() {
-            draw_event_modal(frame, app, event, detail, app.event_modal_scroll);
+        if let (Some(event), Some(entry)) =
+            (detail.selected_event(), detail.selected_timeline_entry())
+        {
+            draw_event_modal(frame, app, event, entry, detail, app.event_modal_scroll);
         }
     }
 }
@@ -1021,11 +1075,7 @@ fn build_header(app: &App, detail: &DetailState) -> Paragraph<'static> {
             Span::raw("  ".to_string()),
             Span::styled(
                 header_copy_button,
-                copy_button_style(
-                    app.hovered_header_copy,
-                    app.header_copy_copied(),
-                    false,
-                ),
+                copy_button_style(app.hovered_header_copy, app.header_copy_copied(), false),
             ),
             Span::raw(format!(
                 "    duration {}    started {}",
@@ -1065,62 +1115,114 @@ fn build_header(app: &App, detail: &DetailState) -> Paragraph<'static> {
         .wrap(Wrap { trim: true })
 }
 
-fn build_timeline(app: &App, detail: &DetailState, area: Rect) -> Paragraph<'static> {
+fn build_timeline(app: &App, detail: &DetailState, area: Rect) -> Table<'static> {
     let total = detail.timeline_entries.len();
     let selected = detail.timeline_index.min(total.saturating_sub(1));
     let viewport = timeline_viewport(detail, area.height);
-    let content_width = area.width.saturating_sub(2) as usize;
-    let mut lines: Vec<Line<'static>> = Vec::new();
-    for row_index in viewport.start..viewport.end {
-        let entry = &detail.timeline_entries[row_index];
-        let style = if row_index == selected {
-            Style::default().fg(Color::Black).bg(Color::LightGreen)
-        } else {
-            Style::default()
-        };
-        let prefix = format!(
-            "{:>4}  {:<width$}  ",
-            row_index + 1,
-            truncate(
-                &sanitize_inline_text(&entry.event_type),
-                TIMELINE_EVENT_TYPE_WIDTH,
-            ),
-            width = TIMELINE_EVENT_TYPE_WIDTH,
-        );
-        let mut spans = vec![Span::raw(prefix.clone())];
-        let mut summary = entry.summary.clone();
-        let reserved_width = if entry.copy_command.is_some() {
-            copy_icon_width() + 2
-        } else {
-            0
-        };
-        let available_summary_width =
-            content_width.saturating_sub(display_width(&prefix) + reserved_width);
-        summary = truncate_display_width(&summary, available_summary_width);
-        spans.push(Span::raw(summary.clone()));
-        if entry.copy_command.is_some() {
+    let layout = timeline_table_layout(area.width);
+    let preview_width = layout.preview_width as usize;
+    let rows: Vec<Row<'static>> = (viewport.start..viewport.end)
+        .map(|row_index| {
+            let entry = &detail.timeline_entries[row_index];
             let copied = app.timeline_copy_copied(row_index);
             let hovered = app.timeline_copy_hovered(row_index);
             let selected_row = row_index == selected;
-            let button = copy_button_label(copied);
-            let used_width =
-                display_width(&prefix) + display_width(&summary) + display_width(button);
-            spans.push(Span::raw(
-                " ".repeat(content_width.saturating_sub(used_width)),
-            ));
-            spans.push(Span::styled(
-                button,
-                copy_button_style(hovered, copied, selected_row),
-            ));
-        }
-        lines.push(Line::from(spans).style(style));
+            let button = if entry.copy_command.is_some() {
+                copy_button_label(copied)
+            } else {
+                ""
+            };
+            Row::new(vec![
+                Cell::from(format_timeline_ordinal(row_index + 1)),
+                Cell::from(truncate_display_width(
+                    &sanitize_inline_text(&entry.event_type),
+                    layout.kind_width as usize,
+                )),
+                Cell::from(truncate_display_width(&entry.summary, preview_width)),
+                Cell::from(Span::styled(
+                    button,
+                    if entry.copy_command.is_some() {
+                        copy_button_style(hovered, copied, selected_row)
+                    } else {
+                        Style::default()
+                    },
+                )),
+            ])
+        })
+        .collect();
+    let header_style = Style::default()
+        .fg(Color::Cyan)
+        .add_modifier(Modifier::BOLD);
+    let rows = if rows.is_empty() {
+        vec![Row::new(vec![
+            Cell::from("-"),
+            Cell::from("-"),
+            Cell::from("(no recorded events)"),
+            Cell::from(""),
+        ])]
+    } else {
+        rows
+    };
+    Table::new(
+        rows,
+        [
+            Constraint::Length(layout.ordinal_width),
+            Constraint::Length(layout.kind_width),
+            Constraint::Length(layout.preview_width),
+            Constraint::Length(layout.action_width),
+        ],
+    )
+    .column_spacing(layout.spacing)
+    .header(Row::new(vec!["n.", "kind", "preview", "copy"]).style(header_style))
+    .block(pane_block("Timeline", detail.focus == FocusPane::Timeline))
+    .row_highlight_style(
+        Style::default()
+            .fg(Color::Black)
+            .bg(Color::LightGreen)
+            .add_modifier(Modifier::BOLD),
+    )
+}
+
+fn timeline_table_layout(area_width: u16) -> TimelineTableLayout {
+    let inner_width = area_width.saturating_sub(2).max(1);
+    let action_width = copy_icon_width() as u16;
+    let spacing = TIMELINE_COLUMN_SPACING;
+    let total_spacing = spacing.saturating_mul(3);
+    let max_kind_width = TIMELINE_EVENT_TYPE_WIDTH as u16;
+    let available =
+        inner_width.saturating_sub(TIMELINE_ORDINAL_WIDTH + action_width + total_spacing);
+    let (kind_width, preview_width) = if available <= 1 {
+        (1, 1)
+    } else if available <= 10 {
+        (available.saturating_sub(1), 1)
+    } else {
+        let kind_width = (available / 4).clamp(8, max_kind_width);
+        let preview_width = available.saturating_sub(kind_width).max(1);
+        (kind_width, preview_width)
+    };
+    TimelineTableLayout {
+        ordinal_width: TIMELINE_ORDINAL_WIDTH,
+        kind_width,
+        preview_width,
+        action_width,
+        spacing,
     }
-    if lines.is_empty() {
-        lines.push(Line::from("(no recorded events)"));
-    }
-    Paragraph::new(lines)
-        .block(pane_block("Timeline", detail.focus == FocusPane::Timeline))
-        .wrap(Wrap { trim: true })
+}
+
+fn format_timeline_ordinal(value: usize) -> String {
+    let numeric = value as f64;
+    let compact = if value < 10_000 {
+        value.to_string()
+    } else if value < 1_000_000 {
+        format!("{:.1}k", numeric / 1_000.0)
+    } else if value < 1_000_000_000 {
+        format!("{:.1}m", numeric / 1_000_000.0)
+    } else if value < 1_000_000_000_000 {
+        format!("{:.1}b", numeric / 1_000_000_000.0)
+    } else {
+        format!("{:.1}t", numeric / 1_000_000_000_000.0)
+    };
+    truncate_display_width(&compact, TIMELINE_ORDINAL_WIDTH as usize)
 }
 
 fn build_changes(detail: &DetailState) -> Paragraph<'static> {
@@ -1323,12 +1425,14 @@ fn draw_event_modal(
     frame: &mut ratatui::Frame<'_>,
     app: &App,
     event: &SessionEvent,
+    entry: &TimelineEntry,
     detail: &DetailState,
     scroll: u16,
 ) {
     let popup = centered_rect(74, 72, frame.area());
     let content = build_event_modal_content(
         event,
+        entry,
         detail,
         popup.width.saturating_sub(2) as usize,
         app.hovered_event_modal_copy,
@@ -1562,6 +1666,7 @@ fn event_summary(event: &SessionEvent) -> String {
 
 fn build_event_modal_content(
     event: &SessionEvent,
+    entry: &TimelineEntry,
     detail: &DetailState,
     content_width: usize,
     hovered_copy: bool,
@@ -1569,7 +1674,21 @@ fn build_event_modal_content(
 ) -> EventModalContent {
     let mut lines = vec![
         Line::from(format!("session: {}", detail.session.session_id)),
-        Line::from(format!("seq: {}", event.seq)),
+        Line::from(format!("timeline_row: {}", detail.timeline_index + 1)),
+        Line::from(format!(
+            "event_index: {} (source {}..{}, count {})",
+            entry.event_index,
+            entry.event_start_index,
+            entry.event_end_index,
+            entry
+                .event_end_index
+                .saturating_sub(entry.event_start_index)
+                .saturating_add(1)
+        )),
+        Line::from(format!(
+            "seq: {} (range {}..{})",
+            event.seq, entry.seq_start, entry.seq_end
+        )),
         Line::from(format!("type: {}", sanitize_inline_text(&event.event_type))),
         Line::from(format!("timestamp: {}", format_wall_ts(event.ts_wall))),
         Line::from(format!("monotonic_ms: {}", event.ts_monotonic_ms)),
@@ -1710,6 +1829,12 @@ fn build_display_model(events: &[SessionEvent]) -> (Vec<TimelineEntry>, Vec<Stri
                 if let Some(block) = build_terminal_display_block(&events[start..index], start) {
                     timeline_entries.push(TimelineEntry {
                         event_index: block.event_index,
+                        event_start_index: start,
+                        event_end_index: index.saturating_sub(1),
+                        seq_start: events[start].seq,
+                        seq_end: events[index.saturating_sub(1)].seq,
+                        ts_wall: events[start].ts_wall,
+                        ts_monotonic_ms: events[start].ts_monotonic_ms,
                         event_type: "terminal.output".to_string(),
                         summary: block.summary,
                         copy_command: None,
@@ -1725,6 +1850,12 @@ fn build_display_model(events: &[SessionEvent]) -> (Vec<TimelineEntry>, Vec<Stri
                 if let Some(block) = build_terminal_display_block(&events[start..index], start) {
                     timeline_entries.push(TimelineEntry {
                         event_index: block.event_index,
+                        event_start_index: start,
+                        event_end_index: index.saturating_sub(1),
+                        seq_start: events[start].seq,
+                        seq_end: events[index.saturating_sub(1)].seq,
+                        ts_wall: events[start].ts_wall,
+                        ts_monotonic_ms: events[start].ts_monotonic_ms,
                         event_type: "terminal.input".to_string(),
                         summary: block.summary,
                         copy_command: None,
@@ -1734,6 +1865,12 @@ fn build_display_model(events: &[SessionEvent]) -> (Vec<TimelineEntry>, Vec<Stri
             _ => {
                 timeline_entries.push(TimelineEntry {
                     event_index: index,
+                    event_start_index: index,
+                    event_end_index: index,
+                    seq_start: event.seq,
+                    seq_end: event.seq,
+                    ts_wall: event.ts_wall,
+                    ts_monotonic_ms: event.ts_monotonic_ms,
                     event_type: event.event_type.clone(),
                     summary: event_summary(event),
                     copy_command: event_command(event),
@@ -1747,6 +1884,12 @@ fn build_display_model(events: &[SessionEvent]) -> (Vec<TimelineEntry>, Vec<Stri
         for (idx, event) in events.iter().enumerate() {
             timeline_entries.push(TimelineEntry {
                 event_index: idx,
+                event_start_index: idx,
+                event_end_index: idx,
+                seq_start: event.seq,
+                seq_end: event.seq,
+                ts_wall: event.ts_wall,
+                ts_monotonic_ms: event.ts_monotonic_ms,
                 event_type: event.event_type.clone(),
                 summary: event_summary(event),
                 copy_command: event_command(event),
@@ -2303,6 +2446,110 @@ fn format_wall_ts(ts_wall: f64) -> String {
         .unwrap_or_else(|| format!("{:.3}", ts_wall))
 }
 
+fn now_epoch_seconds() -> i64 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|duration| duration.as_secs().min(i64::MAX as u64) as i64)
+        .unwrap_or(0)
+}
+
+fn default_export_dir() -> String {
+    let home = std::env::var("HOME").unwrap_or_else(|_| ".".to_string());
+    let downloads = format!("{}/Downloads", home);
+    if Path::new(&downloads).is_dir() {
+        downloads
+    } else {
+        home
+    }
+}
+
+fn export_session_slug(session_id: &str) -> String {
+    let slug: String = session_id
+        .chars()
+        .filter(|ch| ch.is_ascii_alphanumeric())
+        .take(12)
+        .collect();
+    if slug.is_empty() {
+        "session".to_string()
+    } else {
+        slug
+    }
+}
+
+fn default_timeline_export_path(session_id: &str, ext: &str) -> String {
+    format!(
+        "{}/timeline_export_{}_{}.{}",
+        default_export_dir(),
+        export_session_slug(session_id),
+        now_epoch_seconds(),
+        ext
+    )
+}
+
+fn export_timeline_rows(detail: &DetailState, out_path: &str) -> Result<(), String> {
+    if out_path.trim().is_empty() {
+        return Err("missing output path".to_string());
+    }
+    let output = Path::new(out_path);
+    if let Some(parent) = output.parent() {
+        if !parent.as_os_str().is_empty() {
+            fs::create_dir_all(parent).map_err(|e| format!("create parent failed: {}", e))?;
+        }
+    }
+    let mut writer =
+        csv::Writer::from_path(output).map_err(|e| format!("create csv failed: {}", e))?;
+    writer
+        .write_record([
+            "session_id",
+            "row_index",
+            "row_label",
+            "event_index",
+            "event_index_start",
+            "event_index_end",
+            "seq",
+            "seq_start",
+            "seq_end",
+            "ts_iso",
+            "ts_monotonic_ms",
+            "event_type",
+            "summary",
+            "command",
+            "grouped_event_count",
+        ])
+        .map_err(|e| format!("write csv header failed: {}", e))?;
+
+    for (row_index, entry) in detail.timeline_entries.iter().enumerate() {
+        writer
+            .write_record([
+                detail.session.session_id.clone(),
+                (row_index + 1).to_string(),
+                format_timeline_ordinal(row_index + 1),
+                entry.event_index.to_string(),
+                entry.event_start_index.to_string(),
+                entry.event_end_index.to_string(),
+                entry.seq_end.to_string(),
+                entry.seq_start.to_string(),
+                entry.seq_end.to_string(),
+                format_wall_ts(entry.ts_wall),
+                entry.ts_monotonic_ms.to_string(),
+                sanitize_inline_text(&entry.event_type),
+                entry.summary.clone(),
+                entry.copy_command.clone().unwrap_or_default(),
+                entry
+                    .event_end_index
+                    .saturating_sub(entry.event_start_index)
+                    .saturating_add(1)
+                    .to_string(),
+            ])
+            .map_err(|e| format!("write csv row failed: {}", e))?;
+    }
+
+    writer
+        .flush()
+        .map_err(|e| format!("flush csv failed: {}", e))?;
+    Ok(())
+}
+
 fn sanitize_inline_text(value: &str) -> String {
     sanitize_terminal_output(value)
         .replace('\n', " ")
@@ -2445,13 +2692,13 @@ fn handle_mouse(app: &mut App, mouse: MouseEvent) {
                     handled = true;
                 } else if let Some((row_index, clicked_copy)) = timeline_mouse_hit(mouse, detail) {
                     if clicked_copy {
-                        if let Some(command) = detail.timeline_entries[row_index].copy_command.clone()
+                        if let Some(command) =
+                            detail.timeline_entries[row_index].copy_command.clone()
                         {
                             match crate::copy_to_clipboard(&command) {
                                 Ok(()) => {
                                     flash_message = Some("✓ Copied command".to_string());
-                                    copy_target =
-                                        Some(CopyFeedbackTarget::TimelineRow(row_index));
+                                    copy_target = Some(CopyFeedbackTarget::TimelineRow(row_index));
                                 }
                                 Err(err) => flash_message = Some(err),
                             }
@@ -2550,7 +2797,7 @@ fn timeline_mouse_hit(mouse: MouseEvent, detail: &DetailState) -> Option<(usize,
         return None;
     }
     let inner_x = layout.timeline.x.saturating_add(1);
-    let inner_y = layout.timeline.y.saturating_add(1);
+    let inner_y = layout.timeline.y.saturating_add(2);
     if mouse.column < inner_x || mouse.row < inner_y {
         return None;
     }
@@ -2560,15 +2807,17 @@ fn timeline_mouse_hit(mouse: MouseEvent, detail: &DetailState) -> Option<(usize,
     if row_index >= viewport.end {
         return None;
     }
-    let copy_x = layout.timeline.x.saturating_add(
-        layout
-            .timeline
-            .width
-            .saturating_sub(1 + copy_icon_width() as u16),
-    );
+    let table_layout = timeline_table_layout(layout.timeline.width);
+    let copy_x = inner_x
+        .saturating_add(table_layout.ordinal_width)
+        .saturating_add(table_layout.spacing)
+        .saturating_add(table_layout.kind_width)
+        .saturating_add(table_layout.spacing)
+        .saturating_add(table_layout.preview_width)
+        .saturating_add(table_layout.spacing);
     let clicked_copy = detail.timeline_entries[row_index].copy_command.is_some()
         && mouse.column >= copy_x
-        && mouse.column < copy_x.saturating_add(copy_icon_width() as u16);
+        && mouse.column < copy_x.saturating_add(table_layout.action_width);
     Some((row_index, clicked_copy))
 }
 
@@ -2584,6 +2833,7 @@ fn event_modal_copy_command(
     }
     let content = build_event_modal_content(
         event,
+        detail.selected_timeline_entry()?,
         detail,
         popup.width.saturating_sub(2) as usize,
         false,
@@ -2665,15 +2915,17 @@ fn rect_contains(rect: Rect, column: u16, row: u16) -> bool {
 mod tests {
     use super::{
         build_display_model, build_terminal_replay_frames, collect_terminal_lines,
-        format_header_outcome, rendered_text_height, replay_max_scroll, sanitize_inline_text,
-        sanitize_terminal_output, strip_inline_progress_noise, vt100_color_to_ratatui,
-        SessionEvent, TranscriptChunk,
+        export_timeline_rows, format_header_outcome, format_timeline_ordinal, rendered_text_height,
+        replay_max_scroll, sanitize_inline_text, sanitize_terminal_output,
+        strip_inline_progress_noise, vt100_color_to_ratatui, DetailState, SessionEvent,
+        SessionSummary, TranscriptChunk,
     };
     use ratatui::{
         layout::Rect,
         style::{Color, Modifier},
     };
     use serde_json::json;
+    use std::{env, fs};
 
     #[test]
     fn sanitize_terminal_output_strips_ansi_sequences() {
@@ -2894,5 +3146,71 @@ mod tests {
     #[test]
     fn format_header_outcome_omits_violation() {
         assert_eq!(format_header_outcome(Some(0), "exited"), "exited exit=0");
+    }
+
+    #[test]
+    fn timeline_ordinal_compacts_large_values() {
+        assert_eq!(format_timeline_ordinal(42), "42");
+        assert_eq!(format_timeline_ordinal(12_345), "12.3k");
+        assert_eq!(format_timeline_ordinal(3_100_000), "3.1m");
+    }
+
+    #[test]
+    fn export_timeline_rows_writes_raw_event_ranges() {
+        let events = vec![
+            SessionEvent {
+                seq: 10,
+                ts_wall: 1.0,
+                ts_monotonic_ms: 100,
+                event_type: "command.recorded".to_string(),
+                payload: json!({"command": "pwd"}),
+                ..SessionEvent::default()
+            },
+            SessionEvent {
+                seq: 11,
+                ts_wall: 2.0,
+                ts_monotonic_ms: 200,
+                event_type: "terminal.stdout".to_string(),
+                payload: json!({"data": "hello\n"}),
+                ..SessionEvent::default()
+            },
+            SessionEvent {
+                seq: 12,
+                ts_wall: 3.0,
+                ts_monotonic_ms: 300,
+                event_type: "terminal.stdout".to_string(),
+                payload: json!({"data": "world\n"}),
+                ..SessionEvent::default()
+            },
+        ];
+        let detail = DetailState::new(
+            SessionSummary {
+                session_id: "session-1234567890".to_string(),
+                ..SessionSummary::default()
+            },
+            events,
+            false,
+        );
+        let out = env::temp_dir().join(format!(
+            "agensic-session-timeline-export-{}.csv",
+            std::process::id()
+        ));
+
+        export_timeline_rows(&detail, out.to_str().expect("valid temp path")).expect("csv export");
+
+        let mut reader = csv::Reader::from_path(&out).expect("open csv export");
+        let rows = reader
+            .records()
+            .collect::<Result<Vec<_>, _>>()
+            .expect("read csv rows");
+        assert_eq!(rows.len(), 2);
+        assert_eq!(rows[1].get(3), Some("2"));
+        assert_eq!(rows[1].get(4), Some("1"));
+        assert_eq!(rows[1].get(5), Some("2"));
+        assert_eq!(rows[1].get(7), Some("11"));
+        assert_eq!(rows[1].get(8), Some("12"));
+        assert_eq!(rows[1].get(14), Some("2"));
+
+        let _ = fs::remove_file(out);
     }
 }
