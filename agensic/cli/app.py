@@ -3258,21 +3258,21 @@ def ai_session_start(
     ttl_minutes: int = typer.Option(120, "--ttl-minutes", min=1, max=1440, help="Session expiration in minutes"),
 ):
     """Deprecated: manual AI session signing has been removed."""
-    console.print("[red]ai-session is no longer supported.[/red] Use `agensic run <agent>`.")
+    console.print("Use `agensic run <agent>` for observed agent sessions.")
     raise typer.Exit(code=2)
 
 
 @ai_session_app.command("stop")
 def ai_session_stop():
     """Deprecated: manual AI session signing has been removed."""
-    console.print("[red]ai-session is no longer supported.[/red] Use `agensic run <agent>`.")
+    console.print("Use `agensic run <agent>` for observed agent sessions.")
     raise typer.Exit(code=2)
 
 
 @ai_session_app.command("status")
 def ai_session_status():
     """Deprecated: manual AI session signing has been removed."""
-    console.print("[red]ai-session is no longer supported.[/red] Use `agensic run <agent>`.")
+    console.print("Use `agensic run <agent>` for observed agent sessions.")
     raise typer.Exit(code=2)
 
 
@@ -3286,7 +3286,7 @@ def ai_exec(
     source: str = typer.Option("unknown", "--source", help="Log source (runtime/history/unknown)"),
 ):
     """Deprecated: manual AI_EXECUTED wrappers have been removed."""
-    console.print("[red]ai-exec has been removed.[/red] Use `agensic run <agent>` for observed agent sessions.")
+    console.print("Use `agensic run <agent>` for observed agent sessions.")
     raise typer.Exit(code=2)
 
 
@@ -3297,7 +3297,7 @@ def wrap(
     function_name: str = typer.Option("", "--name", help="Wrapper function name"),
 ):
     """Deprecated: manual shell wrappers have been removed."""
-    console.print("[red]wrap has been removed.[/red] Use `agensic run <agent>`.")
+    console.print("Use `agensic run <agent>` for observed agent sessions.")
     raise typer.Exit(code=2)
 
 

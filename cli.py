@@ -92,14 +92,14 @@ def _parse_ai_session_options(args: list[str]) -> tuple[dict[str, str], int]:
 
 
 def _run_ai_session_bootstrap(argv: list[str]) -> int:
-    print("ai-session is no longer supported. Use `agensic run <agent>`.", file=sys.stderr)
+    print("Use `agensic run <agent>` for observed agent sessions.", file=sys.stderr)
     return 2
 
 
 if len(sys.argv) > 1 and sys.argv[1] in {"ai-session", "session"}:
     raise SystemExit(_run_ai_session_bootstrap(sys.argv[2:]))
 if len(sys.argv) > 1 and sys.argv[1] in {"ai-exec", "wrap"}:
-    print(f"{sys.argv[1]} has been removed. Use `agensic run <agent>`.", file=sys.stderr)
+    print("Use `agensic run <agent>` for observed agent sessions.", file=sys.stderr)
     raise SystemExit(2)
 
 from agensic.cli.app import app, main, show_shortcuts
