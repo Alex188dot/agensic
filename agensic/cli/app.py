@@ -12,7 +12,6 @@ import time
 import tarfile
 import tempfile
 import requests
-import questionary
 import socket
 import signal
 import shlex
@@ -35,12 +34,6 @@ from prompt_toolkit.key_binding.key_bindings import merge_key_bindings
 from prompt_toolkit.keys import Keys
 from prompt_toolkit.styles import Style
 from prompt_toolkit.utils import get_cwidth
-from questionary import Separator, Question
-from questionary.constants import DEFAULT_QUESTION_PREFIX
-from questionary.prompts import common
-from questionary.prompts.common import InquirerControl
-from questionary.styles import merge_styles_default
-from questionary import utils
 from typer.core import TyperGroup
 from agensic.version import __version__
 from agensic.config.loader import (
@@ -65,6 +58,27 @@ from agensic.utils import (
     ensure_private_dir,
     harden_private_tree,
 )
+
+try:
+    import questionary
+    from questionary import Separator, Question
+    from questionary.constants import DEFAULT_QUESTION_PREFIX
+    from questionary.prompts import common
+    from questionary.prompts.common import InquirerControl
+    from questionary.styles import merge_styles_default
+    from questionary import utils
+
+    QUESTIONARY_IMPORT_ERROR = None
+except Exception as exc:
+    questionary = None
+    Separator = object
+    Question = Any
+    DEFAULT_QUESTION_PREFIX = "?"
+    common = None
+    InquirerControl = Any
+    merge_styles_default = None
+    utils = None
+    QUESTIONARY_IMPORT_ERROR = exc
 
 class AgensicRootGroup(TyperGroup):
     _AUTH_HELP_ALIASES = ("auth rotate", "auth status")
@@ -190,7 +204,17 @@ class _BackSignal:
 BACK_SIGNAL = _BackSignal()
 
 
+def _require_questionary() -> None:
+    if questionary is not None:
+        return
+    detail = f": {QUESTIONARY_IMPORT_ERROR}" if QUESTIONARY_IMPORT_ERROR else ""
+    raise RuntimeError(
+        "Interactive CLI features require the optional 'questionary' dependency" + detail
+    )
+
+
 def _setup_style() -> Style:
+    _require_questionary()
     return merge_styles_default(
         [
             Style([("instruction", "fg:#ff8c00 bold")]),
@@ -224,6 +248,7 @@ def _build_select_question(
     pointer: str = "👉",
     instruction: str | None = " ",
 ) -> Question:
+    _require_questionary()
     return questionary.select(
         message,
         choices=choices,
@@ -419,6 +444,7 @@ def _setup_select(message: str, choices: list[str], **kwargs) -> Any:
 
 
 def _setup_text(message: str, default: str = "", show_back_instruction: bool = False, **kwargs) -> Any:
+    _require_questionary()
     instruction = "Esc = back" if show_back_instruction else None
     question = questionary.text(
         message,
@@ -431,6 +457,7 @@ def _setup_text(message: str, default: str = "", show_back_instruction: bool = F
 
 
 def _setup_confirm(message: str, default: bool = True, **kwargs) -> Any:
+    _require_questionary()
     question = questionary.confirm(
         message,
         default=default,
@@ -441,6 +468,7 @@ def _setup_confirm(message: str, default: bool = True, **kwargs) -> Any:
 
 
 def _setup_password(message: str, **kwargs) -> Any:
+    _require_questionary()
     question = questionary.password(
         message,
         style=_setup_style(),
@@ -1830,6 +1858,7 @@ def _checkbox_without_invert(
     instruction: str | None = None,
 ):
     # Custom checkbox prompt that keeps "a" (toggle all) but removes "i" (invert).
+    _require_questionary()
     merged_style = merge_styles_default(
         [
             Style([("bottom-toolbar", "noreverse")]),
@@ -1995,6 +2024,7 @@ def _checkbox_without_invert(
     )
 
 def _manage_command_store_remove():
+    _require_questionary()
     _print_screen_heading("Remove commands")
     while True:
         payload = _command_store_request("GET", "/command_store/list?include_all=true")
@@ -3660,17 +3690,17 @@ def shortcuts_command():
     show_shortcuts()
 
 
-@app.command("track", context_settings={"allow_extra_args": True, "ignore_unknown_options": True})
+@app.command("run", context_settings={"allow_extra_args": True, "ignore_unknown_options": True})
 def track_command(
     ctx: typer.Context,
     agent: str = typer.Option("", "--agent", help="Override tracked agent identifier"),
     model: str = typer.Option("", "--model", help="Explicit tracked model identifier for any provider"),
     agent_name: str = typer.Option("", "--agent-name", help="Override tracked agent display name"),
-    replay: bool = typer.Option(False, "--replay", help="Replay the decoded transcript when using 'track inspect'"),
-    text: bool = typer.Option(False, "--text", help="Print text output instead of opening the session TUI for 'track inspect'"),
-    tail: int = typer.Option(8, "--tail", min=1, max=100, help="Tail event count for 'track inspect'"),
+    replay: bool = typer.Option(False, "--replay", help="Replay the decoded transcript when using 'run inspect'"),
+    text: bool = typer.Option(False, "--text", help="Print text output instead of opening the session TUI for 'run inspect'"),
+    tail: int = typer.Option(8, "--tail", min=1, max=100, help="Tail event count for 'run inspect'"),
 ):
-    """Launch, inspect, and manage tracked CLI sessions."""
+    """Launch, inspect, and manage agent CLI sessions."""
     from . import track as track_runtime
 
     args = list(ctx.args or [])
@@ -3681,7 +3711,7 @@ def track_command(
         raise typer.Exit(code=1)
 
     if not args:
-        console.print("[red]No tracked app or command provided.[/red]")
+        console.print("[red]No agent app or command provided.[/red]")
         raise typer.Exit(code=2)
 
     if args[0] == "status" and len(args) == 1:
@@ -3696,14 +3726,14 @@ def track_command(
                 stop_all = True
                 continue
             if clean_arg.startswith("-"):
-                console.print(f"[red]Unknown track stop option:[/red] {clean_arg}")
+                console.print(f"[red]Unknown run stop option:[/red] {clean_arg}")
                 raise typer.Exit(code=2)
             if session_id:
-                console.print("[red]Usage: agensic track stop [<session_id>] [--all][/red]")
+                console.print("[red]Usage: agensic run stop [<session_id>] [--all][/red]")
                 raise typer.Exit(code=2)
             session_id = clean_arg
         if stop_all and session_id:
-            console.print("[red]Use either a session_id or --all for 'track stop', not both.[/red]")
+            console.print("[red]Use either a session_id or --all for 'run stop', not both.[/red]")
             raise typer.Exit(code=2)
         raise typer.Exit(code=track_runtime.stop_track_sessions(session_id, stop_all=stop_all))
     if args[0] == "inspect" and len(args) <= 2:

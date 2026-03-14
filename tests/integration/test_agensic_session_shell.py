@@ -252,7 +252,7 @@ class AgensicSessionShellTests(unittest.TestCase):
         result = self._run_zsh(
             """
             agensic_session_start --agent codex --model gpt-5.3 --agent-name "Planner A" >/dev/null
-            _agensic_preexec_hook "agensic track codex"
+            _agensic_preexec_hook "agensic run codex"
             print -r -- "${AGENSIC_PENDING_LAST_ACTION:-}|${AGENSIC_PENDING_PROOF_LABEL:-}|${AGENSIC_PENDING_ACCEPTED_ORIGIN:-}|${AGENSIC_NEXT_PROOF_LABEL:-}"
             """
         )

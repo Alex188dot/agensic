@@ -2468,7 +2468,7 @@ _agensic_command_forces_human_provenance() {
     fi
 
     subcmd="${tokens[$idx]}"
-    [[ "$subcmd" == "track" || "$subcmd" == "provenance" ]]
+    [[ "$subcmd" == "run" || "$subcmd" == "provenance" ]]
 }
 
 _agensic_ai_session_agent_matches_executable() {

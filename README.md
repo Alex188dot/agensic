@@ -57,8 +57,8 @@ agensic setup
 
 agensic provenance --tui
 agensic sessions
-agensic track codex
-agensic track inspect <session_id>
+agensic run codex
+agensic run inspect <session_id>
 
 agensic_session_start --agent codex --model gpt-5.3 --agent-name "Planner A" --ttl-minutes 120
 agensic_session_status
@@ -69,7 +69,7 @@ agensic_session_stop
 
 - `agensic provenance --tui` opens the provenance interface and can export the current filtered dataset.
 - `agensic sessions` opens the tracked sessions browser.
-- `agensic track ...` launches supported agent CLIs under session tracking on macOS.
+- `agensic run ...` launches supported agent CLIs under session tracking on macOS.
 - `agensic ai-exec --agent ... --model ... -- <command>` wraps one-off executions with deterministic proof metadata.
 - `agensic doctor`, `agensic fix --safe`, and `agensic fix --recover` help keep long-running local state healthy.
 

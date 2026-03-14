@@ -85,7 +85,7 @@ class CliTrackTests(unittest.TestCase):
         with self._temp_app_paths() as (env, _), patch.object(
             cli_app, "_run_storage_preflight_if_enabled"
         ):
-            result = self.runner.invoke(app, ["track", "status"], env=env)
+            result = self.runner.invoke(app, ["run", "status"], env=env)
         self.assertEqual(result.exit_code, 0)
         self.assertIn("inactive", result.stdout)
 
@@ -93,7 +93,7 @@ class CliTrackTests(unittest.TestCase):
         with self._temp_app_paths() as (env, _), patch.object(
             cli_app, "_run_storage_preflight_if_enabled"
         ):
-            result = self.runner.invoke(app, ["track", "stop"], env=env)
+            result = self.runner.invoke(app, ["run", "stop"], env=env)
         self.assertEqual(result.exit_code, 0)
         self.assertIn("inactive", result.stdout)
 
@@ -117,13 +117,13 @@ class CliTrackTests(unittest.TestCase):
             active = self._wait_for_active_sessions(temp_paths, 2)
             self.assertGreaterEqual(len(active), 2)
 
-            result = self.runner.invoke(app, ["track", "status"], env=env)
+            result = self.runner.invoke(app, ["run", "status"], env=env)
             self.assertEqual(result.exit_code, 0)
             self.assertIn("active_sessions=2", result.stdout)
             for row in active[:2]:
                 self.assertIn(str(row["session_id"]), result.stdout)
 
-            stop_result = self.runner.invoke(app, ["track", "stop", "--all"], env=env)
+            stop_result = self.runner.invoke(app, ["run", "stop", "--all"], env=env)
             worker_one.join(timeout=10.0)
             worker_two.join(timeout=10.0)
 
@@ -155,11 +155,11 @@ class CliTrackTests(unittest.TestCase):
             active = self._wait_for_active_sessions(temp_paths, 2)
             self.assertGreaterEqual(len(active), 2)
 
-            result = self.runner.invoke(app, ["track", "stop"], env=env)
+            result = self.runner.invoke(app, ["run", "stop"], env=env)
             self.assertEqual(result.exit_code, 2)
             self.assertIn("Multiple tracked sessions are active", result.stdout)
 
-            cleanup = self.runner.invoke(app, ["track", "stop", "--all"], env=env)
+            cleanup = self.runner.invoke(app, ["run", "stop", "--all"], env=env)
             worker_one.join(timeout=10.0)
             worker_two.join(timeout=10.0)
 
@@ -190,7 +190,7 @@ class CliTrackTests(unittest.TestCase):
             "run_tracked_command",
             return_value=0,
         ) as run_mock, patch.dict(os.environ, {"CODEX_HOME": str(Path(temp_dir) / ".codex")}, clear=False):
-            result = self.runner.invoke(app, ["track", "codex"])
+            result = self.runner.invoke(app, ["run", "codex"])
 
         self.assertEqual(result.exit_code, 0)
         launch = run_mock.call_args.args[0]
@@ -210,7 +210,7 @@ class CliTrackTests(unittest.TestCase):
                 "run_tracked_command",
                 return_value=0,
             ) as run_mock, patch.dict(os.environ, {"CODEX_HOME": str(codex_home)}, clear=False):
-                result = self.runner.invoke(app, ["track", "codex"])
+                result = self.runner.invoke(app, ["run", "codex"])
 
         self.assertEqual(result.exit_code, 0)
         launch = run_mock.call_args.args[0]
@@ -230,7 +230,7 @@ class CliTrackTests(unittest.TestCase):
                 "run_tracked_command",
                 return_value=0,
             ) as run_mock, patch.dict(os.environ, {"HOME": str(home_dir)}, clear=False):
-                result = self.runner.invoke(app, ["track", "gemini"])
+                result = self.runner.invoke(app, ["run", "gemini"])
 
         self.assertEqual(result.exit_code, 0)
         launch = run_mock.call_args.args[0]
@@ -242,7 +242,7 @@ class CliTrackTests(unittest.TestCase):
             "run_tracked_command",
             return_value=0,
         ) as run_mock:
-            result = self.runner.invoke(app, ["track", "gemini", "--model", "gemini-2.5-flash"])
+            result = self.runner.invoke(app, ["run", "gemini", "--model", "gemini-2.5-flash"])
 
         self.assertEqual(result.exit_code, 0)
         launch = run_mock.call_args.args[0]
@@ -262,7 +262,7 @@ class CliTrackTests(unittest.TestCase):
                 "run_tracked_command",
                 return_value=0,
             ) as run_mock, patch("os.getcwd", return_value=str(workspace_dir)):
-                result = self.runner.invoke(app, ["track", "--", "claude"])
+                result = self.runner.invoke(app, ["run", "--", "claude"])
 
         self.assertEqual(result.exit_code, 0)
         launch = run_mock.call_args.args[0]
@@ -275,7 +275,7 @@ class CliTrackTests(unittest.TestCase):
             "run_tracked_command",
             return_value=0,
         ) as run_mock:
-            result = self.runner.invoke(app, ["track", "--", "claude", "--model", "claude-opus-4-1"])
+            result = self.runner.invoke(app, ["run", "--", "claude", "--model", "claude-opus-4-1"])
 
         self.assertEqual(result.exit_code, 0)
         launch = run_mock.call_args.args[0]
@@ -300,7 +300,7 @@ class CliTrackTests(unittest.TestCase):
                 {"HOME": str(home_dir), "XDG_CONFIG_HOME": str(home_dir / ".config")},
                 clear=False,
             ):
-                result = self.runner.invoke(app, ["track", "opencode"])
+                result = self.runner.invoke(app, ["run", "opencode"])
 
         self.assertEqual(result.exit_code, 0)
         launch = run_mock.call_args.args[0]
@@ -313,7 +313,7 @@ class CliTrackTests(unittest.TestCase):
             "run_tracked_command",
             return_value=0,
         ) as run_mock:
-            result = self.runner.invoke(app, ["track", "opencode", "-m", "gpt-4.1"])
+            result = self.runner.invoke(app, ["run", "opencode", "-m", "gpt-4.1"])
 
         self.assertEqual(result.exit_code, 0)
         launch = run_mock.call_args.args[0]
@@ -332,7 +332,7 @@ class CliTrackTests(unittest.TestCase):
                 "run_tracked_command",
                 return_value=0,
             ) as run_mock, patch("os.getcwd", return_value=str(workspace_dir)):
-                result = self.runner.invoke(app, ["track", "--", "kilo"])
+                result = self.runner.invoke(app, ["run", "--", "kilo"])
 
         self.assertEqual(result.exit_code, 0)
         launch = run_mock.call_args.args[0]
@@ -352,7 +352,7 @@ class CliTrackTests(unittest.TestCase):
                 "run_tracked_command",
                 return_value=0,
             ) as run_mock, patch.dict(os.environ, {"HOME": str(Path(temp_dir))}, clear=False):
-                result = self.runner.invoke(app, ["track", "--", "gh", "copilot"])
+                result = self.runner.invoke(app, ["run", "--", "gh", "copilot"])
 
         self.assertEqual(result.exit_code, 0)
         launch = run_mock.call_args.args[0]
@@ -365,7 +365,7 @@ class CliTrackTests(unittest.TestCase):
             "run_tracked_command",
             return_value=0,
         ) as run_mock:
-            result = self.runner.invoke(app, ["track", "--", "gh", "repo", "list"])
+            result = self.runner.invoke(app, ["run", "--", "gh", "repo", "list"])
 
         self.assertEqual(result.exit_code, 0)
         launch = run_mock.call_args.args[0]
@@ -378,7 +378,7 @@ class CliTrackTests(unittest.TestCase):
             "run_tracked_command",
             return_value=0,
         ) as run_mock:
-            result = self.runner.invoke(app, ["track", "--", "ollama", "run", "llama3.2"])
+            result = self.runner.invoke(app, ["run", "--", "ollama", "run", "llama3.2"])
 
         self.assertEqual(result.exit_code, 0)
         launch = run_mock.call_args.args[0]
@@ -393,7 +393,7 @@ class CliTrackTests(unittest.TestCase):
             result = self.runner.invoke(
                 app,
                 [
-                    "track",
+                    "run",
                     "--",
                     "open",
                     "-j",
@@ -425,7 +425,7 @@ class CliTrackTests(unittest.TestCase):
                 "run_tracked_command",
                 return_value=0,
             ) as run_mock, patch.dict(os.environ, {"HOME": str(home_dir)}, clear=False):
-                result = self.runner.invoke(app, ["track", "--agent", "openclaw", "--", "openclaw"])
+                result = self.runner.invoke(app, ["run", "--agent", "openclaw", "--", "openclaw"])
 
         self.assertEqual(result.exit_code, 0)
         launch = run_mock.call_args.args[0]
@@ -455,7 +455,7 @@ class CliTrackTests(unittest.TestCase):
                 "run_tracked_command",
                 return_value=0,
             ) as run_mock, patch.dict(os.environ, {"HOME": str(home_dir)}, clear=False):
-                result = self.runner.invoke(app, ["track", "--agent", "openclaw", "--", "openclaw"])
+                result = self.runner.invoke(app, ["run", "--agent", "openclaw", "--", "openclaw"])
 
         self.assertEqual(result.exit_code, 0)
         launch = run_mock.call_args.args[0]
@@ -467,7 +467,7 @@ class CliTrackTests(unittest.TestCase):
             "run_tracked_command",
             return_value=0,
         ) as run_mock:
-            result = self.runner.invoke(app, ["track", "--", "zsh", "-lc", "echo hi"])
+            result = self.runner.invoke(app, ["run", "--", "zsh", "-lc", "echo hi"])
 
         self.assertEqual(result.exit_code, 0)
         launch = run_mock.call_args.args[0]
@@ -480,7 +480,7 @@ class CliTrackTests(unittest.TestCase):
             "run_tracked_command",
             return_value=0,
         ) as run_mock:
-            result = self.runner.invoke(app, ["track", "--model", "gemini-2.5-pro", "codex"])
+            result = self.runner.invoke(app, ["run", "--model", "gemini-2.5-pro", "codex"])
 
         self.assertEqual(result.exit_code, 0)
         launch = run_mock.call_args.args[0]
@@ -494,7 +494,7 @@ class CliTrackTests(unittest.TestCase):
         ) as run_mock:
             result = self.runner.invoke(
                 app,
-                ["track", "--agent", "claude", "--model", "claude-sonnet-4", "--", "claude"],
+                ["run", "--agent", "claude", "--model", "claude-sonnet-4", "--", "claude"],
             )
 
         self.assertEqual(result.exit_code, 0)
@@ -741,7 +741,7 @@ class CliTrackTests(unittest.TestCase):
             store = SQLiteStateStore(temp_paths.state_sqlite_path, journal=None)
             session = store.get_latest_tracked_session()
             self.assertIsNotNone(session)
-            result = self.runner.invoke(app, ["track", "inspect", str(session["session_id"])], env=env)
+            result = self.runner.invoke(app, ["run", "inspect", str(session["session_id"])], env=env)
 
         self.assertEqual(result.exit_code, 0)
         self.assertIn("transcript_events=", result.stdout)

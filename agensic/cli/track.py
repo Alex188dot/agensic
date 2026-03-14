@@ -107,7 +107,7 @@ def _track_public_key_path() -> str:
 
 def ensure_track_supported() -> None:
     if sys.platform != "darwin":
-        raise RuntimeError("agensic track is currently supported on macOS only.")
+        raise RuntimeError("agensic run is currently supported on macOS only.")
 
 
 def _ensure_track_layout() -> None:
@@ -1392,7 +1392,7 @@ def stop_track_sessions(session_id: str = "", *, stop_all: bool = False) -> int:
         targets = [active_states[0]]
     else:
         console.print(
-            "[red]Multiple tracked sessions are active. Use 'agensic track stop <session_id>' or 'agensic track stop --all'.[/red]"
+            "[red]Multiple tracked sessions are active. Use 'agensic run stop <session_id>' or 'agensic run stop --all'.[/red]"
         )
         return 2
 
@@ -2344,7 +2344,7 @@ def run_tracked_command(launch: TrackLaunch) -> int:
             close_fds=True,
         )
     except FileNotFoundError:
-        console.print(f"[red]agensic track: command not found:[/red] {launch.command[0]}")
+        console.print(f"[red]agensic run: command not found:[/red] {launch.command[0]}")
         try:
             os.close(master_fd)
         except Exception:
@@ -2355,7 +2355,7 @@ def run_tracked_command(launch: TrackLaunch) -> int:
             pass
         return 127
     except Exception as exc:
-        console.print(f"[red]agensic track failed:[/red] {exc}")
+        console.print(f"[red]agensic run failed:[/red] {exc}")
         try:
             os.close(master_fd)
         except Exception:

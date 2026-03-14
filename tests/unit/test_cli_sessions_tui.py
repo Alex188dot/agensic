@@ -42,7 +42,7 @@ class CliSessionsTuiTests(unittest.TestCase):
         ) as run_tui, patch.object(app_module.sys.stdin, "isatty", return_value=True), patch.object(
             app_module.sys.stdout, "isatty", return_value=True
         ):
-            result = self.runner.invoke(app, ["track", "inspect", "sess-1"])
+            result = self.runner.invoke(app, ["run", "inspect", "sess-1"])
 
         self.assertEqual(result.exit_code, 0)
         run_tui.assert_called_once_with(session_id="sess-1", replay=False)
@@ -53,7 +53,7 @@ class CliSessionsTuiTests(unittest.TestCase):
         ), patch.object(
             track_module, "inspect_track_session", return_value=0
         ) as inspect_text:
-            result = self.runner.invoke(app, ["track", "--text", "inspect", "sess-1"])
+            result = self.runner.invoke(app, ["run", "--text", "inspect", "sess-1"])
 
         self.assertEqual(result.exit_code, 0)
         inspect_text.assert_called_once_with("sess-1", replay=False, tail_events=8)
