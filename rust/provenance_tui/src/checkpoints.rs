@@ -11,6 +11,7 @@ use std::time::{Duration, Instant};
 
 const DEFAULT_CHECKPOINT_INTERVAL_MS: u64 = 120;
 const DEFAULT_CHECKPOINT_INTERVAL_EVENTS: i64 = 48;
+const DEFAULT_RESIZE_SETTLE_MS: u64 = 140;
 
 #[derive(Debug, Parser, Clone)]
 #[command(name = "agensic-provenance-tui checkpoints")]
@@ -56,6 +57,8 @@ struct CheckpointRecorder {
     last_checkpoint_seq: i64,
     last_state_hash: u64,
     last_seen_seq: i64,
+    pending_resize_seq: Option<i64>,
+    pending_resize_at: Option<Instant>,
 }
 
 impl CheckpointRecorder {
@@ -76,6 +79,8 @@ impl CheckpointRecorder {
             last_checkpoint_seq: 0,
             last_state_hash: 0,
             last_seen_seq: 0,
+            pending_resize_seq: None,
+            pending_resize_at: None,
         })
     }
 
@@ -91,6 +96,7 @@ impl CheckpointRecorder {
     }
 
     fn handle_event(&mut self, event: CheckpointInputEvent) -> io::Result<()> {
+        self.flush_pending_resize_checkpoint(false)?;
         let direction = event.direction.trim().to_lowercase();
         if direction.is_empty() {
             return Ok(());
@@ -101,7 +107,8 @@ impl CheckpointRecorder {
         match direction.as_str() {
             "resize" => {
                 self.ensure_parser(event.rows.unwrap_or(24), event.cols.unwrap_or(80));
-                self.maybe_emit_checkpoint(event.seq, true)?;
+                self.pending_resize_seq = Some(event.seq.max(self.last_seen_seq));
+                self.pending_resize_at = Some(Instant::now());
             }
             "pty" => {
                 if !self.initialized {
@@ -120,11 +127,28 @@ impl CheckpointRecorder {
                 self.maybe_emit_checkpoint(event.seq, false)?;
             }
             "finish" => {
+                self.flush_pending_resize_checkpoint(true)?;
                 self.maybe_emit_checkpoint(event.seq.max(self.last_seen_seq), true)?;
             }
             _ => {}
         }
         Ok(())
+    }
+
+    fn flush_pending_resize_checkpoint(&mut self, force: bool) -> io::Result<()> {
+        let Some(seq) = self.pending_resize_seq else {
+            return Ok(());
+        };
+        let settled = self
+            .pending_resize_at
+            .map(|at| at.elapsed() >= Duration::from_millis(DEFAULT_RESIZE_SETTLE_MS))
+            .unwrap_or(false);
+        if !force && !settled {
+            return Ok(());
+        }
+        self.pending_resize_seq = None;
+        self.pending_resize_at = None;
+        self.maybe_emit_checkpoint(seq.max(self.last_seen_seq), true)
     }
 
     fn maybe_emit_checkpoint(&mut self, seq: i64, force: bool) -> io::Result<()> {
@@ -226,6 +250,9 @@ pub fn run_from_env(argv: &[String]) -> Result<(), String> {
             .map_err(|err| format!("checkpoint write failed: {err}"))?;
     }
     recorder
+        .flush_pending_resize_checkpoint(true)
+        .map_err(|err| format!("final resize checkpoint write failed: {err}"))?;
+    recorder
         .maybe_emit_checkpoint(recorder.last_seen_seq, true)
         .map_err(|err| format!("final checkpoint write failed: {err}"))?;
     Ok(())
@@ -233,7 +260,10 @@ pub fn run_from_env(argv: &[String]) -> Result<(), String> {
 
 #[cfg(test)]
 mod tests {
-    use super::{checkpoint_path_for_transcript, decode_checkpoint_state, load_checkpoint_records};
+    use super::{
+        checkpoint_path_for_transcript, decode_checkpoint_state, load_checkpoint_records,
+        CheckpointInputEvent, CheckpointRecorder,
+    };
     use base64::Engine;
     use std::fs;
     use std::path::PathBuf;
@@ -267,6 +297,43 @@ mod tests {
         assert_eq!(records.len(), 1);
         let bytes = decode_checkpoint_state(&records[0]);
         assert!(!bytes.is_empty());
+        let _ = fs::remove_file(path);
+    }
+
+    #[test]
+    fn resize_burst_is_debounced_into_single_checkpoint() {
+        let suffix = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .map(|duration| duration.as_nanos())
+            .unwrap_or(0);
+        let path: PathBuf =
+            std::env::temp_dir().join(format!("resize-burst-{suffix}.checkpoints.jsonl"));
+        let mut recorder =
+            CheckpointRecorder::new(path.to_str().unwrap_or_default(), 1_000, 1_000).expect("recorder");
+        recorder
+            .handle_event(CheckpointInputEvent {
+                direction: "resize".to_string(),
+                seq: 1,
+                rows: Some(20),
+                cols: Some(80),
+                data_b64: String::new(),
+            })
+            .expect("first resize");
+        recorder
+            .handle_event(CheckpointInputEvent {
+                direction: "resize".to_string(),
+                seq: 2,
+                rows: Some(24),
+                cols: Some(100),
+                data_b64: String::new(),
+            })
+            .expect("second resize");
+        recorder.flush_pending_resize_checkpoint(true).expect("flush");
+        let records = load_checkpoint_records(path.to_str().unwrap_or_default());
+        assert_eq!(records.len(), 1);
+        assert_eq!(records[0].seq, 2);
+        assert_eq!(records[0].rows, 24);
+        assert_eq!(records[0].cols, 100);
         let _ = fs::remove_file(path);
     }
 }

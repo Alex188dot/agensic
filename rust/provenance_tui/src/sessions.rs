@@ -3417,7 +3417,7 @@ fn session_detail_layout_in_area(detail: &DetailState, area: Rect) -> Option<Ses
     }
     let body = Layout::default()
         .direction(Direction::Horizontal)
-        .constraints([Constraint::Percentage(52), Constraint::Percentage(48)])
+        .constraints([Constraint::Percentage(47), Constraint::Percentage(53)])
         .split(chunks[1]);
     let right = Layout::default()
         .direction(Direction::Vertical)
