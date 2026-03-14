@@ -76,11 +76,11 @@ class SuggestionIngestionFilterTests(unittest.TestCase):
         vector_db.insert_command.assert_called_once()
         engine.state_store.record_command_provenance.assert_called_once()
 
-    def test_agensic_snapshot_is_excluded_from_suggestion_store_by_default(self):
+    def test_ai_executed_is_excluded_from_suggestion_store_by_default(self):
         engine, vector_db = self._build_engine()
         with patch(
             "agensic.engine.suggestion_engine.classify_command_run",
-            return_value=_classification("AGENSIC_SNAPSHOT"),
+            return_value=_classification("AI_EXECUTED"),
         ), patch(
             "agensic.engine.suggestion_engine.load_config_file",
             return_value={},

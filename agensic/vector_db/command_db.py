@@ -2607,7 +2607,6 @@ class CommandVectorDB:
                             "AI_SUGGESTED_HUMAN_RAN",
                             "AG_SUGGESTED_HUMAN_RAN",
                             "AI_EXECUTED",
-                            "AGENSIC_SNAPSHOT",
                         ],
                     )
                     if isinstance(raw_assist_counts, dict):

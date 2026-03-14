@@ -1691,8 +1691,8 @@ class SuggestionEngine:
         if normalized_source == "runtime" and exit_code != 0:
             logger.debug("Skipping runtime command ingestion into suggestion store after provenance persistence")
             return
-        if classification_label in {"AI_EXECUTED", "AGENSIC_SNAPSHOT"} and not include_ai_executed:
-            logger.debug("Skipping signed agent-originated command ingestion into suggestion store")
+        if classification_label == "AI_EXECUTED" and not include_ai_executed:
+            logger.debug("Skipping AI_EXECUTED command ingestion into suggestion store")
             return
 
         try:
