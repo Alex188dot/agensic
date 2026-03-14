@@ -1589,7 +1589,7 @@ fn build_changes(detail: &DetailState) -> Paragraph<'static> {
 
 fn build_replay(app: &App, detail: &DetailState, area: Rect) -> Paragraph<'static> {
     let focused = detail.focus == FocusPane::Replay;
-    let status_label = if detail.autoplay { "playing" } else { "paused" };
+    let status_label = replay_status_label(detail.autoplay);
     let mode_label = match detail.replay_mode {
         ReplayMode::Terminal => "Terminal, faithful screen state",
         ReplayMode::Text => "Text, session transcript",
@@ -3470,7 +3470,7 @@ fn replay_toggle_hit(mouse: MouseEvent, detail: &DetailState) -> Option<bool> {
         ReplayMode::Terminal => "Terminal, faithful screen state",
         ReplayMode::Text => "Text, session transcript",
     };
-    let status_label = if detail.autoplay { "playing" } else { "paused" };
+    let status_label = replay_status_label(detail.autoplay);
     let prefix = format!(
         "Replay ({}{}) [{}]{}  ",
         mode_label, frame_size_label, status_label, horizontal_scroll_hint
@@ -3485,6 +3485,14 @@ fn replay_toggle_hit(mouse: MouseEvent, detail: &DetailState) -> Option<bool> {
         && mouse.column >= button_x
         && mouse.column < button_x.saturating_add(display_width(button) as u16))
     .then_some(true)
+}
+
+fn replay_status_label(autoplay: bool) -> &'static str {
+    if autoplay {
+        "playing ▶"
+    } else {
+        "paused ⏸"
+    }
 }
 
 fn rect_contains(rect: Rect, column: u16, row: u16) -> bool {
