@@ -240,6 +240,27 @@ class ProvenanceClassifierTests(unittest.TestCase):
         self.assertEqual(out["evidence_tier"], "proof")
         self.assertEqual(out["registry_status"], "unmapped_signed")
 
+    def test_agensic_snapshot_proof_valid_preserves_snapshot_label(self):
+        payload = {
+            "proof_label": "AGENSIC_SNAPSHOT",
+            "proof_agent": "codex",
+            "proof_model": "gpt-5.4",
+            "proof_trace": "trace-snapshot",
+            "proof_timestamp": 1700000000,
+            "proof_signature": "sig",
+        }
+        with patch(
+            "agensic.engine.provenance.verify_signed_proof",
+            return_value=(True, "proof_valid"),
+        ), patch(
+            "agensic.engine.provenance.inspect_process_lineage",
+            return_value={"lineage": [], "hints": [], "match": {}},
+        ):
+            out = classify_command_run("echo hi", payload)
+        self.assertEqual(out["label"], "AGENSIC_SNAPSHOT")
+        self.assertTrue(out["proof_valid"])
+        self.assertEqual(out["evidence_tier"], "proof")
+
     def test_ed25519_round_trip_and_metadata(self):
         with tempfile.TemporaryDirectory() as tmpdir:
             private_path = os.path.join(tmpdir, "provenance_ed25519.pem")

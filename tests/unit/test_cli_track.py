@@ -547,7 +547,7 @@ class CliTrackTests(unittest.TestCase):
             labels = [str(row.get("label", "") or "") for row in runs]
             commands = [str(row.get("command", "") or "") for row in runs]
             payloads = [dict(row.get("payload", {}) or {}) for row in runs]
-            self.assertIn("AI_EXECUTED", labels)
+            self.assertIn("AGENSIC_SNAPSHOT", labels)
             self.assertTrue(any(command.startswith("zsh -lc ") for command in commands))
             self.assertTrue(any(command.startswith("sleep 0.8") for command in commands))
             self.assertTrue(any(str(item.get("track_session_id", "") or "").strip() for item in payloads))

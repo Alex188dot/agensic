@@ -502,6 +502,7 @@ impl App {
         match label {
             "HUMAN_TYPED" => Style::default().fg(Color::Green),
             "AI_EXECUTED" => Style::default().fg(Color::Rgb(0, 191, 255)),
+            "AGENSIC_SNAPSHOT" => Style::default().fg(Color::Rgb(255, 215, 0)),
             "INVALID_PROOF" => Style::default().fg(Color::Red),
             "AG_SUGGESTED_HUMAN_RAN" => Style::default().fg(Color::Cyan),
             "AI_SUGGESTED_HUMAN_RAN" => Style::default().fg(Color::Rgb(125, 249, 255)),
@@ -558,6 +559,39 @@ impl App {
 
     fn details_copy_copied(&self) -> bool {
         self.active_copy_feedback() == Some(CopyFeedbackTarget::DetailsCommand)
+    }
+
+    fn details_max_scroll(&self) -> u16 {
+        let Some(global_idx) = self.selected_global_index() else {
+            return 0;
+        };
+        let Some(row) = self.view_rows.get(global_idx) else {
+            return 0;
+        };
+        let Ok((width, height)) = terminal_size() else {
+            return 0;
+        };
+        let popup = centered_rect(90, 80, Rect::new(0, 0, width, height));
+        let content_width = popup.width.saturating_sub(2) as usize;
+        let content_height = popup.height.saturating_sub(2) as usize;
+        let detail_content = build_provenance_detail_content(self, row, content_width);
+        rendered_content_height(&detail_content.lines, content_width)
+            .saturating_sub(content_height)
+            .min(u16::MAX as usize) as u16
+    }
+
+    fn scroll_details_by(&mut self, delta: i32) {
+        let max_scroll = self.details_max_scroll();
+        if delta < 0 {
+            self.details_scroll = self.details_scroll.saturating_sub((-delta) as u16);
+        } else if delta > 0 {
+            self.details_scroll = self
+                .details_scroll
+                .saturating_add(delta as u16)
+                .min(max_scroll);
+        } else {
+            self.details_scroll = self.details_scroll.min(max_scroll);
+        }
     }
 
     fn search_hit(row: &RunEntry, query: &str) -> bool {
@@ -1435,9 +1469,8 @@ fn build_provenance_detail_content(
     };
     let payload_summary = match &payload_without_output {
         Value::Object(_) | Value::Array(_) => {
-            let text = serde_json::to_string_pretty(&payload_without_output)
-                .unwrap_or_else(|_| "{}".to_string());
-            truncate_cell(&text, 1200)
+            serde_json::to_string_pretty(&payload_without_output)
+                .unwrap_or_else(|_| "{}".to_string())
         }
         other => other.to_string(),
     };
@@ -1873,7 +1906,10 @@ fn draw_ui(terminal: &mut Terminal<CrosstermBackend<Stdout>>, app: &App) -> io::
                     ];
                     if has_overflow {
                         title_spans.push(Span::raw("  "));
-                        title_spans.push(Span::styled("↑↓ scroll", App::key_hint_style()));
+                        title_spans.push(Span::styled(
+                            "↑↓/PgUp/PgDn/wheel scroll",
+                            App::key_hint_style(),
+                        ));
                     }
                     let panel = Paragraph::new(details)
                         .block(
@@ -2023,18 +2059,19 @@ fn handle_key(app: &mut App, key: KeyEvent) -> bool {
                 }
             }
             KeyCode::Up | KeyCode::Char('k') => {
-                app.details_scroll = app.details_scroll.saturating_sub(1);
+                app.scroll_details_by(-1);
             }
             KeyCode::Down | KeyCode::Char('j') => {
-                app.details_scroll = app.details_scroll.saturating_add(1);
+                app.scroll_details_by(1);
             }
             KeyCode::PageUp => {
-                app.details_scroll = app.details_scroll.saturating_sub(10);
+                app.scroll_details_by(-10);
             }
             KeyCode::PageDown => {
-                app.details_scroll = app.details_scroll.saturating_add(10);
+                app.scroll_details_by(10);
             }
             KeyCode::Home => app.details_scroll = 0,
+            KeyCode::End => app.details_scroll = app.details_max_scroll(),
             _ => {}
         }
         return false;
@@ -2138,20 +2175,29 @@ fn handle_mouse(app: &mut App, mouse: MouseEvent) {
             .and_then(|global_idx| app.view_rows.get(global_idx))
             .map(|row| provenance_details_copy_hit(app, row, mouse))
             .unwrap_or(false);
-        if let MouseEventKind::Down(MouseButton::Left) = mouse.kind {
-            if let Some(global_idx) = app.selected_global_index() {
-                if let Some(row) = app.view_rows.get(global_idx) {
-                    if app.hovered_details_copy {
-                        match copy_to_clipboard(&row.command) {
-                            Ok(()) => {
-                                app.set_flash("✓ Copied command");
-                                app.set_copy_feedback(CopyFeedbackTarget::DetailsCommand);
+        match mouse.kind {
+            MouseEventKind::Down(MouseButton::Left) => {
+                if let Some(global_idx) = app.selected_global_index() {
+                    if let Some(row) = app.view_rows.get(global_idx) {
+                        if app.hovered_details_copy {
+                            match copy_to_clipboard(&row.command) {
+                                Ok(()) => {
+                                    app.set_flash("✓ Copied command");
+                                    app.set_copy_feedback(CopyFeedbackTarget::DetailsCommand);
+                                }
+                                Err(err) => app.set_flash(err),
                             }
-                            Err(err) => app.set_flash(err),
                         }
                     }
                 }
             }
+            MouseEventKind::ScrollDown => {
+                app.scroll_details_by(1);
+            }
+            MouseEventKind::ScrollUp => {
+                app.scroll_details_by(-1);
+            }
+            _ => {}
         }
         return;
     }
@@ -2675,7 +2721,7 @@ mod tests {
             run_id: "run-1".to_string(),
             ts: 1,
             command: "git status".to_string(),
-            label: "AI_EXECUTED".to_string(),
+            label: "AGENSIC_SNAPSHOT".to_string(),
             confidence: 1.0,
             agent: "codex".to_string(),
             agent_name: "Codex".to_string(),

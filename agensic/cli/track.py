@@ -2063,7 +2063,7 @@ class TrackRuntime:
         trace_id = f"track-{self.session_id}-{proc.pid}"
         ts = int(time.time())
         signature = sign_proof_payload(
-            "AI_EXECUTED",
+            "AGENSIC_SNAPSHOT",
             self.launch.agent,
             self.launch.model,
             trace_id,
@@ -2089,7 +2089,7 @@ class TrackRuntime:
             "provenance_agent_hint": self.launch.agent,
             "provenance_model_raw": self.launch.model,
             "provenance_wrapper_id": f"agensic_track:{self.session_id}",
-            "proof_label": "AI_EXECUTED",
+            "proof_label": "AGENSIC_SNAPSHOT",
             "proof_agent": self.launch.agent,
             "proof_model": self.launch.model,
             "proof_trace": trace_id,

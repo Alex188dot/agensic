@@ -31,8 +31,14 @@ _HUMAN_ACTIONS = {
     "human_paste",
 }
 
+_SIGNED_PROOF_LABELS = {
+    "AI_EXECUTED",
+    "AGENSIC_SNAPSHOT",
+}
+
 _BASE_LABEL_CONFIDENCE = {
     "AI_EXECUTED": 0.99,
+    "AGENSIC_SNAPSHOT": 0.99,
     "INVALID_PROOF": 0.98,
     "HUMAN_TYPED": 0.93,
     "AI_SUGGESTED_HUMAN_RAN": 0.88,
@@ -77,6 +83,10 @@ def _safe_bool(value: Any) -> bool:
     if text in {"0", "false", "no", "off"}:
         return False
     return bool(value)
+
+
+def _is_signed_proof_label(label: Any) -> bool:
+    return _normalize(label) in _SIGNED_PROOF_LABELS
 
 
 def _proof_message(
@@ -182,7 +192,7 @@ def _collect_required_proof_issues(
 
     if not clean_label:
         issues.append("proof_label_missing")
-    elif clean_label != "AI_EXECUTED":
+    elif not _is_signed_proof_label(clean_label):
         issues.append("proof_label_invalid")
     if not _normalize_lower(agent):
         issues.append("proof_agent_missing")
@@ -213,7 +223,7 @@ def verify_signed_proof(
     current_ts = int(now_ts or time.time())
     public_key_path = os.path.expanduser(public_path)
 
-    if clean_label != "AI_EXECUTED":
+    if not _is_signed_proof_label(clean_label):
         return (False, "proof_label_invalid")
     if ts_value <= 0:
         return (False, "proof_timestamp_missing")
@@ -484,8 +494,8 @@ def classify_command_run(
     label = "UNKNOWN"
     confidence = _BASE_LABEL_CONFIDENCE["UNKNOWN"]
     if proof_valid:
-        label = "AI_EXECUTED"
-        confidence = _BASE_LABEL_CONFIDENCE["AI_EXECUTED"]
+        label = proof_label if _is_signed_proof_label(proof_label) else "AI_EXECUTED"
+        confidence = _BASE_LABEL_CONFIDENCE.get(label, _BASE_LABEL_CONFIDENCE["AI_EXECUTED"])
         evidence.append("proof_enforced_strict")
         if proof_signer_scope:
             evidence.append(f"proof_signer_scope={proof_signer_scope}")
