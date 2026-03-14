@@ -558,14 +558,22 @@ impl DetailState {
             self.sync_replay_to_timeline();
             return;
         }
-        let next_visible = (self.timeline_index as isize + delta)
-            .clamp(0, self.timeline_entries.len().saturating_sub(1) as isize)
-            as usize;
+        let total = self.timeline_entries.len() as isize;
+        let next_visible = (self.timeline_index as isize + delta).rem_euclid(total) as usize;
         self.set_timeline_index(next_visible);
     }
 
     fn page_selection(&mut self, delta: isize) {
-        self.move_selection(delta.saturating_mul(TIMELINE_PAGE_STEP as isize));
+        if self.timeline_entries.is_empty() {
+            self.timeline_index = 0;
+            self.sync_replay_to_timeline();
+            return;
+        }
+        let next_visible = (self.timeline_index as isize
+            + delta.saturating_mul(TIMELINE_PAGE_STEP as isize))
+        .clamp(0, self.timeline_entries.len().saturating_sub(1) as isize)
+            as usize;
+        self.set_timeline_index(next_visible);
     }
 
     fn selected_timeline_entry(&self) -> Option<&TimelineEntry> {
@@ -3496,6 +3504,7 @@ mod tests {
         strip_inline_progress_noise, terminal_replay_end_padding, terminal_replay_max_scroll_x,
         terminal_replay_scroll, vt100_color_to_ratatui, DetailState, FocusPane, ReplayMode,
         SessionEvent, SessionSummary, TerminalReplayFrame, TimelineEntry, TranscriptChunk,
+        TEXT_REPLAY_TICK_MS,
     };
     use ratatui::{
         layout::Rect,
@@ -3503,7 +3512,7 @@ mod tests {
         text::Line,
     };
     use serde_json::json;
-    use std::{collections::HashMap, env, fs, time::Instant};
+    use std::{collections::HashMap, env, fs, time::{Duration, Instant}};
 
     #[test]
     fn sanitize_terminal_output_strips_ansi_sequences() {
@@ -4114,6 +4123,43 @@ mod tests {
     }
 
     #[test]
+    fn timeline_navigation_wraps_across_boundaries_in_text_mode() {
+        let mut detail = DetailState::new(
+            SessionSummary::default(),
+            vec![
+                SessionEvent {
+                    event_type: "command.recorded".to_string(),
+                    payload: json!({"command": "pwd"}),
+                    ..SessionEvent::default()
+                },
+                SessionEvent {
+                    event_type: "terminal.stdout".to_string(),
+                    payload: json!({"data": "/tmp\n"}),
+                    ..SessionEvent::default()
+                },
+                SessionEvent {
+                    event_type: "process.exited".to_string(),
+                    ..SessionEvent::default()
+                },
+            ],
+            false,
+        );
+
+        assert_eq!(detail.timeline_index, 2);
+        assert!(detail.replay_visible);
+
+        detail.move_selection(1);
+        assert_eq!(detail.timeline_index, 0);
+        assert!(!detail.replay_visible);
+        assert!(detail.replay_text.is_empty());
+
+        detail.move_selection(-1);
+        assert_eq!(detail.timeline_index, 2);
+        assert!(detail.replay_visible);
+        assert!(detail.replay_text.contains("/tmp"));
+    }
+
+    #[test]
     fn timeline_navigation_syncs_text_replay() {
         let mut detail = DetailState::new(
             SessionSummary::default(),
@@ -4148,5 +4194,122 @@ mod tests {
         detail.move_selection(1);
         assert_eq!(detail.timeline_index, 2);
         assert!(detail.replay_text.contains("/tmp"));
+    }
+
+    #[test]
+    fn autoplay_stops_at_end() {
+        let mut detail = DetailState::new(
+            SessionSummary::default(),
+            vec![
+                SessionEvent {
+                    event_type: "command.recorded".to_string(),
+                    payload: json!({"command": "pwd"}),
+                    ..SessionEvent::default()
+                },
+                SessionEvent {
+                    event_type: "terminal.stdout".to_string(),
+                    payload: json!({"data": "/tmp\n"}),
+                    ..SessionEvent::default()
+                },
+                SessionEvent {
+                    event_type: "process.exited".to_string(),
+                    ..SessionEvent::default()
+                },
+            ],
+            false,
+        );
+
+        detail.autoplay = true;
+        detail.last_tick = Instant::now() - Duration::from_millis(TEXT_REPLAY_TICK_MS + 1);
+        detail.advance_autoplay();
+
+        assert_eq!(detail.timeline_index, 2);
+        assert!(!detail.autoplay);
+        assert!(detail.replay_visible);
+    }
+
+    #[test]
+    fn timeline_navigation_wraps_and_syncs_terminal_replay() {
+        let mut detail = DetailState {
+            session: SessionSummary::default(),
+            events: Vec::new(),
+            timeline_entries: vec![
+                TimelineEntry {
+                    event_index: 0,
+                    event_start_index: 0,
+                    event_end_index: 0,
+                    seq_start: 1,
+                    seq_end: 1,
+                    ts_wall: 0.0,
+                    ts_monotonic_ms: 0,
+                    event_type: "command.recorded".to_string(),
+                    summary: "pwd".to_string(),
+                    copy_command: Some("pwd".to_string()),
+                },
+                TimelineEntry {
+                    event_index: 1,
+                    event_start_index: 1,
+                    event_end_index: 1,
+                    seq_start: 2,
+                    seq_end: 2,
+                    ts_wall: 0.0,
+                    ts_monotonic_ms: 0,
+                    event_type: "terminal.output".to_string(),
+                    summary: "/tmp".to_string(),
+                    copy_command: None,
+                },
+                TimelineEntry {
+                    event_index: 2,
+                    event_start_index: 2,
+                    event_end_index: 2,
+                    seq_start: 3,
+                    seq_end: 3,
+                    ts_wall: 0.0,
+                    ts_monotonic_ms: 0,
+                    event_type: "process.exited".to_string(),
+                    summary: "exited".to_string(),
+                    copy_command: None,
+                },
+            ],
+            replay_mode: ReplayMode::Terminal,
+            focus: FocusPane::Timeline,
+            replay_fullscreen: false,
+            timeline_index: 2,
+            text_replay_chunks: Vec::new(),
+            replay_timeline_indices: vec![1],
+            transcript_chunks: Vec::new(),
+            checkpoint_records: Vec::new(),
+            terminal_replay_frames: vec![TerminalReplayFrame {
+                plain_text: "/tmp".to_string(),
+                lines: vec![Line::from("/tmp")],
+                source_seq_end: Some(2),
+                rows: 1,
+                cols: 4,
+            }],
+            terminal_replay_cache: HashMap::new(),
+            terminal_cache_key: None,
+            pending_replay_cache_key: None,
+            replay_cache_rx: None,
+            replay_notice: None,
+            replay_loading: false,
+            replay_step: 0,
+            replay_text: "/tmp".to_string(),
+            replay_visible: true,
+            replay_scroll: 0,
+            replay_scroll_x: 0,
+            replay_follow_end: false,
+            autoplay: false,
+            last_tick: Instant::now(),
+        };
+
+        detail.move_selection(1);
+        assert_eq!(detail.timeline_index, 0);
+        assert!(!detail.replay_visible);
+
+        detail.move_selection(-1);
+        assert_eq!(detail.timeline_index, 2);
+        assert!(detail.replay_visible);
+        assert_eq!(detail.replay_step, 0);
+        assert_eq!(detail.replay_text, "/tmp");
     }
 }
