@@ -143,6 +143,8 @@ class SQLiteStateStore:
                     started_at INTEGER NOT NULL DEFAULT 0,
                     ended_at INTEGER NOT NULL DEFAULT 0,
                     updated_at INTEGER NOT NULL DEFAULT 0,
+                    session_capability TEXT NOT NULL DEFAULT '',
+                    capability_issued_at INTEGER NOT NULL DEFAULT 0,
                     violation_code TEXT NOT NULL DEFAULT '',
                     exit_code INTEGER
                 );
@@ -190,6 +192,7 @@ class SQLiteStateStore:
                 """
             )
             self._ensure_command_runs_columns(conn)
+            self._ensure_tracked_sessions_columns(conn)
             self._scrub_command_run_payload_output_fields(conn)
             conn.commit()
             self._harden_sqlite_artifacts()
@@ -215,6 +218,18 @@ class SQLiteStateStore:
             if name in existing:
                 continue
             conn.execute(f"ALTER TABLE command_runs ADD COLUMN {name} {ddl}")
+            existing.add(name)
+
+    def _ensure_tracked_sessions_columns(self, conn: sqlite3.Connection) -> None:
+        existing = self._table_columns(conn, "tracked_sessions")
+        required_columns = {
+            "session_capability": "TEXT NOT NULL DEFAULT ''",
+            "capability_issued_at": "INTEGER NOT NULL DEFAULT 0",
+        }
+        for name, ddl in required_columns.items():
+            if name in existing:
+                continue
+            conn.execute(f"ALTER TABLE tracked_sessions ADD COLUMN {name} {ddl}")
             existing.add(name)
 
     @staticmethod
@@ -744,6 +759,8 @@ class SQLiteStateStore:
         started_at: Optional[int] = None,
         ended_at: Optional[int] = None,
         updated_at: Optional[int] = None,
+        session_capability: Optional[str] = None,
+        capability_issued_at: Optional[int] = None,
         violation_code: str = "",
         exit_code: Optional[int] = None,
     ) -> bool:
@@ -758,9 +775,9 @@ class SQLiteStateStore:
                 INSERT INTO tracked_sessions(
                     session_id, status, launch_mode, agent, model, agent_name, working_directory,
                     root_command, transcript_path, controller_pid, root_pid, started_at, ended_at,
-                    updated_at, violation_code, exit_code
+                    updated_at, session_capability, capability_issued_at, violation_code, exit_code
                 )
-                VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 ON CONFLICT(session_id) DO UPDATE SET
                     status = excluded.status,
                     launch_mode = excluded.launch_mode,
@@ -781,6 +798,14 @@ class SQLiteStateStore:
                         ELSE tracked_sessions.ended_at
                     END,
                     updated_at = excluded.updated_at,
+                    session_capability = CASE
+                        WHEN excluded.session_capability != '' THEN excluded.session_capability
+                        ELSE tracked_sessions.session_capability
+                    END,
+                    capability_issued_at = CASE
+                        WHEN excluded.capability_issued_at > 0 THEN excluded.capability_issued_at
+                        ELSE tracked_sessions.capability_issued_at
+                    END,
                     violation_code = CASE
                         WHEN excluded.violation_code != '' THEN excluded.violation_code
                         ELSE tracked_sessions.violation_code
@@ -805,12 +830,48 @@ class SQLiteStateStore:
                     int(started_at or now_ts),
                     int(ended_at or 0),
                     now_ts,
+                    str(session_capability or "").strip(),
+                    int(capability_issued_at or 0),
                     str(violation_code or "").strip().lower(),
                     (int(exit_code) if exit_code is not None else None),
                 ),
             )
             conn.commit()
         return True
+
+    def clear_tracked_session_capability(self, session_id: str) -> bool:
+        clean_session_id = str(session_id or "").strip()
+        if not clean_session_id:
+            return False
+        with self._lock, self._conn() as conn:
+            conn.execute(
+                """
+                UPDATE tracked_sessions
+                SET session_capability = '',
+                    capability_issued_at = 0
+                WHERE session_id = ?
+                """,
+                (clean_session_id,),
+            )
+            conn.commit()
+        return True
+
+    def verify_tracked_session_capability(self, session_id: str, capability: str) -> tuple[bool, str]:
+        clean_session_id = str(session_id or "").strip()
+        clean_capability = str(capability or "").strip()
+        if not clean_session_id:
+            return (False, "track_session_id_missing")
+        if not clean_capability:
+            return (False, "track_session_capability_missing")
+        row = self.get_tracked_session(clean_session_id)
+        if row is None:
+            return (False, "track_session_missing")
+        expected = str(row.get("session_capability", "") or "").strip()
+        if not expected:
+            return (False, "track_session_capability_unavailable")
+        if expected != clean_capability:
+            return (False, "track_session_capability_invalid")
+        return (True, "track_session_capability_valid")
 
     def get_tracked_session(self, session_id: str) -> Optional[Dict[str, object]]:
         clean_session_id = str(session_id or "").strip()

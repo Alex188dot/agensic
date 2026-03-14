@@ -27,11 +27,11 @@ It works in your existing Zsh environment on macOS and Linux, with macOS-specifi
 
 ## Observability
 
-Agensic records command provenance, signs agent-executed runs, tracks interactive agent sessions, and gives you fast ways to inspect, filter, replay, and export what happened. The result is a terminal workflow you can trust after the fact, not just during the suggestion.
+Agensic records command provenance, signs agent-executed runs from observed `agensic run` sessions, tracks interactive agent sessions, and gives you fast ways to inspect, filter, replay, and export what happened. The result is a terminal workflow you can trust after the fact, not just during the suggestion.
 
 ### What you get
 
-- Signed `AI_EXECUTED` proof metadata using local Ed25519 signing, with key and host fingerprints attached to the run record.
+- Signed `AI_EXECUTED` proof metadata for observed `agensic run` sessions, using local Ed25519 signing with key and host fingerprints attached to the run record.
 - Provenance classification for executed commands, including labels such as `AI_EXECUTED`, `AI_SUGGESTED_HUMAN_RAN`, `AG_SUGGESTED_HUMAN_RAN`, `HUMAN_TYPED`, `INVALID_PROOF`, and `UNKNOWN`.
 - Agent inference from proof payloads, provider/model metadata, and process lineage when explicit proof is absent.
 - A provenance registry for known agents, with registry listing and agent-detail inspection from the CLI.
@@ -59,18 +59,13 @@ agensic provenance --tui
 agensic sessions
 agensic run codex
 agensic run inspect <session_id>
-
-agensic_session_start --agent codex --model gpt-5.3 --agent-name "Planner A" --ttl-minutes 120
-agensic_session_status
-agensic_session_stop
 ```
 
 ### Observability surfaces
 
 - `agensic provenance --tui` opens the provenance interface and can export the current filtered dataset.
 - `agensic sessions` opens the tracked sessions browser.
-- `agensic run ...` launches supported agent CLIs under session tracking on macOS.
-- `agensic ai-exec --agent ... --model ... -- <command>` wraps one-off executions with deterministic proof metadata.
+- `agensic run ...` launches supported agent CLIs under session tracking on macOS and is the only supported path that emits `AI_EXECUTED`.
 - `agensic doctor`, `agensic fix --safe`, and `agensic fix --recover` help keep long-running local state healthy.
 
 ## Autocomplete

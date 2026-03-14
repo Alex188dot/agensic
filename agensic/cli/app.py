@@ -3257,64 +3257,23 @@ def ai_session_start(
     agent_name: str = typer.Option("", "--agent-name", help="Optional user-facing agent name"),
     ttl_minutes: int = typer.Option(120, "--ttl-minutes", min=1, max=1440, help="Session expiration in minutes"),
 ):
-    """Emit shell exports to start AI session signing."""
-    clean_agent, clean_model, defaulted = _normalize_signing_identity(agent, model)
-    _warn_defaulted_identity("ai-session start", defaulted)
-    clean_agent_name = str(agent_name or "").strip()
-
-    now_ts = int(time.time())
-    expires_ts = now_ts + int(ttl_minutes) * 60
-    session_id = uuid.uuid4().hex[:16]
-    values = {
-        "AGENSIC_AI_SESSION_ACTIVE": "1",
-        "AGENSIC_AI_SESSION_AGENT": clean_agent,
-        "AGENSIC_AI_SESSION_MODEL": clean_model,
-        "AGENSIC_AI_SESSION_AGENT_NAME": clean_agent_name,
-        "AGENSIC_AI_SESSION_ID": session_id,
-        "AGENSIC_AI_SESSION_STARTED_TS": str(now_ts),
-        "AGENSIC_AI_SESSION_EXPIRES_TS": str(expires_ts),
-        "AGENSIC_AI_SESSION_COUNTER": "0",
-        "AGENSIC_AI_SESSION_TIMER_PID": "",
-        "AGENSIC_AI_SESSION_OWNER_SHELL_PID": _current_ai_session_owner_shell_pid(),
-    }
-    _write_ai_session_state(values)
-    lines = [_shell_export_line(key, values.get(key, "")) for key in AI_SESSION_ENV_KEYS]
-    console.print("\n".join(lines), highlight=False)
+    """Deprecated: manual AI session signing has been removed."""
+    console.print("[red]ai-session is no longer supported.[/red] Use `agensic run <agent>`.")
+    raise typer.Exit(code=2)
 
 
 @ai_session_app.command("stop")
 def ai_session_stop():
-    """Emit shell unsets to stop AI session signing."""
-    _clear_ai_session_state()
-    lines = [f"unset {name}" for name in AI_SESSION_ENV_KEYS]
-    console.print("\n".join(lines), highlight=False)
+    """Deprecated: manual AI session signing has been removed."""
+    console.print("[red]ai-session is no longer supported.[/red] Use `agensic run <agent>`.")
+    raise typer.Exit(code=2)
 
 
 @ai_session_app.command("status")
 def ai_session_status():
-    """Show AI session signing status from current shell environment."""
-    values = _resolve_ai_session_values()
-    active = str(values.get("AGENSIC_AI_SESSION_ACTIVE", "") or "").strip() == "1"
-    if not active:
-        console.print("inactive")
-        raise typer.Exit(code=0)
-
-    now_ts = int(time.time())
-    try:
-        expires_ts = int(str(values.get("AGENSIC_AI_SESSION_EXPIRES_TS", "0") or "0"))
-    except Exception:
-        expires_ts = 0
-    remaining = max(0, expires_ts - now_ts) if expires_ts > 0 else 0
-    agent = str(values.get("AGENSIC_AI_SESSION_AGENT", "") or "").strip()
-    model = str(values.get("AGENSIC_AI_SESSION_MODEL", "") or "").strip()
-    session_id = str(values.get("AGENSIC_AI_SESSION_ID", "") or "").strip()
-    name = str(values.get("AGENSIC_AI_SESSION_AGENT_NAME", "") or "").strip()
-    state = "active" if remaining > 0 or expires_ts == 0 else "expired"
-    if state == "expired":
-        _clear_ai_session_state()
-    console.print(
-        f"{state} agent={agent} model={model} agent_name={name or '-'} session_id={session_id or '-'} remaining_seconds={remaining}"
-    )
+    """Deprecated: manual AI session signing has been removed."""
+    console.print("[red]ai-session is no longer supported.[/red] Use `agensic run <agent>`.")
+    raise typer.Exit(code=2)
 
 
 @app.command("ai-exec", context_settings={"allow_extra_args": True, "ignore_unknown_options": True}, hidden=True)
@@ -3326,92 +3285,9 @@ def ai_exec(
     trace: str = typer.Option("", "--trace", help="Optional trace id"),
     source: str = typer.Option("unknown", "--source", help="Log source (runtime/history/unknown)"),
 ):
-    """Run a command with deterministic AI_EXECUTED proof metadata."""
-    args = list(ctx.args or [])
-    if args and args[0] == "--":
-        args = args[1:]
-    if not args:
-        console.print("[red]No command provided.[/red]")
-        raise typer.Exit(code=2)
-
-    clean_source = str(source or "unknown").strip().lower()
-    if clean_source not in {"runtime", "history", "unknown"}:
-        clean_source = "unknown"
-
-    clean_agent, clean_model, defaulted = _normalize_signing_identity(agent, model)
-    _warn_defaulted_identity("ai-exec", defaulted)
-    trace_id = str(trace or "").strip() or uuid.uuid4().hex[:12]
-    ts = int(time.time())
-    signature = sign_proof_payload(
-        "AI_EXECUTED",
-        clean_agent,
-        clean_model,
-        trace_id,
-        ts,
-    )
-    proof_metadata = build_local_proof_metadata()
-
-    command_text = shlex.join(args)
-    started = time.perf_counter()
-    duration_ms = None
-    try:
-        exit_code = _run_command_passthrough(args)
-        duration_ms = min(MAX_COMMAND_DURATION_MS, max(0, int((time.perf_counter() - started) * 1000.0)))
-    except KeyboardInterrupt:
-        exit_code = 130
-        duration_ms = min(MAX_COMMAND_DURATION_MS, max(0, int((time.perf_counter() - started) * 1000.0)))
-    except Exception as exc:
-        console.print(f"[red]Command execution failed:[/red] {exc}")
-        raise typer.Exit(code=1)
-
-    payload = {
-        "command": command_text,
-        "exit_code": exit_code,
-        "duration_ms": duration_ms,
-        "source": clean_source,
-        "working_directory": os.getcwd(),
-        "shell_pid": os.getppid(),
-        "provenance_last_action": "suggestion_accept",
-        "provenance_accept_origin": "ai",
-        "provenance_accept_mode": "replace_full",
-        "provenance_suggestion_kind": "agent_wrapper",
-        "provenance_manual_edit_after_accept": False,
-        "provenance_ai_agent": clean_agent,
-        "provenance_ai_provider": "",
-        "provenance_ai_model": clean_model,
-        "provenance_agent_name": str(agent_name or "").strip(),
-        "provenance_agent_hint": clean_agent,
-        "provenance_model_raw": clean_model,
-        "provenance_wrapper_id": f"agensic_ai_exec:{trace_id}",
-        "proof_label": "AI_EXECUTED",
-        "proof_agent": clean_agent,
-        "proof_model": clean_model,
-        "proof_trace": trace_id,
-        "proof_timestamp": ts,
-        "proof_signature": signature,
-        "proof_signer_scope": str(proof_metadata.get("proof_signer_scope", "") or ""),
-        "proof_key_fingerprint": str(proof_metadata.get("proof_key_fingerprint", "") or ""),
-        "proof_host_fingerprint": str(proof_metadata.get("proof_host_fingerprint", "") or ""),
-    }
-    try:
-        response = _daemon_request(
-            "POST",
-            "/log_command",
-            json=payload,
-            timeout=8,
-        )
-        if response.status_code != 200:
-            if response.status_code == 401:
-                _print_daemon_auth_hint()
-            body = response.text.strip()
-            if body:
-                console.print(f"[yellow]Warning: log_command failed ({response.status_code}):[/yellow] {body}")
-            else:
-                console.print(f"[yellow]Warning: log_command failed ({response.status_code}).[/yellow]")
-    except Exception as exc:
-        console.print(f"[yellow]Warning: could not log provenance:[/yellow] {exc}")
-
-    raise typer.Exit(code=exit_code)
+    """Deprecated: manual AI_EXECUTED wrappers have been removed."""
+    console.print("[red]ai-exec has been removed.[/red] Use `agensic run <agent>` for observed agent sessions.")
+    raise typer.Exit(code=2)
 
 
 @app.command(hidden=True)
@@ -3420,18 +3296,9 @@ def wrap(
     model: str = typer.Option("gpt-5.3", "--model", help="Default model for the wrapper"),
     function_name: str = typer.Option("", "--name", help="Wrapper function name"),
 ):
-    """Print a shell wrapper that routes executions through agensic ai-exec."""
-    clean_agent = str(agent or "").strip()
-    if not clean_agent:
-        console.print("[red]Agent is required.[/red]")
-        raise typer.Exit(code=2)
-    wrapper_name = str(function_name or "").strip() or f"{clean_agent.replace('-', '_')}_run"
-    snippet = (
-        f"{wrapper_name}() {{\n"
-        f"  agensic ai-exec --agent {shlex.quote(clean_agent)} --model {shlex.quote(str(model or '').strip())} -- \"$@\"\n"
-        "}"
-    )
-    console.print(snippet)
+    """Deprecated: manual shell wrappers have been removed."""
+    console.print("[red]wrap has been removed.[/red] Use `agensic run <agent>`.")
+    raise typer.Exit(code=2)
 
 
 @provenance_registry_app.command("list")

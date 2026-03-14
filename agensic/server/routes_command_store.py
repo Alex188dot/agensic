@@ -15,6 +15,25 @@ router = APIRouter()
 MAX_COMMAND_DURATION_MS = 86_400_000
 
 
+def _verify_ai_executed_track_capability(data: LogCommandPayload) -> tuple[bool, str]:
+    proof_label = str(data.proof_label or "").strip()
+    if proof_label != "AI_EXECUTED":
+        return (True, "")
+    session_id = str(data.track_session_id or "").strip()
+    wrapper_id = str(data.provenance_wrapper_id or "").strip()
+    if not session_id:
+        return (False, "track_session_id_missing")
+    if wrapper_id != f"agensic_track:{session_id}":
+        return (False, "track_wrapper_id_invalid")
+    state_store = getattr(deps.engine, "state_store", None)
+    if state_store is None:
+        return (False, "track_state_store_unavailable")
+    return state_store.verify_tracked_session_capability(
+        session_id,
+        str(data.track_session_capability or "").strip(),
+    )
+
+
 @router.post("/log_command", response_model=LogCommandResponse, response_model_exclude_unset=True)
 def log_command(data: LogCommandPayload, background_tasks: BackgroundTasks) -> LogCommandResponse:
     deps.enter_request_or_503()
@@ -48,6 +67,10 @@ def log_command(data: LogCommandPayload, background_tasks: BackgroundTasks) -> L
         if deps.command_matches_disabled_pattern(command, patterns):
             return {"status": "ignored", "reason": "disabled_pattern"}
 
+        capability_ok, capability_reason = _verify_ai_executed_track_capability(data)
+        if not capability_ok:
+            return {"status": "ignored", "reason": capability_reason}
+
         provenance_payload = {
             "shell_pid": data.shell_pid,
             "provenance_last_action": data.provenance_last_action,
@@ -71,6 +94,20 @@ def log_command(data: LogCommandPayload, background_tasks: BackgroundTasks) -> L
             "proof_signer_scope": data.proof_signer_scope,
             "proof_key_fingerprint": data.proof_key_fingerprint,
             "proof_host_fingerprint": data.proof_host_fingerprint,
+            "track_session_id": data.track_session_id,
+            "track_root_pid": data.track_root_pid,
+            "track_process_pid": data.track_process_pid,
+            "track_parent_pid": data.track_parent_pid,
+            "track_launch_mode": data.track_launch_mode,
+            "track_violation_code": data.track_violation_code,
+            "track_process_detached": data.track_process_detached,
+            "track_process_session_escape": data.track_process_session_escape,
+            "track_root_session_id": data.track_root_session_id,
+            "track_process_session_id": data.track_process_session_id,
+            "track_root_process_group_id": data.track_root_process_group_id,
+            "track_process_group_id": data.track_process_group_id,
+            "track_exit_code_unavailable": data.track_exit_code_unavailable,
+            "track_capability_verified": capability_ok and str(data.proof_label or "").strip() == "AI_EXECUTED",
         }
 
         background_tasks.add_task(

@@ -160,6 +160,20 @@ class LogCommandPayload(BaseModel):
     proof_signer_scope: str | None = None
     proof_key_fingerprint: str | None = None
     proof_host_fingerprint: str | None = None
+    track_session_id: str | None = None
+    track_session_capability: str | None = None
+    track_root_pid: int | None = None
+    track_process_pid: int | None = None
+    track_parent_pid: int | None = None
+    track_launch_mode: str | None = None
+    track_violation_code: str | None = None
+    track_process_detached: bool | None = None
+    track_process_session_escape: bool | None = None
+    track_root_session_id: int | None = None
+    track_process_session_id: int | None = None
+    track_root_process_group_id: int | None = None
+    track_process_group_id: int | None = None
+    track_exit_code_unavailable: bool | None = None
 
 
 class CommandStoreEntry(BaseModel):

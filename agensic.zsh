@@ -1633,116 +1633,18 @@ _agensic_ensure_ai_session_timer() {
 }
 
 agensic_session_start() {
-    local agent=""
-    local model=""
-    local agent_name=""
-    local ttl_minutes="120"
-    local defaulted_identity=0
-
-    while (( $# > 0 )); do
-        case "$1" in
-            --agent)
-                shift
-                agent="${1:-}"
-                ;;
-            --model)
-                shift
-                model="${1:-}"
-                ;;
-            --agent-name)
-                shift
-                agent_name="${1:-}"
-                ;;
-            --ttl-minutes)
-                shift
-                ttl_minutes="${1:-}"
-                ;;
-            -h|--help)
-                print -r -- "usage: agensic_session_start [--agent <agent>] [--model <model>] [--agent-name <name>] [--ttl-minutes <1-1440>]"
-                return 0
-                ;;
-            *)
-                print -r -- "agensic_session_start: unknown option: $1" >&2
-                return 2
-                ;;
-        esac
-        shift || true
-    done
-
-    if [[ -z "$agent" ]]; then
-        agent="unknown"
-        defaulted_identity=1
-    fi
-    if [[ -z "$model" ]]; then
-        model="unknown-model"
-        defaulted_identity=1
-    fi
-    agent="${(L)agent}"
-
-    if [[ "$ttl_minutes" != <-> || "$ttl_minutes" -lt 1 || "$ttl_minutes" -gt 1440 ]]; then
-        print -r -- "agensic_session_start: --ttl-minutes must be an integer between 1 and 1440" >&2
-        return 2
-    fi
-
-    if (( defaulted_identity == 1 )); then
-        print -r -- "Warning: session identity missing; defaulting to agent=unknown model=unknown-model" >&2
-    fi
-
-    local now_ts expires_ts session_id
-    now_ts="$(_agensic_now_ts)"
-    expires_ts=$(( now_ts + ttl_minutes * 60 ))
-    session_id="$(python3 - <<'PY' 2>/dev/null
-import uuid
-
-print(uuid.uuid4().hex[:16])
-PY
-)"
-    if [[ -z "$session_id" ]]; then
-        session_id="$now_ts"
-    fi
-
-    export AGENSIC_AI_SESSION_ACTIVE="1"
-    export AGENSIC_AI_SESSION_AGENT="$agent"
-    export AGENSIC_AI_SESSION_MODEL="$model"
-    export AGENSIC_AI_SESSION_AGENT_NAME="$agent_name"
-    export AGENSIC_AI_SESSION_ID="$session_id"
-    export AGENSIC_AI_SESSION_STARTED_TS="$now_ts"
-    export AGENSIC_AI_SESSION_EXPIRES_TS="$expires_ts"
-    export AGENSIC_AI_SESSION_COUNTER="0"
-    export AGENSIC_AI_SESSION_OWNER_SHELL_PID="$$"
-    AGENSIC_AI_SESSION_TIMER_PID=""
-    AGENSIC_AI_SESSION_AUTO_STOP_ARMED=0
-    _agensic_write_ai_session_state_file
-    _agensic_schedule_ai_session_expiry_timer
+    print -r -- "agensic_session_start has been removed. Use 'agensic run <agent>'." >&2
+    return 2
 }
 
 agensic_session_stop() {
-    _agensic_clear_ai_session_env
+    print -r -- "agensic_session_stop has been removed. Use 'agensic run <agent>'." >&2
+    return 2
 }
 
 agensic_session_status() {
-    _agensic_sync_ai_session_from_state_file
-    if [[ "${AGENSIC_AI_SESSION_ACTIVE:-0}" != "1" ]]; then
-        print -r -- "inactive"
-        return 0
-    fi
-
-    local now_ts expires_ts remaining state
-    now_ts="$(_agensic_now_ts)"
-    expires_ts="${AGENSIC_AI_SESSION_EXPIRES_TS:-0}"
-    if [[ "$expires_ts" == <-> && "$expires_ts" -gt 0 ]]; then
-        remaining=$(( expires_ts - now_ts ))
-        if (( remaining <= 0 )); then
-            state="expired"
-            remaining=0
-        else
-            state="active"
-        fi
-    else
-        state="active"
-        remaining=0
-    fi
-    print -r -- "${state} agent=${AGENSIC_AI_SESSION_AGENT:-} model=${AGENSIC_AI_SESSION_MODEL:-} agent_name=${AGENSIC_AI_SESSION_AGENT_NAME:-'-'} session_id=${AGENSIC_AI_SESSION_ID:-'-'} remaining_seconds=${remaining}"
+    print -r -- "agensic_session_status has been removed. Use 'agensic run <agent>'." >&2
+    return 2
 }
 
 _agensic_generate_ai_proof() {
@@ -1789,101 +1691,12 @@ PY
 }
 
 _agensic_session_sign_if_active() {
-    _agensic_ensure_ai_session_timer
-    if [[ "${AGENSIC_AI_SESSION_ACTIVE:-0}" != "1" ]]; then
-        return
-    fi
-    local session_agent="${AGENSIC_AI_SESSION_AGENT:-}"
-    local session_model="${AGENSIC_AI_SESSION_MODEL:-}"
-    local session_id="${AGENSIC_AI_SESSION_ID:-}"
-    local expires_ts="${AGENSIC_AI_SESSION_EXPIRES_TS:-0}"
-    local now_ts
-    now_ts="$(_agensic_now_ts)"
-    if [[ -n "$expires_ts" && "$expires_ts" != "0" && "$now_ts" -ge "$expires_ts" ]]; then
-        _agensic_clear_ai_session_env
-        return
-    fi
-    if [[ -n "$AGENSIC_NEXT_PROOF_SIGNATURE" ]]; then
-        return
-    fi
-    if [[ -z "$session_agent" || -z "$session_model" ]]; then
-        return
-    fi
-    if [[ -z "$session_id" ]]; then
-        session_id="$now_ts"
-        AGENSIC_AI_SESSION_ID="$session_id"
-    fi
-    if [[ "${AGENSIC_AI_SESSION_COUNTER:-0}" != <-> ]]; then
-        AGENSIC_AI_SESSION_COUNTER=0
-    fi
-    AGENSIC_AI_SESSION_COUNTER=$(( AGENSIC_AI_SESSION_COUNTER + 1 ))
-    _agensic_write_ai_session_state_file
-    local time_component
-    time_component="$(_agensic_now_time_component)"
-    local trace="session:${session_id}:${AGENSIC_AI_SESSION_COUNTER}:${time_component}"
-    local proof_blob signature key_fingerprint host_fingerprint signer_scope
-    proof_blob="$(_agensic_generate_ai_proof "AI_EXECUTED" "$session_agent" "$session_model" "$trace" "$now_ts")"
-    local -a proof_parts
-    proof_parts=("${(@f)proof_blob}")
-    signature="${proof_parts[1]:-}"
-    key_fingerprint="${proof_parts[2]:-}"
-    host_fingerprint="${proof_parts[3]:-}"
-    signer_scope="${proof_parts[4]:-}"
-    if [[ -z "$signature" ]]; then
-        return
-    fi
-    AGENSIC_NEXT_PROOF_LABEL="AI_EXECUTED"
-    AGENSIC_NEXT_PROOF_AGENT="$session_agent"
-    AGENSIC_NEXT_PROOF_MODEL="$session_model"
-    AGENSIC_NEXT_PROOF_TRACE="$trace"
-    AGENSIC_NEXT_PROOF_TIMESTAMP="$now_ts"
-    AGENSIC_NEXT_PROOF_SIGNATURE="$signature"
-    AGENSIC_NEXT_PROOF_SIGNER_SCOPE="${signer_scope:-local-ed25519}"
-    AGENSIC_NEXT_PROOF_KEY_FINGERPRINT="$key_fingerprint"
-    AGENSIC_NEXT_PROOF_HOST_FINGERPRINT="$host_fingerprint"
-    AGENSIC_PENDING_WRAPPER_ID="ai_session:${session_id}"
-    AGENSIC_PENDING_AGENT_NAME="${AGENSIC_AI_SESSION_AGENT_NAME:-}"
+    return 0
 }
 
 agensic_mark_ai_executed() {
-    local agent="$1"
-    local model="$2"
-    local trace="$3"
-    if [[ -z "$agent" || -z "$model" ]]; then
-        print -r -- "usage: agensic_mark_ai_executed <agent> <model> [trace_id]"
-        return 1
-    fi
-    if [[ -z "$trace" ]]; then
-        trace="$(date +%s 2>/dev/null)"
-    fi
-    local stamp
-    stamp="$(date +%s 2>/dev/null)"
-    if [[ -z "$stamp" ]]; then
-        stamp="0"
-    fi
-    local proof_blob signature key_fingerprint host_fingerprint signer_scope
-    proof_blob="$(_agensic_generate_ai_proof "AI_EXECUTED" "$agent" "$model" "$trace" "$stamp")"
-    local -a proof_parts
-    proof_parts=("${(@f)proof_blob}")
-    signature="${proof_parts[1]:-}"
-    key_fingerprint="${proof_parts[2]:-}"
-    host_fingerprint="${proof_parts[3]:-}"
-    signer_scope="${proof_parts[4]:-}"
-    if [[ -z "$signature" ]]; then
-        print -r -- "Could not create AI execution proof."
-        return 1
-    fi
-    AGENSIC_NEXT_PROOF_LABEL="AI_EXECUTED"
-    AGENSIC_NEXT_PROOF_AGENT="$agent"
-    AGENSIC_NEXT_PROOF_MODEL="$model"
-    AGENSIC_NEXT_PROOF_TRACE="$trace"
-    AGENSIC_NEXT_PROOF_TIMESTAMP="$stamp"
-    AGENSIC_NEXT_PROOF_SIGNATURE="$signature"
-    AGENSIC_NEXT_PROOF_SIGNER_SCOPE="${signer_scope:-local-ed25519}"
-    AGENSIC_NEXT_PROOF_KEY_FINGERPRINT="$key_fingerprint"
-    AGENSIC_NEXT_PROOF_HOST_FINGERPRINT="$host_fingerprint"
-    print -r -- "AI execution proof armed for next command (${agent}/${model})."
-    return 0
+    print -r -- "agensic_mark_ai_executed has been removed. Use 'agensic run <agent>'." >&2
+    return 1
 }
 
 _agensic_send_feedback() {

@@ -92,92 +92,15 @@ def _parse_ai_session_options(args: list[str]) -> tuple[dict[str, str], int]:
 
 
 def _run_ai_session_bootstrap(argv: list[str]) -> int:
-    if not argv or argv[0] in {"-h", "--help"}:
-        print("Usage: cli.py ai-session [OPTIONS] COMMAND [ARGS]...")
-        print()
-        print("Manage AI session signing context")
-        print()
-        print("Commands:")
-        print("  start")
-        print("  stop")
-        print("  status")
-        return 0
-
-    command = argv[0]
-    if command == "start":
-        values, parse_code = _parse_ai_session_options(argv[1:])
-        if parse_code == 0:
-            print("usage: cli.py ai-session start [--agent <agent>] [--model <model>] [--agent-name <name>] [--ttl-minutes <1-1440>]")
-            return 0
-        if parse_code > 0:
-            return parse_code
-        clean_agent, clean_model, defaulted = _normalize_signing_identity(values["agent"], values["model"])
-        if defaulted:
-            print(
-                "Warning: ai-session start missing identity; defaulting to agent=unknown model=unknown-model"
-            )
-        ttl_raw = str(values["ttl_minutes"] or "120").strip()
-        if not ttl_raw.isdigit() or not (1 <= int(ttl_raw) <= 1440):
-            print("agensic ai-session: --ttl-minutes must be an integer between 1 and 1440", file=sys.stderr)
-            return 2
-        now_ts = int(time.time())
-        expires_ts = now_ts + int(ttl_raw) * 60
-        session_id = uuid.uuid4().hex[:16]
-        state_values = {
-            "AGENSIC_AI_SESSION_ACTIVE": "1",
-            "AGENSIC_AI_SESSION_AGENT": clean_agent,
-            "AGENSIC_AI_SESSION_MODEL": clean_model,
-            "AGENSIC_AI_SESSION_AGENT_NAME": str(values["agent_name"] or "").strip(),
-            "AGENSIC_AI_SESSION_ID": session_id,
-            "AGENSIC_AI_SESSION_STARTED_TS": str(now_ts),
-            "AGENSIC_AI_SESSION_EXPIRES_TS": str(expires_ts),
-            "AGENSIC_AI_SESSION_COUNTER": "0",
-            "AGENSIC_AI_SESSION_TIMER_PID": "",
-            "AGENSIC_AI_SESSION_OWNER_SHELL_PID": _current_ai_session_owner_shell_pid(),
-        }
-        _write_ai_session_state(state_values)
-        print("\n".join(_shell_export_line(key, state_values.get(key, "")) for key in AI_SESSION_ENV_KEYS))
-        return 0
-
-    if command == "stop":
-        _clear_ai_session_state()
-        print("\n".join(f"unset {name}" for name in AI_SESSION_ENV_KEYS))
-        return 0
-
-    if command == "status":
-        state_path = Path(get_app_paths().ai_session_state_path)
-        if not state_path.exists():
-            print("inactive")
-            return 0
-        values: dict[str, str] = {}
-        for raw_line in state_path.read_text(encoding="utf-8").splitlines():
-            if "\t" not in raw_line:
-                continue
-            key, value = raw_line.split("\t", 1)
-            if key in AI_SESSION_ENV_KEYS:
-                values[key] = value
-        active = str(values.get("AGENSIC_AI_SESSION_ACTIVE", "") or "").strip() == "1"
-        if not active:
-            print("inactive")
-            return 0
-        now_ts = int(time.time())
-        expires_ts = int(str(values.get("AGENSIC_AI_SESSION_EXPIRES_TS", "0") or "0") or "0")
-        remaining = max(0, expires_ts - now_ts) if expires_ts > 0 else 0
-        agent = str(values.get("AGENSIC_AI_SESSION_AGENT", "") or "").strip()
-        model = str(values.get("AGENSIC_AI_SESSION_MODEL", "") or "").strip()
-        session_id = str(values.get("AGENSIC_AI_SESSION_ID", "") or "").strip()
-        name = str(values.get("AGENSIC_AI_SESSION_AGENT_NAME", "") or "").strip()
-        print(
-            f"active agent={agent} model={model} agent_name={name or '-'} session_id={session_id or '-'} remaining_seconds={remaining}"
-        )
-        return 0
-
-    print(f"Unknown ai-session command: {command}", file=sys.stderr)
+    print("ai-session is no longer supported. Use `agensic run <agent>`.", file=sys.stderr)
     return 2
 
 
 if len(sys.argv) > 1 and sys.argv[1] in {"ai-session", "session"}:
     raise SystemExit(_run_ai_session_bootstrap(sys.argv[2:]))
+if len(sys.argv) > 1 and sys.argv[1] in {"ai-exec", "wrap"}:
+    print(f"{sys.argv[1]} has been removed. Use `agensic run <agent>`.", file=sys.stderr)
+    raise SystemExit(2)
 
 from agensic.cli.app import app, main, show_shortcuts
 

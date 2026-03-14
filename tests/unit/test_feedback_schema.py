@@ -40,7 +40,7 @@ class FeedbackSchemaTests(unittest.TestCase):
             provenance_agent_name="Planner A",
             provenance_agent_hint="codex",
             provenance_model_raw="gpt-5.3",
-            provenance_wrapper_id="agensic_ai_exec:trace-1",
+            provenance_wrapper_id="agensic_track:sess-1",
             proof_label="AI_EXECUTED",
             proof_agent="codex",
             proof_model="gpt-5.3",
@@ -50,12 +50,15 @@ class FeedbackSchemaTests(unittest.TestCase):
             proof_signer_scope="local-ed25519",
             proof_key_fingerprint="deadbeefdeadbeef",
             proof_host_fingerprint="0011223344556677",
+            track_session_id="sess-1",
+            track_session_capability="secret-123",
         )
         self.assertEqual(payload.command, "git status")
         self.assertEqual(payload.duration_ms, 128)
         self.assertEqual(payload.shell_pid, 123)
         self.assertEqual(payload.provenance_ai_agent, "codex")
         self.assertEqual(payload.proof_signer_scope, "local-ed25519")
+        self.assertEqual(payload.track_session_id, "sess-1")
 
 
 if __name__ == "__main__":

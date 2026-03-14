@@ -244,6 +244,33 @@ class StateBackendTests(unittest.TestCase):
             self.assertEqual(session["status"], "exited")
             self.assertEqual(session["exit_code"], 0)
 
+    def test_tracked_session_capability_roundtrip_and_clear(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            db_path = os.path.join(tmp, "state.sqlite")
+            store = SQLiteStateStore(db_path, journal=None)
+
+            recorded = store.upsert_tracked_session(
+                session_id="sess-1",
+                status="active",
+                agent="codex",
+                model="gpt-5.3",
+                root_command="codex",
+                transcript_path="/tmp/transcript.jsonl",
+                session_capability="secret-123",
+                capability_issued_at=1700000000,
+            )
+            self.assertTrue(recorded)
+
+            ok, reason = store.verify_tracked_session_capability("sess-1", "secret-123")
+            self.assertEqual((ok, reason), (True, "track_session_capability_valid"))
+
+            bad_ok, bad_reason = store.verify_tracked_session_capability("sess-1", "wrong")
+            self.assertEqual((bad_ok, bad_reason), (False, "track_session_capability_invalid"))
+
+            self.assertTrue(store.clear_tracked_session_capability("sess-1"))
+            cleared_ok, cleared_reason = store.verify_tracked_session_capability("sess-1", "secret-123")
+            self.assertEqual((cleared_ok, cleared_reason), (False, "track_session_capability_unavailable"))
+
     def test_session_summary_roundtrip(self):
         with tempfile.TemporaryDirectory() as tmp:
             db_path = os.path.join(tmp, "state.sqlite")

@@ -33,159 +33,60 @@ class AgensicSessionShellTests(unittest.TestCase):
                 env=env,
             )
 
-    def test_session_start_and_stop_mutate_environment(self):
+    def test_session_start_is_removed(self):
         result = self._run_zsh(
             """
             agensic_session_start --agent CoDeX --model gpt-5.3 --agent-name "Planner A" --ttl-minutes 1
-            print -r -- "${AGENSIC_AI_SESSION_ACTIVE}|${AGENSIC_AI_SESSION_AGENT}|${AGENSIC_AI_SESSION_MODEL}|${AGENSIC_AI_SESSION_COUNTER}"
+            print -r -- "code=$?"
+            """
+        )
+        self.assertEqual(result.returncode, 0, msg=result.stderr)
+        self.assertIn("code=2", result.stdout)
+        self.assertIn("agensic_session_start has been removed", result.stderr)
+
+    def test_session_stop_is_removed(self):
+        result = self._run_zsh(
+            """
             agensic_session_stop
-            print -r -- "${AGENSIC_AI_SESSION_ACTIVE:-0}|${AGENSIC_AI_SESSION_AGENT:-}|${AGENSIC_AI_SESSION_MODEL:-}|${AGENSIC_AI_SESSION_COUNTER:-}"
+            print -r -- "code=$?"
             """
         )
         self.assertEqual(result.returncode, 0, msg=result.stderr)
-        lines = [line.strip() for line in result.stdout.splitlines() if line.strip()]
-        self.assertIn("1|codex|gpt-5.3|0", lines)
-        self.assertIn("0|||", lines)
+        self.assertIn("code=2", result.stdout)
+        self.assertIn("agensic_session_stop has been removed", result.stderr)
 
-    def test_auto_expiry_clears_without_followup_command(self):
+    def test_session_status_is_removed(self):
         result = self._run_zsh(
             """
-            agensic_session_start --agent codex --model gpt-5.3 --ttl-minutes 1 >/dev/null
-            export AGENSIC_AI_SESSION_EXPIRES_TS=$(( $(date +%s) + 1 ))
-            _agensic_schedule_ai_session_expiry_timer
-            sleep 2
-            print -r -- "${AGENSIC_AI_SESSION_ACTIVE:-0}"
+            agensic_session_status
+            print -r -- "code=$?"
             """
         )
         self.assertEqual(result.returncode, 0, msg=result.stderr)
-        self.assertIn("0", [line.strip() for line in result.stdout.splitlines()])
+        self.assertIn("code=2", result.stdout)
+        self.assertIn("agensic_session_status has been removed", result.stderr)
 
-    def test_stop_clears_timer_and_session_state(self):
-        result = self._run_zsh(
-            """
-            agensic_session_start --agent codex --model gpt-5.3 --ttl-minutes 1 >/dev/null
-            pid_before="${AGENSIC_AI_SESSION_TIMER_PID:-}"
-            if [[ -n "$pid_before" ]] && kill -0 "$pid_before" 2>/dev/null; then
-              alive_before=1
-            else
-              alive_before=0
-            fi
-            agensic_session_stop
-            sleep 0.05
-            if [[ -n "$pid_before" ]] && kill -0 "$pid_before" 2>/dev/null; then
-              alive_after=1
-            else
-              alive_after=0
-            fi
-            print -r -- "${alive_before}|${alive_after}|${AGENSIC_AI_SESSION_ACTIVE:-0}|${AGENSIC_AI_SESSION_TIMER_PID:-}"
-            """
-        )
-        self.assertEqual(result.returncode, 0, msg=result.stderr)
-        lines = [line.strip() for line in result.stdout.splitlines() if line.strip()]
-        self.assertIn("1|0|0|", lines)
-
-    def test_session_traces_are_unique_for_rapid_signing(self):
-        result = self._run_zsh(
-            """
-            agensic_session_start --agent codex --model gpt-5.3 --ttl-minutes 1 >/dev/null
-            _agensic_session_sign_if_active
-            first_trace="${AGENSIC_NEXT_PROOF_TRACE:-}"
-            _agensic_snapshot_pending_execution
-            _agensic_session_sign_if_active
-            second_trace="${AGENSIC_NEXT_PROOF_TRACE:-}"
-            print -r -- "$first_trace"
-            print -r -- "$second_trace"
-            if [[ "$first_trace" == "$second_trace" ]]; then
-              exit 9
-            fi
-            """
-        )
-        self.assertEqual(result.returncode, 0, msg=result.stderr)
-        traces = [line.strip() for line in result.stdout.splitlines() if line.strip()]
-        self.assertGreaterEqual(len(traces), 2)
-        self.assertNotEqual(traces[-2], traces[-1])
-
-    def test_shell_syncs_session_started_by_cli_wrapper_path(self):
+    def test_ai_session_cli_is_removed(self):
         result = self._run_zsh(
             f"""
-            {PYTHON_BIN} {CLI_PATH} ai-session start --agent codex --model gpt-5.3 --agent-name "Planner A" >/dev/null
-            agensic_session_status
+            {PYTHON_BIN} {CLI_PATH} ai-session start --agent codex --model gpt-5.3 --agent-name "Planner A"
+            print -r -- "code=$?"
+            """
+        )
+        self.assertEqual(result.returncode, 0, msg=result.stderr)
+        self.assertIn("code=2", result.stdout)
+        self.assertIn("ai-session is no longer supported", result.stderr)
+
+    def test_session_signer_no_longer_arms_ai_proof(self):
+        result = self._run_zsh(
+            """
             _agensic_session_sign_if_active
-            print -r -- "${{AGENSIC_NEXT_PROOF_LABEL:-}}|${{AGENSIC_NEXT_PROOF_AGENT:-}}|${{AGENSIC_NEXT_PROOF_MODEL:-}}"
+            print -r -- "${AGENSIC_NEXT_PROOF_LABEL:-}|${AGENSIC_NEXT_PROOF_AGENT:-}|${AGENSIC_NEXT_PROOF_MODEL:-}"
             """
         )
         self.assertEqual(result.returncode, 0, msg=result.stderr)
         lines = [line.strip() for line in result.stdout.splitlines() if line.strip()]
-        self.assertTrue(any(line.startswith("active agent=codex model=gpt-5.3") for line in lines), msg=lines)
-        self.assertIn("AI_EXECUTED|codex|gpt-5.3", lines)
-
-    def test_shell_syncs_cli_stop_and_clears_existing_session(self):
-        result = self._run_zsh(
-            f"""
-            agensic_session_start --agent codex --model gpt-5.3 >/dev/null
-            {PYTHON_BIN} {CLI_PATH} ai-session stop >/dev/null
-            agensic_session_status
-            print -r -- "${{AGENSIC_AI_SESSION_ACTIVE:-0}}"
-            """
-        )
-        self.assertEqual(result.returncode, 0, msg=result.stderr)
-        lines = [line.strip() for line in result.stdout.splitlines() if line.strip()]
-        self.assertIn("inactive", lines)
-        self.assertIn("0", lines)
-
-    def test_matching_agent_command_auto_stops_ai_session_on_return(self):
-        result = self._run_zsh(
-            """
-            agensic_session_start --agent codex --model gpt-5.3 >/dev/null
-            _agensic_preexec_hook "codex"
-            _agensic_precmd_hook
-            agensic_session_status
-            print -r -- "${AGENSIC_AI_SESSION_ACTIVE:-0}"
-            """
-        )
-        self.assertEqual(result.returncode, 0, msg=result.stderr)
-        lines = [line.strip() for line in result.stdout.splitlines() if line.strip()]
-        self.assertIn("inactive", lines)
-        self.assertIn("0", lines)
-
-    def test_non_matching_command_does_not_auto_stop_ai_session(self):
-        result = self._run_zsh(
-            """
-            agensic_session_start --agent codex --model gpt-5.3 >/dev/null
-            _agensic_preexec_hook "echo hi"
-            _agensic_precmd_hook
-            print -r -- "${AGENSIC_AI_SESSION_ACTIVE:-0}"
-            """
-        )
-        self.assertEqual(result.returncode, 0, msg=result.stderr)
-        lines = [line.strip() for line in result.stdout.splitlines() if line.strip()]
-        self.assertIn("1", lines)
-
-    def test_detached_nohup_launch_auto_stops_ai_session(self):
-        result = self._run_zsh(
-            """
-            agensic_session_start --agent codex --model gpt-5.3 >/dev/null
-            _agensic_preexec_hook "nohup codex >/tmp/codex.log 2>&1 & disown"
-            _agensic_precmd_hook
-            print -r -- "${AGENSIC_AI_SESSION_ACTIVE:-0}"
-            """
-        )
-        self.assertEqual(result.returncode, 0, msg=result.stderr)
-        lines = [line.strip() for line in result.stdout.splitlines() if line.strip()]
-        self.assertIn("0", lines)
-
-    def test_shell_c_wrapper_launch_auto_stops_ai_session(self):
-        result = self._run_zsh(
-            """
-            agensic_session_start --agent codex --model gpt-5.3 >/dev/null
-            _agensic_preexec_hook "setsid zsh -lc 'codex' >/tmp/codex.log 2>&1 &"
-            _agensic_precmd_hook
-            print -r -- "${AGENSIC_AI_SESSION_ACTIVE:-0}"
-            """
-        )
-        self.assertEqual(result.returncode, 0, msg=result.stderr)
-        lines = [line.strip() for line in result.stdout.splitlines() if line.strip()]
-        self.assertIn("0", lines)
+        self.assertIn("||", lines)
 
     def test_preexec_preserves_human_edit_pending_state(self):
         result = self._run_zsh(
@@ -248,10 +149,12 @@ class AgensicSessionShellTests(unittest.TestCase):
         lines = [line.strip() for line in result.stdout.splitlines() if line.strip()]
         self.assertIn("human_edit|AI_EXECUTED|trace-preexec-proof|", lines)
 
-    def test_preexec_forces_track_launcher_to_human_even_with_active_ai_session(self):
+    def test_preexec_forces_run_launcher_to_human_even_with_pending_ai_proof(self):
         result = self._run_zsh(
             """
-            agensic_session_start --agent codex --model gpt-5.3 --agent-name "Planner A" >/dev/null
+            AGENSIC_NEXT_PROOF_LABEL="AI_EXECUTED"
+            AGENSIC_NEXT_PROOF_AGENT="codex"
+            AGENSIC_NEXT_PROOF_MODEL="gpt-5.3"
             _agensic_preexec_hook "agensic run codex"
             print -r -- "${AGENSIC_PENDING_LAST_ACTION:-}|${AGENSIC_PENDING_PROOF_LABEL:-}|${AGENSIC_PENDING_ACCEPTED_ORIGIN:-}|${AGENSIC_NEXT_PROOF_LABEL:-}"
             """
@@ -260,10 +163,12 @@ class AgensicSessionShellTests(unittest.TestCase):
         lines = [line.strip() for line in result.stdout.splitlines() if line.strip()]
         self.assertIn("human_typed|||", lines)
 
-    def test_preexec_forces_provenance_launcher_to_human_even_with_active_ai_session(self):
+    def test_preexec_forces_provenance_launcher_to_human_even_with_pending_ai_proof(self):
         result = self._run_zsh(
             """
-            agensic_session_start --agent codex --model gpt-5.3 --agent-name "Planner A" >/dev/null
+            AGENSIC_NEXT_PROOF_LABEL="AI_EXECUTED"
+            AGENSIC_NEXT_PROOF_AGENT="codex"
+            AGENSIC_NEXT_PROOF_MODEL="gpt-5.3"
             _agensic_preexec_hook "agensic provenance --tui"
             print -r -- "${AGENSIC_PENDING_LAST_ACTION:-}|${AGENSIC_PENDING_PROOF_LABEL:-}|${AGENSIC_PENDING_ACCEPTED_ORIGIN:-}|${AGENSIC_NEXT_PROOF_LABEL:-}"
             """

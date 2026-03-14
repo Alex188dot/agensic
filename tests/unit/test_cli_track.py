@@ -20,6 +20,16 @@ track_module = importlib.import_module("agensic.cli.track")
 app = cli_app.app
 
 
+class _FakeDaemonResponse:
+    def __init__(self, status_code: int, payload: dict[str, object] | None = None) -> None:
+        self.status_code = int(status_code)
+        self._payload = dict(payload or {})
+        self.text = json.dumps(self._payload)
+
+    def json(self) -> dict[str, object]:
+        return dict(self._payload)
+
+
 def _run_tracked_command_in_child(env: dict[str, str], command: list[str], result_queue) -> None:
     os.environ.update(env)
     temp_paths = ag_paths.get_app_paths()
@@ -80,6 +90,56 @@ class CliTrackTests(unittest.TestCase):
                 return active
             time.sleep(0.02)
         return []
+
+    @contextmanager
+    def _mock_track_daemon(self, temp_paths: ag_paths.AppPaths):
+        def _fake_daemon_request(method: str, path: str, timeout: float, **kwargs):
+            if method.upper() != "POST" or path != "/log_command":
+                return _FakeDaemonResponse(404, {"status": "ignored", "reason": "unsupported"})
+            payload = dict(kwargs.get("json") or {})
+            store = SQLiteStateStore(temp_paths.state_sqlite_path, journal=None)
+            ok, reason = store.verify_tracked_session_capability(
+                str(payload.get("track_session_id", "") or "").strip(),
+                str(payload.get("track_session_capability", "") or "").strip(),
+            )
+            if not ok:
+                return _FakeDaemonResponse(200, {"status": "ignored", "reason": reason})
+            sanitized_payload = {str(k): v for k, v in payload.items() if str(k) != "track_session_capability"}
+            sanitized_payload["track_capability_verified"] = True
+            classification = track_module.classify_command_run(
+                str(payload.get("command", "") or ""),
+                sanitized_payload,
+                proof_public_path=temp_paths.provenance_public_key_path,
+            )
+            store.record_command_provenance(
+                command=str(payload.get("command", "") or ""),
+                label=str(classification.get("label", "UNKNOWN") or "UNKNOWN"),
+                confidence=float(classification.get("confidence", 0.0) or 0.0),
+                agent=str(classification.get("agent", "") or ""),
+                agent_name=str(classification.get("agent_name", "") or ""),
+                provider=str(classification.get("provider", "") or ""),
+                model=str(classification.get("model", "") or ""),
+                raw_model=str(classification.get("raw_model", "") or ""),
+                normalized_model=str(classification.get("normalized_model", "") or ""),
+                model_fingerprint=str(classification.get("model_fingerprint", "") or ""),
+                evidence_tier=str(classification.get("evidence_tier", "") or ""),
+                agent_source=str(classification.get("agent_source", "") or ""),
+                registry_version=str(classification.get("registry_version", "") or ""),
+                registry_status=str(classification.get("registry_status", "") or ""),
+                source=str(payload.get("source", "runtime") or "runtime"),
+                working_directory=str(payload.get("working_directory", "") or ""),
+                exit_code=payload.get("exit_code"),
+                duration_ms=payload.get("duration_ms"),
+                shell_pid=payload.get("shell_pid"),
+                evidence=[str(item) for item in classification.get("evidence", []) if str(item)],
+                payload=sanitized_payload,
+                run_id=f"{payload.get('track_session_id', '')}:{payload.get('track_process_pid', payload.get('shell_pid', ''))}",
+                ts=int(payload.get("proof_timestamp", 0) or 0),
+            )
+            return _FakeDaemonResponse(200, {"status": "ok"})
+
+        with patch.object(track_module, "_daemon_request", side_effect=_fake_daemon_request):
+            yield
 
     def test_track_status_inactive(self):
         with self._temp_app_paths() as (env, _), patch.object(
@@ -529,7 +589,7 @@ class CliTrackTests(unittest.TestCase):
         self.assertTrue(track_module._looks_like_escape_primitive({"comm": "launchctl", "args": "launchctl submit -l demo -- sleep 60"}))
 
     def test_run_tracked_command_records_transcript_and_provenance(self):
-        with self._temp_app_paths() as (_, temp_paths):
+        with self._temp_app_paths() as (_, temp_paths), self._mock_track_daemon(temp_paths):
             launch = track_module.prepare_track_launch(["--", "zsh", "-lc", "echo hi; sleep 0.8 & wait"])
             code = track_module.run_tracked_command(launch)
 
@@ -575,7 +635,7 @@ class CliTrackTests(unittest.TestCase):
             Path(handle.name).unlink(missing_ok=True)
 
     def test_run_tracked_command_records_session_summary_and_events(self):
-        with self._temp_app_paths() as (_, temp_paths), tempfile.TemporaryDirectory() as repo_dir:
+        with self._temp_app_paths() as (_, temp_paths), self._mock_track_daemon(temp_paths), tempfile.TemporaryDirectory() as repo_dir:
             subprocess.run(["git", "init"], cwd=repo_dir, check=True, capture_output=True, text=True)
             subprocess.run(["git", "config", "user.email", "test@example.com"], cwd=repo_dir, check=True)
             subprocess.run(["git", "config", "user.name", "Test User"], cwd=repo_dir, check=True)
@@ -660,7 +720,7 @@ class CliTrackTests(unittest.TestCase):
             self.assertTrue(Path(temp_paths.provenance_public_key_path).is_file())
 
     def test_run_tracked_command_records_short_lived_child_process(self):
-        with self._temp_app_paths() as (_, temp_paths):
+        with self._temp_app_paths() as (_, temp_paths), self._mock_track_daemon(temp_paths):
             launch = track_module.prepare_track_launch(["--", "zsh", "-lc", "echo hi; sleep 0.2 & wait"])
             code = track_module.run_tracked_command(launch)
 
@@ -670,7 +730,7 @@ class CliTrackTests(unittest.TestCase):
             self.assertTrue(any(command.startswith("sleep 0.2") for command in commands), msg=commands)
 
     def test_run_tracked_command_observes_session_boundary_escape(self):
-        with self._temp_app_paths() as (_, temp_paths):
+        with self._temp_app_paths() as (_, temp_paths), self._mock_track_daemon(temp_paths):
             daemonize = (
                 "python3 -c \"import os,time;"
                 "pid=os.fork();"
@@ -733,7 +793,7 @@ class CliTrackTests(unittest.TestCase):
     def test_track_inspect_reports_transcript_and_runs(self):
         with self._temp_app_paths() as (env, temp_paths), patch.object(
             cli_app, "_run_storage_preflight_if_enabled"
-        ):
+        ), self._mock_track_daemon(temp_paths):
             launch = track_module.prepare_track_launch(["--", "zsh", "-lc", "echo hi"])
             code = track_module.run_tracked_command(launch)
             self.assertEqual(code, 0)

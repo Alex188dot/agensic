@@ -381,6 +381,29 @@ class ServerContractTests(unittest.TestCase):
             self.assertNotIn("captured_output_truncated", args[5])
             self.assertEqual(args[5].get("provenance_agent_name"), "Planner A")
 
+    def test_log_command_rejects_ai_executed_without_valid_track_capability(self):
+        with patch.object(deps.engine, "log_executed_command") as log_exec:
+            response = self.client.post(
+                "/log_command",
+                json={
+                    "command": "codex",
+                    "source": "runtime",
+                    "exit_code": 0,
+                    "provenance_wrapper_id": "agensic_track:sess-1",
+                    "proof_label": "AI_EXECUTED",
+                    "proof_agent": "codex",
+                    "proof_model": "gpt-5.3",
+                    "proof_trace": "track-sess-1-100",
+                    "proof_timestamp": 1700000000,
+                    "proof_signature": "sig",
+                    "track_session_id": "sess-1",
+                },
+            )
+
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.json(), {"status": "ignored", "reason": "track_session_capability_missing"})
+        self.assertFalse(log_exec.called)
+
     def test_provenance_runs_contract(self):
         sample = [
             {

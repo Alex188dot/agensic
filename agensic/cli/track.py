@@ -4,6 +4,7 @@ import fcntl
 import json
 import os
 import re
+import secrets
 import select
 import shlex
 import signal
@@ -21,8 +22,10 @@ from pathlib import Path
 from typing import Any
 
 import psutil
+import requests
 from rich.console import Console
 
+from agensic.config.auth import AuthTokenCache, build_auth_headers
 from agensic.engine.provenance import (
     build_local_proof_metadata,
     classify_command_run,
@@ -35,6 +38,7 @@ from agensic.utils import atomic_write_json_private
 
 
 console = Console()
+DAEMON_BASE_URL = "http://127.0.0.1:22000"
 TRACK_POLL_INTERVAL_SECONDS = 0.01
 TRACK_FINAL_POLL_GRACE_SECONDS = 0.25
 TRACK_STOP_GRACE_SECONDS = 2.0
@@ -95,6 +99,23 @@ def _track_transcripts_dir() -> str:
 
 def _state_store() -> SQLiteStateStore:
     return SQLiteStateStore(APP_PATHS.state_sqlite_path, journal=None)
+
+
+def _daemon_auth_headers() -> dict[str, str]:
+    try:
+        token = AuthTokenCache(APP_PATHS.auth_file).get_token()
+    except Exception:
+        return {}
+    return build_auth_headers(token)
+
+
+def _daemon_request(method: str, path: str, timeout: float, **kwargs):
+    url = path if path.startswith(("http://", "https://")) else f"{DAEMON_BASE_URL}{path}"
+    supplied_headers = kwargs.pop("headers", None)
+    merged_headers = _daemon_auth_headers()
+    if isinstance(supplied_headers, dict):
+        merged_headers.update({str(k): str(v) for k, v in supplied_headers.items()})
+    return requests.request(method.upper(), url, headers=merged_headers, timeout=timeout, **kwargs)
 
 
 def _track_private_key_path() -> str:
@@ -1889,6 +1910,8 @@ class TrackRuntime:
         self._event_seq = 0
         self._event_handle: Any | None = None
         self.transcript_event_count = 0
+        self.session_capability = secrets.token_urlsafe(24)
+        self.capability_issued_at = int(time.time())
         self.private_key_path = _track_private_key_path()
         self.public_key_path = _track_public_key_path()
         self.start_snapshot = dict(start_snapshot or {})
@@ -2031,6 +2054,8 @@ class TrackRuntime:
             started_at=int(payload.get("started_at", 0) or 0),
             ended_at=int(payload.get("ended_at", 0) or 0),
             updated_at=int(payload.get("updated_at", 0) or time.time()),
+            session_capability=self.session_capability,
+            capability_issued_at=self.capability_issued_at,
             violation_code=self.violation_code,
             exit_code=exit_code,
         )
@@ -2053,6 +2078,47 @@ class TrackRuntime:
         state = self.state_store.get_tracked_session(self.session_id) or {}
         current_status = str(state.get("status", "") or "active").strip().lower() or "active"
         self.persist_state(current_status)
+
+    def _record_command_provenance_via_daemon(
+        self,
+        proc: ObservedProcess,
+        payload: dict[str, Any],
+        *,
+        exit_code: int | None,
+        duration_ms: int,
+        working_directory: str,
+    ) -> str | None:
+        try:
+            response = _daemon_request(
+                "POST",
+                "/log_command",
+                timeout=0.8,
+                json={
+                    "command": proc.command,
+                    "exit_code": exit_code,
+                    "duration_ms": duration_ms,
+                    "source": "runtime",
+                    "working_directory": working_directory,
+                    **payload,
+                },
+            )
+        except Exception as exc:
+            self.emit_event("command.record_failed", {"pid": int(proc.pid), "reason": f"daemon_unreachable:{exc}"})
+            return None
+        if response.status_code != 200:
+            reason = f"daemon_status_{response.status_code}"
+            self.emit_event("command.record_failed", {"pid": int(proc.pid), "reason": reason})
+            return None
+        try:
+            body = response.json()
+        except Exception:
+            body = {}
+        status = str(body.get("status", "") or "").strip().lower()
+        if status != "ok":
+            reason = str(body.get("reason", "") or "daemon_rejected").strip().lower() or "daemon_rejected"
+            self.emit_event("command.record_failed", {"pid": int(proc.pid), "reason": reason})
+            return None
+        return "AI_EXECUTED"
 
     def finalize_process(self, proc: ObservedProcess, *, exit_code: int | None = None) -> None:
         if proc.finalized:
@@ -2099,6 +2165,7 @@ class TrackRuntime:
             "proof_key_fingerprint": str(proof_metadata.get("proof_key_fingerprint", "") or ""),
             "proof_host_fingerprint": str(proof_metadata.get("proof_host_fingerprint", "") or ""),
             "track_session_id": self.session_id,
+            "track_session_capability": self.session_capability,
             "track_root_pid": self.root_pid,
             "track_process_pid": proc.pid,
             "track_parent_pid": proc.ppid,
@@ -2116,47 +2183,24 @@ class TrackRuntime:
             payload["track_process_group_id"] = proc.process_group_id
         if exit_code is None:
             payload["track_exit_code_unavailable"] = True
-
-        classification = classify_command_run(
-            proc.command,
+        label = self._record_command_provenance_via_daemon(
+            proc,
             payload,
-            proof_public_path=self.public_key_path,
-        )
-        self.state_store.record_command_provenance(
-            command=proc.command,
-            label=str(classification.get("label", "UNKNOWN") or "UNKNOWN"),
-            confidence=float(classification.get("confidence", 0.0) or 0.0),
-            agent=str(classification.get("agent", "") or ""),
-            agent_name=str(classification.get("agent_name", "") or ""),
-            provider=str(classification.get("provider", "") or ""),
-            model=str(classification.get("model", "") or ""),
-            raw_model=str(classification.get("raw_model", "") or ""),
-            normalized_model=str(classification.get("normalized_model", "") or ""),
-            model_fingerprint=str(classification.get("model_fingerprint", "") or ""),
-            evidence_tier=str(classification.get("evidence_tier", "") or ""),
-            agent_source=str(classification.get("agent_source", "") or ""),
-            registry_version=str(classification.get("registry_version", "") or ""),
-            registry_status=str(classification.get("registry_status", "") or ""),
-            source="runtime",
-            working_directory=working_directory,
             exit_code=exit_code,
             duration_ms=duration_ms,
-            shell_pid=proc.pid,
-            evidence=[str(item) for item in classification.get("evidence", []) if str(item)],
-            payload=payload,
-            run_id=f"{self.session_id}:{proc.pid}",
-            ts=ts,
+            working_directory=working_directory,
         )
-        self.emit_event(
-            "command.recorded",
-            {
-                "pid": int(proc.pid),
-                "command": proc.command,
-                "label": str(classification.get("label", "UNKNOWN") or "UNKNOWN"),
-                "exit_code": exit_code,
-                "detached": bool(proc.detached),
-            },
-        )
+        if label is not None:
+            self.emit_event(
+                "command.recorded",
+                {
+                    "pid": int(proc.pid),
+                    "command": proc.command,
+                    "label": str(label or "UNKNOWN"),
+                    "exit_code": exit_code,
+                    "detached": bool(proc.detached),
+                },
+            )
         self.emit_event(
             "process.exited",
             {
@@ -2590,6 +2634,7 @@ def run_tracked_command(launch: TrackLaunch) -> int:
     final_state = state_store.get_tracked_session(session_id) or _load_track_state()
     final_status = "stopped" if str(final_state.get("status", "") or "").strip().lower() == "stopping" else "exited"
     runtime.persist_state(final_status, exit_code=runtime.root_exit_code if runtime.root_exit_code is not None else 1)
+    state_store.clear_tracked_session_capability(session_id)
     aggregate, changes = runtime.build_session_summary()
     runtime.persist_summary(aggregate=aggregate, changes=changes)
     _prune_tracked_transcripts(exclude_paths={transcript_path, event_stream_path, checkpoint_path})
