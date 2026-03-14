@@ -393,6 +393,7 @@ struct App {
     input_mode: bool,
     details_open: bool,
     details_scroll: u16,
+    details_command_expanded: bool,
     filter_menu: bool,
     filter_cursor: usize,
     selected: usize,
@@ -434,6 +435,7 @@ impl App {
             input_mode: false,
             details_open: false,
             details_scroll: 0,
+            details_command_expanded: false,
             filter_menu: false,
             filter_cursor: 0,
             selected: 0,
@@ -1450,6 +1452,38 @@ fn push_text_block(lines: &mut Vec<Line<'static>>, text: &str) {
 struct ProvenanceDetailContent {
     lines: Vec<Line<'static>>,
     command_row_offset: Option<u16>,
+    command_expandable: bool,
+}
+
+const DETAILS_COMMAND_PREVIEW_ROWS: usize = 5;
+
+fn wrap_text_to_width(value: &str, width: usize) -> Vec<String> {
+    if width == 0 {
+        return vec![String::new()];
+    }
+    let mut wrapped: Vec<String> = Vec::new();
+    for source_line in value.split('\n') {
+        if source_line.is_empty() {
+            wrapped.push(String::new());
+            continue;
+        }
+        let mut current = String::new();
+        let mut current_width = 0usize;
+        for ch in source_line.chars() {
+            let ch_width = unicode_width::UnicodeWidthChar::width(ch).unwrap_or(0);
+            if !current.is_empty() && current_width + ch_width > width {
+                wrapped.push(std::mem::take(&mut current));
+                current_width = 0;
+            }
+            current.push(ch);
+            current_width += ch_width;
+        }
+        wrapped.push(current);
+    }
+    if wrapped.is_empty() {
+        wrapped.push(String::new());
+    }
+    wrapped
 }
 
 fn build_provenance_detail_content(
@@ -1509,10 +1543,39 @@ fn build_provenance_detail_content(
             sessions::copy_button_style(app.hovered_details_copy, app.details_copy_copied(), false),
         ),
     ]));
-    lines.push(Line::from(Span::styled(
-        row.command.clone(),
-        App::command_style(),
-    )));
+    let wrapped_command_lines = wrap_text_to_width(&row.command, content_width.max(1));
+    let command_expandable = wrapped_command_lines.len() > DETAILS_COMMAND_PREVIEW_ROWS;
+    let visible_command_lines = if app.details_command_expanded || !command_expandable {
+        wrapped_command_lines.len()
+    } else {
+        DETAILS_COMMAND_PREVIEW_ROWS
+    };
+    if command_expandable {
+        let hidden_rows = wrapped_command_lines.len().saturating_sub(visible_command_lines);
+        let toggle_text = if app.details_command_expanded {
+            "x collapse command"
+        } else {
+            "x expand command"
+        };
+        let summary_text = if app.details_command_expanded {
+            format!("{} ({}/{})", toggle_text, wrapped_command_lines.len(), wrapped_command_lines.len())
+        } else {
+            format!(
+                "{} ({}/{} rows shown, {} hidden)",
+                toggle_text,
+                visible_command_lines,
+                wrapped_command_lines.len(),
+                hidden_rows
+            )
+        };
+        lines.push(Line::from(Span::styled(summary_text, App::key_hint_style())));
+    }
+    for command_line in wrapped_command_lines.iter().take(visible_command_lines) {
+        lines.push(Line::from(Span::styled(
+            command_line.clone(),
+            App::command_style(),
+        )));
+    }
     lines.push(Line::from(""));
     lines.push(Line::from("payload:"));
     push_text_block(&mut lines, &payload_summary);
@@ -1521,6 +1584,7 @@ fn build_provenance_detail_content(
     ProvenanceDetailContent {
         lines,
         command_row_offset: Some(command_row_offset),
+        command_expandable,
     }
 }
 
@@ -1533,7 +1597,7 @@ fn rendered_line_height(line: &Line<'_>, width: usize) -> usize {
         .iter()
         .map(|span| span.content.as_ref())
         .collect::<String>();
-    let len = text.chars().count();
+    let len = sessions::display_width(&text);
     if len == 0 {
         1
     } else {
@@ -1902,14 +1966,15 @@ fn draw_ui(terminal: &mut Terminal<CrosstermBackend<Stdout>>, app: &App) -> io::
                     };
                     let mut title_spans = vec![
                         Span::styled("Run details ", App::header_style()),
-                        Span::styled("(Enter/Esc close, c copy)", App::key_hint_style()),
+                        Span::styled("(Enter/Esc: close, c: copy, Tab: end)", App::key_hint_style()),
                     ];
+                    if detail_content.command_expandable {
+                        title_spans.push(Span::raw("  "));
+                        title_spans.push(Span::styled("x: expand/collapse", App::key_hint_style()));
+                    }
                     if has_overflow {
                         title_spans.push(Span::raw("  "));
-                        title_spans.push(Span::styled(
-                            "↑↓/PgUp/PgDn/wheel scroll",
-                            App::key_hint_style(),
-                        ));
+                        title_spans.push(Span::styled("↑↓: scroll", App::key_hint_style()));
                     }
                     let panel = Paragraph::new(details)
                         .block(
@@ -2043,6 +2108,7 @@ fn handle_key(app: &mut App, key: KeyEvent) -> bool {
             KeyCode::Esc | KeyCode::Enter => {
                 app.details_open = false;
                 app.details_scroll = 0;
+                app.details_command_expanded = false;
                 app.hovered_details_copy = false;
             }
             KeyCode::Char('c') => {
@@ -2072,6 +2138,12 @@ fn handle_key(app: &mut App, key: KeyEvent) -> bool {
             }
             KeyCode::Home => app.details_scroll = 0,
             KeyCode::End => app.details_scroll = app.details_max_scroll(),
+            KeyCode::Tab => app.details_scroll = app.details_max_scroll(),
+            KeyCode::BackTab => app.details_scroll = 0,
+            KeyCode::Char('x') => {
+                app.details_command_expanded = !app.details_command_expanded;
+                app.scroll_details_by(0);
+            }
             _ => {}
         }
         return false;
@@ -2135,6 +2207,7 @@ fn handle_key(app: &mut App, key: KeyEvent) -> bool {
             if app.selected_global_index().is_some() {
                 app.details_open = true;
                 app.details_scroll = 0;
+                app.details_command_expanded = false;
             }
         }
         KeyCode::Char('s') => {
