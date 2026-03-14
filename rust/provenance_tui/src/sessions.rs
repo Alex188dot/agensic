@@ -1,5 +1,9 @@
 use base64::engine::general_purpose::STANDARD as BASE64_STANDARD;
 use base64::Engine;
+use crate::checkpoints::{
+    checkpoint_path_for_transcript, decode_checkpoint_state, load_checkpoint_records,
+    CheckpointRecord,
+};
 use chrono::TimeZone;
 use clap::Parser;
 use crossterm::event::{
@@ -195,6 +199,7 @@ struct DetailState {
     text_replay_chunks: Vec<String>,
     replay_timeline_indices: Vec<usize>,
     transcript_chunks: Vec<TranscriptChunk>,
+    checkpoint_records: Vec<CheckpointRecord>,
     terminal_replay_frames: Vec<TerminalReplayFrame>,
     terminal_replay_cache: HashMap<TerminalReplayCacheKey, Vec<TerminalReplayFrame>>,
     terminal_cache_key: Option<TerminalReplayCacheKey>,
@@ -217,6 +222,8 @@ impl DetailState {
         let (timeline_entries, text_replay_chunks, replay_timeline_indices) =
             build_display_model(&events);
         let transcript_chunks = load_transcript_chunks(&session.transcript_path);
+        let checkpoint_records =
+            load_checkpoint_records(&checkpoint_path_for_transcript(&session.transcript_path));
         let transcript_missing = !session.transcript_path.trim().is_empty()
             && !Path::new(session.transcript_path.trim()).is_file();
         let replay_mode = if transcript_chunks.is_empty() {
@@ -255,6 +262,7 @@ impl DetailState {
             text_replay_chunks,
             replay_timeline_indices,
             transcript_chunks,
+            checkpoint_records,
             terminal_replay_frames: Vec::new(),
             terminal_replay_cache: HashMap::new(),
             terminal_cache_key: None,
@@ -293,12 +301,18 @@ impl DetailState {
         let layout = session_detail_layout(self)?;
         let viewport_rows = layout.replay.height.saturating_sub(2).max(1);
         let viewport_cols = layout.replay.width.saturating_sub(2).max(1);
-        let cache_key = if transcript_has_recorded_geometry(&self.transcript_chunks) {
+        let cache_key = if !self.checkpoint_records.is_empty()
+            || transcript_has_recorded_geometry(&self.transcript_chunks)
+        {
             TerminalReplayCacheKey::RecordedGeometry
         } else {
             TerminalReplayCacheKey::Viewport(viewport_rows, viewport_cols)
         };
-        let (rows, cols) = first_recorded_terminal_size(&self.transcript_chunks)
+        let (rows, cols) = self
+            .checkpoint_records
+            .first()
+            .map(|record| (record.rows, record.cols))
+            .or_else(|| first_recorded_terminal_size(&self.transcript_chunks))
             .unwrap_or((viewport_rows, viewport_cols));
         Some((cache_key, rows, cols))
     }
@@ -310,9 +324,14 @@ impl DetailState {
         cols: u16,
     ) {
         let transcript_chunks = self.transcript_chunks.clone();
+        let checkpoint_records = self.checkpoint_records.clone();
         let (tx, rx) = mpsc::channel();
         thread::spawn(move || {
-            let frames = build_terminal_replay_frames(&transcript_chunks, rows, cols);
+            let frames = if checkpoint_records.is_empty() {
+                build_terminal_replay_frames(&transcript_chunks, rows, cols)
+            } else {
+                build_terminal_replay_frames_from_checkpoints(&checkpoint_records)
+            };
             let _ = tx.send((cache_key, frames));
         });
         self.pending_replay_cache_key = Some(cache_key);
@@ -2306,6 +2325,28 @@ fn build_terminal_replay_frames(
     frames
 }
 
+fn build_terminal_replay_frames_from_checkpoints(
+    checkpoint_records: &[CheckpointRecord],
+) -> Vec<TerminalReplayFrame> {
+    let mut frames = Vec::new();
+    let mut last_frame = Vec::new();
+    for record in checkpoint_records {
+        let state = decode_checkpoint_state(record);
+        if state.is_empty() {
+            continue;
+        }
+        let mut parser = VtParser::new(record.rows.max(1), record.cols.max(1), 0);
+        parser.process(&state);
+        maybe_push_terminal_frame(
+            &mut frames,
+            &mut last_frame,
+            &parser,
+            Some(record.seq),
+        );
+    }
+    frames
+}
+
 fn maybe_push_terminal_frame(
     frames: &mut Vec<TerminalReplayFrame>,
     last_frame: &mut Vec<u8>,
@@ -3876,6 +3917,7 @@ mod tests {
             text_replay_chunks: Vec::new(),
             replay_timeline_indices: vec![1],
             transcript_chunks: Vec::new(),
+            checkpoint_records: Vec::new(),
             terminal_replay_frames: vec![TerminalReplayFrame {
                 plain_text: "/tmp".to_string(),
                 lines: vec![Line::from("/tmp")],

@@ -56,6 +56,8 @@ TRACK_ESCAPE_PRIMITIVE_TOKENS = (
     "launchctl ",
 )
 TRACK_TTY_RESET_SEQ = "\x1b[?1000l\x1b[?1002l\x1b[?1003l\x1b[?1004l\x1b[?1006l\x1b[?1015l"
+TRACK_CHECKPOINT_INTERVAL_MS = 120
+TRACK_CHECKPOINT_INTERVAL_EVENTS = 48
 
 
 @dataclass
@@ -122,6 +124,79 @@ def _track_transcript_path(session_id: str) -> str:
 def _track_event_stream_path(session_id: str) -> str:
     clean_session_id = str(session_id or "").strip() or uuid.uuid4().hex[:16]
     return os.path.join(_track_transcripts_dir(), f"{clean_session_id}.events.jsonl")
+
+
+def _track_checkpoint_path(session_id: str) -> str:
+    clean_session_id = str(session_id or "").strip() or uuid.uuid4().hex[:16]
+    return os.path.join(_track_transcripts_dir(), f"{clean_session_id}.checkpoints.jsonl")
+
+
+def _platform_rust_target() -> str:
+    machine = (os.uname().machine if hasattr(os, "uname") else "").strip().lower()
+    if sys.platform == "darwin" and machine in {"arm64", "aarch64"}:
+        return "aarch64-apple-darwin"
+    if sys.platform == "darwin" and machine in {"x86_64", "amd64"}:
+        return "x86_64-apple-darwin"
+    if sys.platform.startswith("linux") and machine in {"x86_64", "amd64"}:
+        return "x86_64-unknown-linux-gnu"
+    if sys.platform.startswith("linux") and machine in {"arm64", "aarch64"}:
+        return "aarch64-unknown-linux-gnu"
+    return ""
+
+
+def _local_provenance_tui_candidates() -> list[str]:
+    explicit = str(os.environ.get("AGENSIC_PROVENANCE_TUI_LOCAL_BIN", "") or "").strip()
+    target = _platform_rust_target()
+    project_root = str(Path(__file__).resolve().parents[2])
+    cwd = os.getcwd()
+    candidates = [
+        explicit,
+        APP_PATHS.provenance_tui_bin,
+        os.path.join(cwd, "rust", "provenance_tui", "target", "release", "agensic-provenance-tui"),
+        (
+            os.path.join(
+                cwd,
+                "rust",
+                "provenance_tui",
+                "target",
+                target,
+                "release",
+                "agensic-provenance-tui",
+            )
+            if target
+            else ""
+        ),
+        os.path.join(project_root, "rust", "provenance_tui", "target", "release", "agensic-provenance-tui"),
+        (
+            os.path.join(
+                project_root,
+                "rust",
+                "provenance_tui",
+                "target",
+                target,
+                "release",
+                "agensic-provenance-tui",
+            )
+            if target
+            else ""
+        ),
+    ]
+    out: list[str] = []
+    seen: set[str] = set()
+    for path in candidates:
+        clean = str(path or "").strip()
+        if not clean or clean in seen:
+            continue
+        seen.add(clean)
+        out.append(clean)
+    return out
+
+
+def _resolve_provenance_tui_binary_for_checkpoints() -> str:
+    for candidate in _local_provenance_tui_candidates():
+        if os.path.isfile(candidate) and os.access(candidate, os.X_OK):
+            return candidate
+    return ""
 
 
 def _is_pid_alive(pid: int) -> bool:
@@ -1541,6 +1616,91 @@ def _write_transcript_resize_event(
     handle.flush()
 
 
+def _start_checkpoint_recorder(checkpoint_path: str) -> subprocess.Popen[str] | None:
+    binary = _resolve_provenance_tui_binary_for_checkpoints()
+    if not binary or not checkpoint_path.strip():
+        return None
+    try:
+        return subprocess.Popen(
+            [
+                binary,
+                "checkpoints",
+                "--out",
+                checkpoint_path,
+                "--interval-ms",
+                str(TRACK_CHECKPOINT_INTERVAL_MS),
+                "--interval-events",
+                str(TRACK_CHECKPOINT_INTERVAL_EVENTS),
+            ],
+            stdin=subprocess.PIPE,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+            text=True,
+            bufsize=1,
+        )
+    except Exception:
+        return None
+
+
+def _send_checkpoint_event(
+    recorder: subprocess.Popen[str] | None,
+    *,
+    direction: str,
+    seq: int | None = None,
+    rows: int | None = None,
+    cols: int | None = None,
+    data: bytes | None = None,
+) -> subprocess.Popen[str] | None:
+    if recorder is None or recorder.stdin is None:
+        return None
+    payload: dict[str, Any] = {
+        "direction": str(direction or "").strip(),
+    }
+    if seq is not None:
+        payload["seq"] = int(seq)
+    if rows is not None:
+        payload["rows"] = max(1, int(rows or 0))
+    if cols is not None:
+        payload["cols"] = max(1, int(cols or 0))
+    if data:
+        payload["data_b64"] = base64.b64encode(bytes(data)).decode("ascii")
+    try:
+        recorder.stdin.write(json.dumps(payload, separators=(",", ":")) + "\n")
+        if recorder.poll() is not None:
+            return None
+        return recorder
+    except Exception:
+        try:
+            recorder.stdin.close()
+        except Exception:
+            pass
+        return None
+
+
+def _stop_checkpoint_recorder(
+    recorder: subprocess.Popen[str] | None,
+    *,
+    final_seq: int | None = None,
+) -> None:
+    if recorder is None:
+        return
+    recorder = _send_checkpoint_event(recorder, direction="finish", seq=final_seq)
+    try:
+        if recorder is not None and recorder.stdin is not None:
+            recorder.stdin.close()
+    except Exception:
+        pass
+    try:
+        if recorder is not None:
+            recorder.wait(timeout=2.0)
+    except Exception:
+        try:
+            if recorder is not None:
+                recorder.kill()
+        except Exception:
+            pass
+
+
 def _write_session_event(
     handle: Any,
     *,
@@ -2105,25 +2265,26 @@ def _drain_master_output(
     transcript: Any,
     runtime: TrackRuntime,
     stdout_fd: int | None,
+    checkpoint_recorder: subprocess.Popen[str] | None = None,
     *,
     timeout_seconds: float = 0.2,
-) -> None:
+) -> subprocess.Popen[str] | None:
     deadline = time.monotonic() + max(0.0, float(timeout_seconds or 0.0))
     while time.monotonic() < deadline:
         try:
             ready, _, _ = select.select([master_fd], [], [], 0.02)
         except Exception:
-            return
+            return checkpoint_recorder
         if master_fd not in ready:
             continue
         try:
             data = os.read(master_fd, 4096)
         except OSError as exc:
             if exc.errno == errno.EIO:
-                return
+                return checkpoint_recorder
             raise
         if not data:
-            return
+            return checkpoint_recorder
         seq = runtime.emit_event(
             "terminal.stdout",
             {
@@ -2133,12 +2294,19 @@ def _drain_master_output(
             },
         )
         _write_transcript_event(transcript, "pty", data, seq=seq)
+        checkpoint_recorder = _send_checkpoint_event(
+            checkpoint_recorder,
+            direction="pty",
+            seq=seq,
+            data=data,
+        )
         runtime.transcript_event_count += 1
         if stdout_fd is not None:
             os.write(stdout_fd, data)
         else:
             sys.stdout.write(data.decode("utf-8", errors="replace"))
             sys.stdout.flush()
+    return checkpoint_recorder
 
 
 def _emit_terminal_reset(stdout_fd: int | None) -> None:
@@ -2157,6 +2325,7 @@ def run_tracked_command(launch: TrackLaunch) -> int:
 
     session_id = uuid.uuid4().hex[:16]
     transcript_path = _track_transcript_path(session_id)
+    checkpoint_path = _track_checkpoint_path(session_id)
     event_stream_path = _track_event_stream_path(session_id)
     state_store = _state_store()
     start_snapshot = _capture_repo_snapshot(launch.working_directory)
@@ -2225,6 +2394,7 @@ def run_tracked_command(launch: TrackLaunch) -> int:
     resize_pending = False
     pending_initial_winsize: tuple[int, int] | None = None
     last_transcript_winsize: tuple[int, int] | None = None
+    checkpoint_recorder: subprocess.Popen[str] | None = None
     try:
         if sys.stdin.isatty():
             stdin_fd = sys.stdin.fileno()
@@ -2246,6 +2416,7 @@ def run_tracked_command(launch: TrackLaunch) -> int:
             "a",
             encoding="utf-8",
         ) as event_stream:
+            checkpoint_recorder = _start_checkpoint_recorder(checkpoint_path)
             runtime.set_event_handle(event_stream)
             runtime.emit_event(
                 "marker.session.started",
@@ -2272,6 +2443,13 @@ def run_tracked_command(launch: TrackLaunch) -> int:
                     cols=cols,
                     seq=seq,
                 )
+                checkpoint_recorder = _send_checkpoint_event(
+                    checkpoint_recorder,
+                    direction="resize",
+                    seq=seq,
+                    rows=rows,
+                    cols=cols,
+                )
                 runtime.transcript_event_count += 1
                 last_transcript_winsize = (rows, cols)
             watcher.start()
@@ -2294,6 +2472,13 @@ def run_tracked_command(launch: TrackLaunch) -> int:
                             rows=rows,
                             cols=cols,
                             seq=seq,
+                        )
+                        checkpoint_recorder = _send_checkpoint_event(
+                            checkpoint_recorder,
+                            direction="resize",
+                            seq=seq,
+                            rows=rows,
+                            cols=cols,
                         )
                         runtime.transcript_event_count += 1
                         last_transcript_winsize = next_winsize
@@ -2335,6 +2520,12 @@ def run_tracked_command(launch: TrackLaunch) -> int:
                             },
                         )
                         _write_transcript_event(transcript, "pty", data, seq=seq)
+                        checkpoint_recorder = _send_checkpoint_event(
+                            checkpoint_recorder,
+                            direction="pty",
+                            seq=seq,
+                            data=data,
+                        )
                         runtime.transcript_event_count += 1
                         if stdout_fd is not None:
                             os.write(stdout_fd, data)
@@ -2345,7 +2536,13 @@ def run_tracked_command(launch: TrackLaunch) -> int:
                 exit_code = proc.poll()
                 if exit_code is not None:
                     runtime.root_exit_code = int(128 + abs(exit_code)) if exit_code < 0 else int(exit_code)
-                    _drain_master_output(master_fd, transcript, runtime, stdout_fd)
+                    checkpoint_recorder = _drain_master_output(
+                        master_fd,
+                        transcript,
+                        runtime,
+                        stdout_fd,
+                        checkpoint_recorder,
+                    )
                     break
             runtime.stop_event.set()
             if watcher_started:
@@ -2385,12 +2582,16 @@ def run_tracked_command(launch: TrackLaunch) -> int:
             os.close(master_fd)
         except Exception:
             pass
+        _stop_checkpoint_recorder(
+            checkpoint_recorder,
+            final_seq=runtime._event_seq if "runtime" in locals() else None,
+        )
 
     final_state = state_store.get_tracked_session(session_id) or _load_track_state()
     final_status = "stopped" if str(final_state.get("status", "") or "").strip().lower() == "stopping" else "exited"
     runtime.persist_state(final_status, exit_code=runtime.root_exit_code if runtime.root_exit_code is not None else 1)
     aggregate, changes = runtime.build_session_summary()
     runtime.persist_summary(aggregate=aggregate, changes=changes)
-    _prune_tracked_transcripts(exclude_paths={transcript_path, event_stream_path})
+    _prune_tracked_transcripts(exclude_paths={transcript_path, event_stream_path, checkpoint_path})
     _refresh_track_state_cache()
     return int(runtime.root_exit_code if runtime.root_exit_code is not None else 1)
