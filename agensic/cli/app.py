@@ -1386,6 +1386,38 @@ def _confirm_disable_autocomplete() -> bool:
     return bool(confirmed) and not _is_back(confirmed)
 
 
+def _is_automatic_agensic_sessions_enabled(config: dict) -> bool:
+    normalized = normalize_config_payload(config)
+    return bool(normalized["automatic_agensic_sessions_enabled"])
+
+
+def _with_automatic_agensic_sessions_enabled(config: dict, enabled: bool) -> dict:
+    updated = normalize_config_payload(config)
+    updated["automatic_agensic_sessions_enabled"] = bool(enabled)
+    return updated
+
+
+def _automatic_agensic_sessions_toggle_label(config: dict) -> str:
+    if _is_automatic_agensic_sessions_enabled(config):
+        return "Turn Off Automatic Agensic Sessions"
+    return "Turn On Automatic Agensic Sessions"
+
+
+def _print_automatic_agensic_sessions_disabled_note() -> None:
+    console.print(
+        "[red]Automatic Agensic Sessions is off. You can still start a tracked session manually with `agensic run <agent>`.[/red]"
+    )
+
+
+def _confirm_disable_automatic_agensic_sessions() -> bool:
+    console.print("[red]Turn off Automatic Agensic Sessions?[/red]")
+    console.print(
+        "[red]Supported exact agent entrypoints will stop auto-starting tracked sessions. Manual `agensic run <agent>` still works.[/red]"
+    )
+    confirmed = _setup_confirm("Continue?", default=False)
+    return bool(confirmed) and not _is_back(confirmed)
+
+
 def _get_llm_calls_per_line(config: dict) -> int:
     normalized = normalize_config_payload(config)
     return int(normalized["llm_calls_per_line"])
@@ -2801,6 +2833,10 @@ def _setup_remove_session() -> None:
 def _setup_sessions_menu() -> None:
     while True:
         _reset_setup_screen(section_title="Agensic Sessions")
+        existing_config = _load_config()
+        toggle_label = _automatic_agensic_sessions_toggle_label(existing_config)
+        if not _is_automatic_agensic_sessions_enabled(existing_config):
+            _print_automatic_agensic_sessions_disabled_note()
         action = _setup_select(
             "Choose one:",
             choices=[
@@ -2809,10 +2845,23 @@ def _setup_sessions_menu() -> None:
                 "Remove custom Agent",
                 "Rename session",
                 "Remove session",
+                toggle_label,
             ],
         )
         if _is_back(action) or not action:
             return
+        if action == toggle_label:
+            enabled = _is_automatic_agensic_sessions_enabled(existing_config)
+            if enabled and not _confirm_disable_automatic_agensic_sessions():
+                console.print("[yellow]Automatic Agensic Sessions setting unchanged.[/yellow]")
+                continue
+            _save_config(_with_automatic_agensic_sessions_enabled(existing_config, not enabled))
+            console.print(
+                f"[green]✓ Automatic Agensic Sessions turned {'off' if enabled else 'on'}.[/green]"
+            )
+            if enabled:
+                _print_automatic_agensic_sessions_disabled_note()
+            continue
         if action == "Show All Agents":
             _setup_show_all_agents()
             continue

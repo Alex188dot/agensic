@@ -58,6 +58,10 @@ class AuthConfigTests(unittest.TestCase):
         self.assertNotIn("provenance_registry_pubkey", normalized)
         self.assertNotIn("provenance_registry_refresh_hours", normalized)
 
+    def test_normalize_config_payload_enables_automatic_sessions_by_default(self):
+        normalized = normalize_config_payload({})
+        self.assertTrue(normalized["automatic_agensic_sessions_enabled"])
+
     def test_rotate_replaces_existing_token(self):
         save_auth_token("old-token", path=self.auth_path)
         rotated = rotate_auth_token(path=self.auth_path)

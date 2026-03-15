@@ -27,11 +27,11 @@ It works in your existing Zsh environment on macOS and Linux, with macOS-specifi
 
 ## Observability
 
-Agensic records command provenance, signs agent-executed runs from observed `agensic run` sessions, tracks interactive agent sessions, and gives you fast ways to inspect, filter, replay, and export what happened. The result is a terminal workflow you can trust after the fact, not just during the suggestion.
+Agensic records command provenance, signs agent-executed runs from observed sessions, tracks interactive agent sessions, and gives you fast ways to inspect, filter, replay, and export what happened. The result is a terminal workflow you can trust after the fact, not just during the suggestion.
 
 ### What you get
 
-- Signed `AI_EXECUTED` proof metadata for observed `agensic run` sessions, using local Ed25519 signing with key and host fingerprints attached to the run record.
+- Signed `AI_EXECUTED` proof metadata for observed tracked agent sessions, using local Ed25519 signing with key and host fingerprints attached to the run record.
 - Provenance classification for executed commands, including labels such as `AI_EXECUTED`, `AI_SUGGESTED_HUMAN_RAN`, `AG_SUGGESTED_HUMAN_RAN`, `HUMAN_TYPED`, `INVALID_PROOF`, and `UNKNOWN`.
 - Agent inference from proof payloads, provider/model metadata, and process lineage when explicit proof is absent.
 - A provenance registry for known agents, with registry listing and agent-detail inspection from the CLI.
@@ -57,7 +57,8 @@ agensic setup
 
 agensic provenance --tui
 agensic sessions
-agensic run codex
+codex
+agensic run ollama
 agensic run inspect <session_id>
 ```
 
@@ -65,7 +66,8 @@ agensic run inspect <session_id>
 
 - `agensic provenance --tui` opens the provenance interface and can export the current filtered dataset.
 - `agensic sessions` opens the tracked sessions browser.
-- `agensic run ...` launches supported agent CLIs under session tracking on macOS and is the only supported path that emits `AI_EXECUTED`.
+- Supported exact agent entrypoints such as `codex`, `claude`, `gemini`, and `agent` are auto-tracked on macOS by default and emit `AI_EXECUTED`.
+- `agensic run <agent>` remains the manual tracked-session command and is still the path to use for Ollama.
 - `agensic doctor`, `agensic fix --safe`, and `agensic fix --recover` help keep long-running local state healthy.
 
 ## Autocomplete

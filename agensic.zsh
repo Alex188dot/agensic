@@ -13,6 +13,7 @@ typeset -g AGENSIC_STATUS_PREFIX="__AGENSIC_STATUS__:"
 typeset -g AGENSIC_MAX_LLM_CALLS_PER_LINE=4
 typeset -g AGENSIC_LLM_BUDGET_UNLIMITED=0
 typeset -g AGENSIC_AUTOCOMPLETE_ENABLED=1
+typeset -g AGENSIC_AUTO_SESSIONS_ENABLED=1
 typeset -g AGENSIC_LLM_BUDGET_REACHED_HINT="LLM budget reached for this command line"
 typeset -g AGENSIC_LINE_LLM_CALLS_USED=0
 typeset -g AGENSIC_LINE_HAS_SPACE=0
@@ -139,6 +140,9 @@ typeset -g AGENSIC_LAST_FETCH_ERROR_CODE=""
 typeset -g AGENSIC_FETCH_LOG_THROTTLE_SECONDS=10
 typeset -g AGENSIC_FETCH_LOG_LAST_KEY=""
 typeset -g AGENSIC_FETCH_LOG_LAST_TS=0
+typeset -g AGENSIC_AUTO_SESSION_REGISTRY_STATE=""
+typeset -g -a AGENSIC_AUTO_SESSION_WRAPPERS
+AGENSIC_AUTO_SESSION_WRAPPERS=()
 typeset -g -a AGENSIC_PATH_HEAVY_EXECUTABLES
 AGENSIC_PATH_HEAVY_EXECUTABLES=(cd ls cat less more head tail vi vim nvim nano code source open cp mv mkdir rmdir touch find grep rg sed awk bat)
 typeset -g -a AGENSIC_SCRIPT_EXECUTABLES
@@ -172,6 +176,8 @@ typeset -g -a AGENSIC_BLOCKED_EXECUTABLE_PREFIXES
 AGENSIC_BLOCKED_EXECUTABLE_PREFIXES=(mkfs. mkfs_ newfs)
 typeset -g -a AGENSIC_TTY_SENSITIVE_EXECUTABLES
 AGENSIC_TTY_SENSITIVE_EXECUTABLES=(less more man top htop watch vi vim nvim nano emacs fzf tig ssh sftp scp ftp telnet tmux screen)
+typeset -g -a AGENSIC_AUTO_SESSION_RESERVED_WORDS
+AGENSIC_AUTO_SESSION_RESERVED_WORDS=(continue)
 
 _agensic_value_in_array() {
     local needle="$1"
@@ -298,6 +304,21 @@ _agensic_get_auth_mtime() {
     print -r -- "$mtime"
 }
 
+_agensic_get_agent_registry_state() {
+    local builtin_path="${AGENSIC_SOURCE_DIR}/agensic/engine/data/agents_builtin.json"
+    local local_override_path="${AGENSIC_CONFIG_HOME}/agensic/agent_registry.local.json"
+    local builtin_mtime=""
+    local local_mtime=""
+
+    if [[ -f "$builtin_path" ]]; then
+        builtin_mtime="$(stat -f '%m' "$builtin_path" 2>/dev/null)"
+    fi
+    if [[ -f "$local_override_path" ]]; then
+        local_mtime="$(stat -f '%m' "$local_override_path" 2>/dev/null)"
+    fi
+    print -r -- "${builtin_mtime}|${local_mtime}"
+}
+
 _agensic_reload_auth_token_if_needed() {
     local current_mtime
     current_mtime="$(_agensic_get_auth_mtime)"
@@ -340,6 +361,7 @@ _agensic_reload_disabled_patterns_if_needed() {
     AGENSIC_MAX_LLM_CALLS_PER_LINE=4
     AGENSIC_LLM_BUDGET_UNLIMITED=0
     AGENSIC_AUTOCOMPLETE_ENABLED=1
+    AGENSIC_AUTO_SESSIONS_ENABLED=1
 
     if [[ -z "$current_mtime" ]]; then
         return
@@ -390,10 +412,12 @@ if parsed_budget < 0 or parsed_budget > 99:
 budget = parsed_budget
 unlimited = bool(payload.get('llm_budget_unlimited', False))
 autocomplete_enabled = bool(payload.get('autocomplete_enabled', True))
+auto_sessions_enabled = bool(payload.get('automatic_agensic_sessions_enabled', True))
 
 print(str(budget))
 print('1' if unlimited else '0')
 print('1' if autocomplete_enabled else '0')
+print('1' if auto_sessions_enabled else '0')
 print('\x1f'.join(patterns))
 " 2>/dev/null)
 
@@ -409,7 +433,10 @@ print('\x1f'.join(patterns))
         if [[ "${response_lines[3]}" == "0" ]]; then
             AGENSIC_AUTOCOMPLETE_ENABLED=0
         fi
-        local patterns_line="${response_lines[4]}"
+        if [[ "${response_lines[4]}" == "0" ]]; then
+            AGENSIC_AUTO_SESSIONS_ENABLED=0
+        fi
+        local patterns_line="${response_lines[5]}"
         if [[ -n "$patterns_line" ]]; then
             AGENSIC_DISABLED_PATTERNS=("${(ps:$sep:)patterns_line}")
         fi
@@ -496,6 +523,140 @@ _agensic_should_skip_agensic_for_buffer() {
         return 0
     fi
     _agensic_is_blocked_runtime_command "$BUFFER"
+}
+
+_agensic_print_manual_session_hint() {
+    local executable="${1:l}"
+    case "$executable" in
+        ollama)
+            zle -I 2>/dev/null || true
+            print -P -- "%F{red}To enable Agensic Sessions with Ollama, use: agensic run ollama%f" >&2
+            ;;
+    esac
+}
+
+_agensic_auto_session_wrapper_is_valid() {
+    local executable="${1:l}"
+    if [[ -z "$executable" ]]; then
+        return 1
+    fi
+    if ! [[ "$executable" =~ '^[A-Za-z_][A-Za-z0-9._-]*$' ]]; then
+        return 1
+    fi
+    if _agensic_value_in_array "$executable" "${AGENSIC_AUTO_SESSION_RESERVED_WORDS[@]}"; then
+        return 1
+    fi
+    return 0
+}
+
+_agensic_unregister_auto_session_wrappers() {
+    local wrapper=""
+    for wrapper in "${AGENSIC_AUTO_SESSION_WRAPPERS[@]}"; do
+        unfunction -- "$wrapper" 2>/dev/null || true
+    done
+    AGENSIC_AUTO_SESSION_WRAPPERS=()
+}
+
+_agensic_define_auto_session_wrapper() {
+    local executable="${1:l}"
+    local mode="${2:l}"
+    if ! _agensic_auto_session_wrapper_is_valid "$executable"; then
+        return
+    fi
+    eval "${executable}() { _agensic_auto_session_exec ${(qqq)executable} ${(qqq)mode} \"\$@\"; }"
+    AGENSIC_AUTO_SESSION_WRAPPERS+=("$executable")
+}
+
+_agensic_load_auto_session_wrappers() {
+    if [[ -z "$AGENSIC_RUNTIME_PYTHON" ]]; then
+        return 1
+    fi
+    "$AGENSIC_RUNTIME_PYTHON" -c "
+from collections import OrderedDict
+
+try:
+    from agensic.engine.agent_registry import AgentRegistry
+except Exception:
+    raise SystemExit(0)
+
+try:
+    registry = AgentRegistry()
+except Exception:
+    raise SystemExit(0)
+
+entries = OrderedDict()
+for agent in registry.list_agents():
+    if not isinstance(agent, dict):
+        continue
+    agent_id = str(agent.get('agent_id', '') or '').strip().lower()
+    mode = 'manual_hint' if agent_id == 'ollama' else 'track'
+    for raw_executable in (agent.get('executables') or []):
+        executable = str(raw_executable or '').strip().lower()
+        if not executable or executable in entries:
+            continue
+        entries[executable] = mode
+
+for executable, mode in entries.items():
+    print(f'{mode}\t{executable}')
+" 2>/dev/null
+}
+
+_agensic_refresh_auto_session_wrappers_if_needed() {
+    local state="$(_agensic_get_agent_registry_state)"
+    if [[ "$state" == "$AGENSIC_AUTO_SESSION_REGISTRY_STATE" && ${#AGENSIC_AUTO_SESSION_WRAPPERS[@]} -gt 0 ]]; then
+        return
+    fi
+
+    local entries=""
+    local -a entry_lines
+    local line=""
+    local mode=""
+    local executable=""
+
+    entries="$(_agensic_load_auto_session_wrappers)"
+    _agensic_unregister_auto_session_wrappers
+    AGENSIC_AUTO_SESSION_REGISTRY_STATE="$state"
+
+    if [[ -z "$entries" ]]; then
+        return
+    fi
+
+    entry_lines=("${(@f)entries}")
+    for line in "${entry_lines[@]}"; do
+        mode="${line%%$'\t'*}"
+        executable="${line#*$'\t'}"
+        if [[ -z "$mode" || -z "$executable" ]]; then
+            continue
+        fi
+        _agensic_define_auto_session_wrapper "$executable" "$mode"
+    done
+}
+
+_agensic_auto_session_exec() {
+    local executable="${1:l}"
+    local mode="${2:l}"
+    shift 2
+
+    _agensic_reload_disabled_patterns_if_needed
+    if [[ "${AGENSIC_TRACK_ACTIVE:-0}" == "1" || "${AGENSIC_AUTO_SESSIONS_ENABLED:-1}" != "1" ]]; then
+        command "$executable" "$@"
+        return $?
+    fi
+
+    case "$mode" in
+        track)
+            agensic run "$executable" "$@"
+            return $?
+            ;;
+        manual_hint)
+            _agensic_print_manual_session_hint "$executable"
+            command "$executable" "$@"
+            return $?
+            ;;
+    esac
+
+    command "$executable" "$@"
+    return $?
 }
 
 # ======================================================
@@ -2465,6 +2626,7 @@ _agensic_precmd_hook() {
     AGENSIC_AI_SESSION_AUTO_STOP_ARMED=0
     _agensic_ensure_ai_session_timer
     _agensic_reload_disabled_patterns_if_needed
+    _agensic_refresh_auto_session_wrappers_if_needed
 
     if [[ -z "$cmd" ]]; then
         return
@@ -3158,6 +3320,7 @@ _agensic_capture_native_escape_binding viins
 _agensic_capture_native_escape_binding vicmd
 _agensic_reload_disabled_patterns_if_needed
 _agensic_reload_auth_token_if_needed
+_agensic_refresh_auto_session_wrappers_if_needed
 _agensic_ensure_ai_session_timer
 _agensic_disable_mouse_reporting
 

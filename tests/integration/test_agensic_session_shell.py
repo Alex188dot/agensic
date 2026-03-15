@@ -15,7 +15,12 @@ PYTHON_BIN = Path(sys.executable)
 
 
 class AgensicSessionShellTests(unittest.TestCase):
-    def _run_zsh(self, body: str, config: dict | None = None) -> subprocess.CompletedProcess:
+    def _run_zsh(
+        self,
+        body: str,
+        config: dict | None = None,
+        local_override: dict | None = None,
+    ) -> subprocess.CompletedProcess:
         script = textwrap.dedent(
             f"""
             source {AGENSIC_ZSH}
@@ -23,11 +28,17 @@ class AgensicSessionShellTests(unittest.TestCase):
             """
         )
         with tempfile.TemporaryDirectory() as temp_home:
-            if config is not None:
-                config_dir = Path(temp_home) / ".config" / "agensic"
+            config_dir = Path(temp_home) / ".config" / "agensic"
+            if config is not None or local_override is not None:
                 config_dir.mkdir(parents=True, exist_ok=True)
+            if config is not None:
                 (config_dir / "config.json").write_text(
                     json.dumps(config),
+                    encoding="utf-8",
+                )
+            if local_override is not None:
+                (config_dir / "agent_registry.local.json").write_text(
+                    json.dumps(local_override),
                     encoding="utf-8",
                 )
             env = dict(os.environ)
@@ -184,6 +195,89 @@ class AgensicSessionShellTests(unittest.TestCase):
         self.assertEqual(result.returncode, 0, msg=result.stderr)
         lines = [line.strip() for line in result.stdout.splitlines() if line.strip()]
         self.assertIn("human_typed|||", lines)
+
+    def test_codex_wrapper_invokes_tracked_run_without_buffer_rewrite(self):
+        result = self._run_zsh(
+            """
+            agensic() {
+              print -r -- "agensic:$*"
+            }
+            codex --help
+            """
+        )
+        self.assertEqual(result.returncode, 0, msg=result.stderr)
+        self.assertIn("agensic:run codex --help", result.stdout)
+
+    def test_claude_wrapper_invokes_tracked_run_without_buffer_rewrite(self):
+        result = self._run_zsh(
+            """
+            agensic() {
+              print -r -- "agensic:$*"
+            }
+            claude --resume 123
+            """
+        )
+        self.assertEqual(result.returncode, 0, msg=result.stderr)
+        self.assertIn("agensic:run claude --resume 123", result.stdout)
+
+    def test_wrapper_bypasses_tracking_when_setting_is_off(self):
+        result = self._run_zsh(
+            """
+            mkdir -p "$HOME/bin"
+            cat > "$HOME/bin/codex" <<'EOF'
+#!/bin/sh
+printf 'direct:%s\n' "$*"
+EOF
+            chmod +x "$HOME/bin/codex"
+            PATH="$HOME/bin:$PATH"
+            codex --help
+            """,
+            config={"automatic_agensic_sessions_enabled": False},
+        )
+        self.assertEqual(result.returncode, 0, msg=result.stderr)
+        self.assertIn("direct:--help", result.stdout)
+
+    def test_ollama_wrapper_keeps_manual_mode_with_hint(self):
+        result = self._run_zsh(
+            """
+            mkdir -p "$HOME/bin"
+            cat > "$HOME/bin/ollama" <<'EOF'
+#!/bin/sh
+printf 'ollama:%s\n' "$*"
+EOF
+            chmod +x "$HOME/bin/ollama"
+            PATH="$HOME/bin:$PATH"
+            ollama run llama3.2
+            """
+        )
+        self.assertEqual(result.returncode, 0, msg=result.stderr)
+        self.assertIn("ollama:run llama3.2", result.stdout)
+        self.assertIn("To enable Agensic Sessions with Ollama, use: agensic run ollama", result.stderr)
+
+    def test_custom_exact_entrypoint_wrapper_invokes_tracked_run(self):
+        result = self._run_zsh(
+            """
+            agensic() {
+              print -r -- "agensic:$*"
+            }
+            my-agent sync
+            """,
+            local_override={
+                "version": "local-test",
+                "agents": [
+                    {
+                        "agent_id": "my-agent",
+                        "display_name": "My Agent",
+                        "executables": ["my-agent"],
+                        "aliases": ["my-agent"],
+                        "process_tokens": ["my-agent"],
+                        "status": "community",
+                    }
+                ],
+            },
+        )
+        self.assertEqual(result.returncode, 0, msg=result.stderr)
+        self.assertIn("agensic:run my-agent sync", result.stdout)
 
     def test_decode_common_escapes_turns_backslash_n_into_newlines(self):
         result = self._run_zsh(

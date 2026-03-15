@@ -134,7 +134,14 @@ class SetupMenuTests(unittest.TestCase):
 
         self.assertEqual(
             captured_choices[0],
-            ["Show All Agents", "Add custom Agent", "Remove custom Agent", "Rename session", "Remove session"],
+            [
+                "Show All Agents",
+                "Add custom Agent",
+                "Remove custom Agent",
+                "Rename session",
+                "Remove session",
+                "Turn Off Automatic Agensic Sessions",
+            ],
         )
 
     def test_sessions_submenu_routes_show_all_agents(self):
@@ -144,6 +151,71 @@ class SetupMenuTests(unittest.TestCase):
             cli_app._setup_sessions_menu()
 
         show_all_agents.assert_called_once_with()
+
+    def test_sessions_submenu_shows_turn_on_when_automatic_sessions_disabled(self):
+        captured_choices: list[list[str]] = []
+
+        def _fake_select(message: str, choices: list[str], **kwargs):  # noqa: ARG001
+            captured_choices.append(list(choices))
+            return cli_app.BACK_SIGNAL
+
+        with patch.object(
+            cli_app,
+            "_load_config",
+            return_value={"automatic_agensic_sessions_enabled": False},
+        ), patch.object(cli_app, "_setup_select", side_effect=_fake_select):
+            cli_app._setup_sessions_menu()
+
+        self.assertEqual(captured_choices[0][-1], "Turn On Automatic Agensic Sessions")
+
+    def test_sessions_submenu_prints_manual_run_note_when_automatic_sessions_disabled(self):
+        with patch.object(
+            cli_app,
+            "_load_config",
+            return_value={"automatic_agensic_sessions_enabled": False},
+        ), patch.object(cli_app, "_setup_select", return_value=cli_app.BACK_SIGNAL), patch.object(
+            cli_app.console, "print"
+        ) as print_mock:
+            cli_app._setup_sessions_menu()
+
+        printed = [str(args[0]) for args, _ in print_mock.call_args_list]
+        self.assertTrue(any("Automatic Agensic Sessions is off" in line for line in printed))
+        self.assertTrue(any("agensic run <agent>" in line for line in printed))
+
+    def test_sessions_toggle_only_flips_automatic_sessions_flag(self):
+        saved = {}
+        existing = {
+            "automatic_agensic_sessions_enabled": True,
+            "autocomplete_enabled": True,
+            "provider": "openai",
+        }
+
+        with patch.object(cli_app, "_load_config", return_value=existing), patch.object(
+            cli_app,
+            "_setup_select",
+            side_effect=["Turn Off Automatic Agensic Sessions", cli_app.BACK_SIGNAL],
+        ), patch.object(
+            cli_app, "_setup_confirm", return_value=True
+        ), patch.object(cli_app, "_save_config", side_effect=lambda config: saved.update(config)), patch.object(
+            cli_app.console, "print"
+        ):
+            cli_app._setup_sessions_menu()
+
+        self.assertFalse(saved["automatic_agensic_sessions_enabled"])
+        self.assertTrue(saved["autocomplete_enabled"])
+        self.assertEqual(saved["provider"], "openai")
+
+    def test_confirm_disable_automatic_sessions_uses_red_warning_and_default_no(self):
+        with patch.object(cli_app, "_setup_confirm", return_value=True) as confirm_mock, patch.object(
+            cli_app.console, "print"
+        ) as print_mock:
+            confirmed = cli_app._confirm_disable_automatic_agensic_sessions()
+
+        self.assertTrue(confirmed)
+        confirm_mock.assert_called_once_with("Continue?", default=False)
+        printed = [str(args[0]) for args, _ in print_mock.call_args_list]
+        self.assertTrue(any("[red]Turn off Automatic Agensic Sessions?[/red]" in line for line in printed))
+        self.assertTrue(any("Manual `agensic run <agent>` still works" in line for line in printed))
 
     def test_setup_show_all_agents_prefers_responsive_tui(self):
         agents = [
