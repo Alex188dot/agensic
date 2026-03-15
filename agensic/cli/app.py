@@ -745,13 +745,14 @@ def _resolve_installed_provenance_tui_binary() -> str:
     return ""
 
 
-def _binary_supports_sessions_mode(binary_path: str) -> bool:
+def _binary_supports_tui_subcommand(binary_path: str, subcommand: str) -> bool:
     clean_path = str(binary_path or "").strip()
-    if not clean_path:
+    clean_subcommand = str(subcommand or "").strip()
+    if not clean_path or not clean_subcommand:
         return False
     try:
         result = subprocess.run(
-            [clean_path, "sessions", "--help"],
+            [clean_path, clean_subcommand, "--help"],
             check=False,
             capture_output=True,
             text=True,
@@ -760,6 +761,14 @@ def _binary_supports_sessions_mode(binary_path: str) -> bool:
     except Exception:
         return False
     return int(result.returncode or 0) == 0
+
+
+def _binary_supports_sessions_mode(binary_path: str) -> bool:
+    return _binary_supports_tui_subcommand(binary_path, "sessions")
+
+
+def _binary_supports_agents_mode(binary_path: str) -> bool:
+    return _binary_supports_tui_subcommand(binary_path, "agents")
 
 
 def _fetch_provenance_tui_manifest() -> dict:
@@ -1060,6 +1069,38 @@ def _run_sessions_tui(session_id: str = "", *, replay: bool = False) -> bool:
         return int(result.returncode or 0) == 0
     finally:
         _reset_terminal_mouse_reporting()
+
+
+def _run_agents_tui(agents: list[dict[str, Any]]) -> bool:
+    binary_path = _ensure_provenance_tui_binary()
+    if not _binary_supports_agents_mode(binary_path):
+        raise RuntimeError(
+            "installed_agents_tui_is_outdated; "
+            "rebuild the local sidecar or reinstall Agensic so agensic-provenance-tui supports the 'agents' mode"
+        )
+
+    payload_path = ""
+    with tempfile.NamedTemporaryFile("w", encoding="utf-8", suffix="-agents.json", delete=False) as handle:
+        json.dump({"agents": agents}, handle, ensure_ascii=True, indent=2)
+        payload_path = handle.name
+
+    cmd = [
+        binary_path,
+        "agents",
+        "--input",
+        payload_path,
+    ]
+    _reset_terminal_mouse_reporting()
+    try:
+        result = subprocess.run(cmd, check=False)
+        return int(result.returncode or 0) == 0
+    finally:
+        _reset_terminal_mouse_reporting()
+        if payload_path:
+            try:
+                os.unlink(payload_path)
+            except OSError:
+                pass
 
 
 def _format_provenance_command_preview(command: object) -> str:
@@ -2637,13 +2678,25 @@ def _setup_remove_custom_agent() -> None:
 def _setup_show_all_agents() -> None:
     from . import track as track_runtime
 
-    _reset_setup_screen(section_title="Show All Agents")
     agents = track_runtime.list_known_agents()
     if not agents:
+        _reset_setup_screen(section_title="Show All Agents")
         console.print("[yellow]No agents found.[/yellow]")
         _setup_pause()
         return
 
+    try:
+        if _run_agents_tui(agents):
+            return
+    except Exception:
+        pass
+
+    _reset_setup_screen(section_title="Show All Agents")
+    _render_setup_agents_table(agents)
+    _setup_pause()
+
+
+def _render_setup_agents_table(agents: list[dict[str, Any]]) -> None:
     table = Table(title="Agensic Known Agents")
     table.add_column("Agent")
     table.add_column("Name")
@@ -2664,7 +2717,6 @@ def _setup_show_all_agents() -> None:
         )
     console.print(table)
     console.print("`source` is where the mapping came from. `status` is the trust/registry classification.")
-    _setup_pause()
 
 
 def _setup_rename_session() -> None:

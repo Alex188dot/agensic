@@ -1,3 +1,4 @@
+mod agents;
 mod checkpoints;
 mod sessions;
 
@@ -1502,10 +1503,8 @@ fn build_provenance_detail_content(
         other => other.clone(),
     };
     let payload_summary = match &payload_without_output {
-        Value::Object(_) | Value::Array(_) => {
-            serde_json::to_string_pretty(&payload_without_output)
-                .unwrap_or_else(|_| "{}".to_string())
-        }
+        Value::Object(_) | Value::Array(_) => serde_json::to_string_pretty(&payload_without_output)
+            .unwrap_or_else(|_| "{}".to_string()),
         other => other.to_string(),
     };
     let mut lines: Vec<Line<'static>> = vec![
@@ -1551,14 +1550,21 @@ fn build_provenance_detail_content(
         DETAILS_COMMAND_PREVIEW_ROWS
     };
     if command_expandable {
-        let hidden_rows = wrapped_command_lines.len().saturating_sub(visible_command_lines);
+        let hidden_rows = wrapped_command_lines
+            .len()
+            .saturating_sub(visible_command_lines);
         let toggle_text = if app.details_command_expanded {
             "x collapse command"
         } else {
             "x expand command"
         };
         let summary_text = if app.details_command_expanded {
-            format!("{} ({}/{})", toggle_text, wrapped_command_lines.len(), wrapped_command_lines.len())
+            format!(
+                "{} ({}/{})",
+                toggle_text,
+                wrapped_command_lines.len(),
+                wrapped_command_lines.len()
+            )
         } else {
             format!(
                 "{} ({}/{} rows shown, {} hidden)",
@@ -1568,7 +1574,10 @@ fn build_provenance_detail_content(
                 hidden_rows
             )
         };
-        lines.push(Line::from(Span::styled(summary_text, App::key_hint_style())));
+        lines.push(Line::from(Span::styled(
+            summary_text,
+            App::key_hint_style(),
+        )));
     }
     for command_line in wrapped_command_lines.iter().take(visible_command_lines) {
         lines.push(Line::from(Span::styled(
@@ -2569,6 +2578,15 @@ fn install_terminal_panic_hook() {
 
 fn main() {
     let raw_args: Vec<String> = env::args().collect();
+    if matches!(raw_args.get(1).map(String::as_str), Some("agents")) {
+        install_terminal_panic_hook();
+        if let Err(err) = agents::run_from_env(&raw_args[2..]) {
+            cleanup_terminal();
+            eprintln!("{}", err);
+            std::process::exit(1);
+        }
+        return;
+    }
     if matches!(raw_args.get(1).map(String::as_str), Some("checkpoints")) {
         if let Err(err) = checkpoints::run_from_env(&raw_args[2..]) {
             eprintln!("{}", err);

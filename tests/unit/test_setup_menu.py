@@ -4,6 +4,7 @@ from unittest.mock import patch
 
 
 cli_app = importlib.import_module("agensic.cli.app")
+track_module = importlib.import_module("agensic.cli.track")
 
 
 class SetupMenuTests(unittest.TestCase):
@@ -64,6 +65,50 @@ class SetupMenuTests(unittest.TestCase):
             cli_app._setup_sessions_menu()
 
         show_all_agents.assert_called_once_with()
+
+    def test_setup_show_all_agents_prefers_responsive_tui(self):
+        agents = [
+            {
+                "agent_id": "codex",
+                "display_name": "Codex",
+                "source": "builtin",
+                "status": "verified",
+                "executables": ["codex"],
+                "aliases": ["codex"],
+            }
+        ]
+        with patch.object(track_module, "list_known_agents", return_value=agents), patch.object(
+            cli_app, "_run_agents_tui", return_value=True
+        ) as run_tui, patch.object(cli_app, "_render_setup_agents_table") as render_table, patch.object(
+            cli_app, "_setup_pause"
+        ) as setup_pause:
+            cli_app._setup_show_all_agents()
+
+        run_tui.assert_called_once_with(agents)
+        render_table.assert_not_called()
+        setup_pause.assert_not_called()
+
+    def test_setup_show_all_agents_falls_back_to_table_when_tui_fails(self):
+        agents = [
+            {
+                "agent_id": "codex",
+                "display_name": "Codex",
+                "source": "builtin",
+                "status": "verified",
+                "executables": ["codex"],
+                "aliases": ["codex"],
+            }
+        ]
+        with patch.object(track_module, "list_known_agents", return_value=agents), patch.object(
+            cli_app, "_run_agents_tui", side_effect=RuntimeError("outdated")
+        ) as run_tui, patch.object(cli_app, "_render_setup_agents_table") as render_table, patch.object(
+            cli_app, "_setup_pause"
+        ) as setup_pause:
+            cli_app._setup_show_all_agents()
+
+        run_tui.assert_called_once_with(agents)
+        render_table.assert_called_once_with(agents)
+        setup_pause.assert_called_once_with()
 
 
 if __name__ == "__main__":
