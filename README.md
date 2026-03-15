@@ -201,6 +201,10 @@ Zsh plugin -> shell client -> local FastAPI daemon -> suggestion engine
                                               |-> optional LLM provider
 ```
 
+## Project Creator
+
+Alessio Leodori
+
 ## License
 
 Apache-2.0
