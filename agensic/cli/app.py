@@ -168,6 +168,8 @@ PLUGIN_LOG_FILE = APP_PATHS.plugin_log_file
 MOUSE_REPORTING_RESET_SEQ = "\x1b[?1000l\x1b[?1002l\x1b[?1003l\x1b[?1006l\x1b[?1015l"
 CURSOR_SAVE_SEQ = "\x1b7"
 CURSOR_RESTORE_SEQ = "\x1b8"
+ALT_SCREEN_ENTER_SEQ = "\x1b[?1049h"
+ALT_SCREEN_EXIT_SEQ = "\x1b[?1049l"
 DEFAULT_TUI_MANIFEST_URL = (
     "https://github.com/Alex188dot/agensic/releases/latest/download/provenance_tui_manifest.json"
 )
@@ -241,6 +243,20 @@ def _reset_setup_screen(section_title: str | None = None, banner_title: str = "A
     _print_setup_banner(banner_title)
     if section_title:
         _print_screen_heading(section_title)
+
+
+@contextmanager
+def _setup_screen_session():
+    use_alt_screen = sys.stdin.isatty() and sys.stdout.isatty()
+    if use_alt_screen:
+        sys.stdout.write(ALT_SCREEN_ENTER_SEQ)
+        sys.stdout.flush()
+    try:
+        yield
+    finally:
+        if use_alt_screen:
+            sys.stdout.write(ALT_SCREEN_EXIT_SEQ)
+            sys.stdout.flush()
 
 
 def _attach_escape_back(question: Question) -> Question:
@@ -2649,21 +2665,22 @@ def setup():
     ensure_config_dir()
     _clear_uninstall_sentinel()
     _rotate_auth_token_or_exit("setup")
-    while True:
-        _reset_setup_screen()
-        action = _setup_select(
-            "Choose one:",
-            choices=[
-                "Agensic Sessions",
-                "Agensic Autocomplete",
-            ],
-        )
-        if _is_back(action) or not action:
-            return
-        if action == "Agensic Sessions":
-            _setup_sessions_menu()
-            continue
-        _autocomplete_setup_menu()
+    with _setup_screen_session():
+        while True:
+            _reset_setup_screen()
+            action = _setup_select(
+                "Choose one:",
+                choices=[
+                    "Agensic Sessions",
+                    "Agensic Autocomplete",
+                ],
+            )
+            if _is_back(action) or not action:
+                return
+            if action == "Agensic Sessions":
+                _setup_sessions_menu()
+                continue
+            _autocomplete_setup_menu()
 
 def _enable_startup_impl(start_now: bool) -> None:
     if sys.platform != "darwin":
