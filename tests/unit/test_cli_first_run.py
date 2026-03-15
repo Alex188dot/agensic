@@ -27,7 +27,11 @@ class CliFirstRunTests(unittest.TestCase):
             completed = cli_app._run_first_install_onboarding()
 
         self.assertTrue(completed)
-        configure_provider_mock.assert_called_once_with({"provider": "history_only"}, manage_runtime=False)
+        configure_provider_mock.assert_called_once_with(
+            {"provider": "history_only"},
+            manage_runtime=False,
+            banner_title="Agensic Setup",
+        )
         confirm_mock.assert_called_once_with("Enable start on boot (Recommended)?")
         enable_startup_mock.assert_called_once_with(start_now=False)
         start_mock.assert_called_once()
@@ -53,7 +57,11 @@ class CliFirstRunTests(unittest.TestCase):
             completed = cli_app._run_first_install_onboarding()
 
         self.assertTrue(completed)
-        configure_provider_mock.assert_called_once_with({}, manage_runtime=False)
+        configure_provider_mock.assert_called_once_with(
+            {},
+            manage_runtime=False,
+            banner_title="Agensic Setup",
+        )
         enable_startup_mock.assert_not_called()
         start_mock.assert_called_once()
 

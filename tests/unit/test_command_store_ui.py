@@ -42,6 +42,38 @@ class CommandStoreUiTests(unittest.TestCase):
         self.assertNotIn("Potential wrong commands", prompt_text)
         self.assertNotIn("Commands", prompt_text)
 
+    def test_checkbox_prompt_disables_cpr_on_prompt_output(self):
+        captured = {}
+
+        class _FakeOutput:
+            enable_cpr = True
+
+        def _fake_application(*args, **kwargs):
+            captured["output"] = kwargs["output"]
+            return object()
+
+        with patch.object(cli_app.common, "create_inquirer_layout", return_value=object()), patch.object(
+            cli_app, "create_output", return_value=_FakeOutput()
+        ), patch.object(cli_app, "Application", side_effect=_fake_application), patch.object(
+            cli_app, "Question", side_effect=lambda app: app
+        ):
+            cli_app._checkbox_without_invert(
+                "Select commands to remove:",
+                choices=[cli_app.questionary.Choice("git status", value="git status")],
+            )
+
+        self.assertFalse(captured["output"].enable_cpr)
+
+    def test_manage_command_store_redraws_clean_screen_after_action(self):
+        with patch.object(cli_app, "_ensure_command_store_backend_ready", return_value=True), patch.object(
+            cli_app, "_setup_select", side_effect=["Remove commands", cli_app.BACK_SIGNAL]
+        ), patch.object(cli_app, "_manage_command_store_remove"), patch.object(
+            cli_app.console, "print"
+        ), patch.object(cli_app.console, "clear") as clear_mock:
+            cli_app._manage_command_store()
+
+        self.assertEqual(clear_mock.call_count, 2)
+
 
 if __name__ == "__main__":
     unittest.main()

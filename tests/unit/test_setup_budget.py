@@ -76,6 +76,16 @@ class SetupBudgetTests(unittest.TestCase):
 
         self.assertIn("Daemon launch", observed_choices)
 
+    def test_setup_redraws_clean_screen_when_returning_to_main_menu(self):
+        with patch.object(cli_app, "_rotate_auth_token_or_exit"), patch.object(
+            cli_app, "_setup_select", side_effect=["Daemon launch", cli_app.BACK_SIGNAL]
+        ), patch.object(cli_app, "_manage_daemon_launch"), patch.object(
+            cli_app.console, "print"
+        ), patch.object(cli_app.console, "clear") as clear_mock:
+            cli_app.setup()
+
+        self.assertGreaterEqual(clear_mock.call_count, 2)
+
     def test_configure_provider_history_only_keeps_existing_budget(self):
         saved = {}
 
@@ -109,7 +119,7 @@ class SetupBudgetTests(unittest.TestCase):
 
     def test_manage_daemon_launch_disables_startup_when_requested(self):
         with patch.object(cli_app, "_is_startup_enabled", return_value=True), patch.object(
-            cli_app, "_setup_select", return_value="remove from startup (not recommended)"
+            cli_app, "_setup_select", return_value="remove from startup"
         ), patch.object(cli_app, "_disable_startup_impl") as disable_mock, patch.object(
             cli_app.console, "print"
         ):

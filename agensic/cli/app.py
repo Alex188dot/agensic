@@ -32,6 +32,7 @@ from prompt_toolkit.application import Application
 from prompt_toolkit.key_binding import KeyBindings
 from prompt_toolkit.key_binding.key_bindings import merge_key_bindings
 from prompt_toolkit.keys import Keys
+from prompt_toolkit.output.defaults import create_output
 from prompt_toolkit.styles import Style
 from prompt_toolkit.utils import get_cwidth
 from typer.core import TyperGroup
@@ -227,6 +228,19 @@ def _setup_style() -> Style:
 
 def _print_screen_heading(title: str) -> None:
     console.print(f"[bold cyan]{title}[/bold cyan]")
+
+
+def _print_setup_banner(title: str = "Agensic Configuration") -> None:
+    console.print(
+        Panel.fit(f"[bold cyan]{title}[/bold cyan] [bold #ff8c00](Esc = back)[/bold #ff8c00]")
+    )
+
+
+def _reset_setup_screen(section_title: str | None = None, banner_title: str = "Agensic Configuration") -> None:
+    console.clear()
+    _print_setup_banner(banner_title)
+    if section_title:
+        _print_screen_heading(section_title)
 
 
 def _attach_escape_back(question: Question) -> Question:
@@ -1401,8 +1415,8 @@ def _default_model_for_provider(provider: str) -> str:
     return _PROVIDER_DEFAULT_MODELS.get(normalized, "gpt-5-mini")
 
 def _manage_pattern_controls(existing_config: dict):
-    _print_screen_heading("Manage Agensic command patterns")
     while True:
+        _reset_setup_screen("Manage Agensic command patterns")
         config = _load_config()
         patterns = _get_disabled_patterns(config)
         action = _setup_select(
@@ -1449,8 +1463,11 @@ def _manage_pattern_controls(existing_config: dict):
         _save_config(updated)
         console.print(f"[green]✓ Re-enabled Agensic for '{selected}'.[/green]")
 
-def _configure_provider(existing_config: dict, manage_runtime: bool = True) -> bool:
-    _print_screen_heading("Choose AI provider")
+def _configure_provider(
+    existing_config: dict,
+    manage_runtime: bool = True,
+    banner_title: str = "Agensic Configuration",
+) -> bool:
     config = dict(existing_config or {})
     provider = ""
     model = ""
@@ -1463,6 +1480,7 @@ def _configure_provider(existing_config: dict, manage_runtime: bool = True) -> b
     step = 0
 
     while True:
+        _reset_setup_screen("Choose AI provider", banner_title=banner_title)
         if step == 0:
             selected_provider = _setup_select(
                 "Select Provider:",
@@ -1679,7 +1697,7 @@ def _disable_startup_impl() -> None:
 
 
 def _manage_daemon_launch() -> None:
-    _print_screen_heading("Daemon launch")
+    _reset_setup_screen("Daemon launch")
     startup_enabled = _is_startup_enabled()
 
     if startup_enabled:
@@ -1688,7 +1706,7 @@ def _manage_daemon_launch() -> None:
             "Choose one:",
             choices=[
                 "keep as is (recommended)",
-                "remove from startup (not recommended)",
+                "remove from startup",
             ],
         )
         if _is_back(action) or not action:
@@ -1704,7 +1722,7 @@ def _manage_daemon_launch() -> None:
         "Choose one:",
         choices=[
             "launch at startup (recommended)",
-            "keep as is (not recommended)",
+            "keep as is",
         ],
     )
     if _is_back(action) or not action:
@@ -1719,7 +1737,7 @@ def _configure_llm_budget(existing_config: dict):
     config = normalize_config_payload(existing_config)
     current = _get_llm_calls_per_line(config)
     unlimited = _is_llm_budget_unlimited(config)
-    _print_screen_heading("Customize LLM budget")
+    _reset_setup_screen("Customize LLM budget")
     console.print("Budget range: 0-99 calls per command line")
     console.print("0 = no LLM calls")
     console.print("Use 'No budget limit' for unlimited calls")
@@ -1790,7 +1808,7 @@ def _command_store_request(method: str, path: str, payload: dict | None = None) 
     return data
 
 def _manage_command_store_add():
-    _print_screen_heading("Add commands")
+    _reset_setup_screen("Add commands")
     raw = _setup_text(
         "Add commands (comma-separated; spaces are ok):"
     )
@@ -2014,19 +2032,25 @@ def _checkbox_without_invert(
                 ic.pointed_at = idx
                 return
 
+    application_kwargs = utils.used_kwargs({}, Application.__init__)
+    prompt_output = create_output()
+    if hasattr(prompt_output, "enable_cpr"):
+        prompt_output.enable_cpr = False
+    application_kwargs["output"] = prompt_output
+
     return Question(
         Application(
             layout=layout,
             key_bindings=bindings,
             style=merged_style,
-            **utils.used_kwargs({}, Application.__init__),
+            **application_kwargs,
         )
     )
 
 def _manage_command_store_remove():
     _require_questionary()
-    _print_screen_heading("Remove commands")
     while True:
+        _reset_setup_screen("Remove commands")
         payload = _command_store_request("GET", "/command_store/list?include_all=true")
         if not payload:
             return
@@ -2152,8 +2176,8 @@ def _manage_command_store():
     if not _ensure_command_store_backend_ready():
         return
 
-    _print_screen_heading("Manage command store")
     while True:
+        _reset_setup_screen("Manage command store")
         action = _setup_select(
             "Manage command store:",
             choices=[
@@ -2398,10 +2422,8 @@ def setup():
     ensure_config_dir()
     _clear_uninstall_sentinel()
     _rotate_auth_token_or_exit("setup")
-    console.print(
-        Panel.fit("[bold cyan]Agensic Configuration[/bold cyan] [bold #ff8c00](Esc = back)[/bold #ff8c00]")
-    )
     while True:
+        _reset_setup_screen()
         existing_config = _load_config()
         action = _setup_select(
             "Choose one:",
@@ -2501,13 +2523,13 @@ def _run_first_install_onboarding() -> bool:
     ensure_config_dir()
     _clear_uninstall_sentinel()
     _rotate_auth_token_or_exit("setup")
-    console.print(
-        Panel.fit("[bold cyan]Agensic Setup[/bold cyan] [bold #ff8c00](Esc = back)[/bold #ff8c00]")
-    )
-
     while True:
         existing_config = _load_config()
-        completed = _configure_provider(existing_config, manage_runtime=False)
+        completed = _configure_provider(
+            existing_config,
+            manage_runtime=False,
+            banner_title="Agensic Setup",
+        )
         if not completed:
             return False
 
