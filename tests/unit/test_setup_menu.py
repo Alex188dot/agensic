@@ -26,6 +26,85 @@ class SetupMenuTests(unittest.TestCase):
 
         self.assertEqual(captured_choices[0], ["Agensic Sessions", "Agensic Autocomplete"])
 
+    def test_autocomplete_submenu_shows_turn_off_when_enabled(self):
+        captured_choices: list[list[str]] = []
+
+        def _fake_select(message: str, choices: list[str], **kwargs):  # noqa: ARG001
+            captured_choices.append(list(choices))
+            return cli_app.BACK_SIGNAL
+
+        with patch.object(cli_app, "_load_config", return_value={"autocomplete_enabled": True}), patch.object(
+            cli_app, "_setup_select", side_effect=_fake_select
+        ):
+            cli_app._autocomplete_setup_menu()
+
+        self.assertEqual(captured_choices[0][-1], "Turn Off Autocomplete")
+
+    def test_autocomplete_submenu_shows_turn_on_when_disabled(self):
+        captured_choices: list[list[str]] = []
+
+        def _fake_select(message: str, choices: list[str], **kwargs):  # noqa: ARG001
+            captured_choices.append(list(choices))
+            return cli_app.BACK_SIGNAL
+
+        with patch.object(cli_app, "_load_config", return_value={"autocomplete_enabled": False}), patch.object(
+            cli_app, "_setup_select", side_effect=_fake_select
+        ):
+            cli_app._autocomplete_setup_menu()
+
+        self.assertEqual(captured_choices[0][-1], "Turn On Autocomplete")
+
+    def test_autocomplete_toggle_only_flips_enabled_flag(self):
+        saved = {}
+        existing = {
+            "autocomplete_enabled": True,
+            "provider": "openai",
+            "model": "gpt-5-mini",
+            "llm_calls_per_line": 7,
+            "disabled_command_patterns": ["docker"],
+        }
+
+        with patch.object(cli_app, "_load_config", return_value=existing), patch.object(
+            cli_app, "_setup_select", side_effect=["Turn Off Autocomplete", cli_app.BACK_SIGNAL]
+        ), patch.object(
+            cli_app, "_setup_confirm", return_value=True
+        ), patch.object(cli_app, "_save_config", side_effect=lambda config: saved.update(config)), patch.object(
+            cli_app.console, "print"
+        ):
+            cli_app._autocomplete_setup_menu()
+
+        self.assertFalse(saved["autocomplete_enabled"])
+        self.assertEqual(saved["provider"], "openai")
+        self.assertEqual(saved["model"], "gpt-5-mini")
+        self.assertEqual(saved["llm_calls_per_line"], 7)
+        self.assertEqual(saved["disabled_command_patterns"], ["docker"])
+
+    def test_autocomplete_toggle_cancel_keeps_enabled_flag(self):
+        existing = {"autocomplete_enabled": True}
+
+        with patch.object(cli_app, "_load_config", return_value=existing), patch.object(
+            cli_app, "_setup_select", side_effect=["Turn Off Autocomplete", cli_app.BACK_SIGNAL]
+        ), patch.object(
+            cli_app, "_setup_confirm", return_value=False
+        ), patch.object(cli_app, "_save_config") as save_config, patch.object(
+            cli_app.console, "print"
+        ):
+            cli_app._autocomplete_setup_menu()
+
+        save_config.assert_not_called()
+
+    def test_confirm_disable_autocomplete_uses_red_warning_and_default_no(self):
+        with patch.object(cli_app, "_setup_confirm", return_value=True) as confirm_mock, patch.object(
+            cli_app.console, "print"
+        ) as print_mock:
+            confirmed = cli_app._confirm_disable_autocomplete()
+
+        self.assertTrue(confirmed)
+        confirm_mock.assert_called_once_with("Continue?", default=False)
+        printed = [str(args[0]) for args, _ in print_mock.call_args_list]
+        self.assertTrue(any("[red]Turn off Agensic autocomplete?[/red]" in line for line in printed))
+        self.assertTrue(any("This disables inline suggestions" in line for line in printed))
+
     def test_setup_routes_sessions_choice_to_sessions_menu(self):
         with patch.object(cli_app, "ensure_config_dir"), patch.object(
             cli_app, "_clear_uninstall_sentinel"

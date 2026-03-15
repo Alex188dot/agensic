@@ -65,7 +65,9 @@ class CommandStoreUiTests(unittest.TestCase):
         self.assertFalse(captured["output"].enable_cpr)
 
     def test_manage_command_store_redraws_clean_screen_after_action(self):
-        with patch.object(cli_app, "_ensure_command_store_backend_ready", return_value=True), patch.object(
+        with patch.object(cli_app, "_load_config", return_value={"autocomplete_enabled": True}), patch.object(
+            cli_app, "_ensure_command_store_backend_ready", return_value=True
+        ), patch.object(
             cli_app, "_setup_select", side_effect=["Remove commands", cli_app.BACK_SIGNAL]
         ), patch.object(cli_app, "_manage_command_store_remove"), patch.object(
             cli_app.console, "print"
@@ -73,6 +75,15 @@ class CommandStoreUiTests(unittest.TestCase):
             cli_app._manage_command_store()
 
         self.assertEqual(clear_mock.call_count, 2)
+
+    def test_manage_command_store_blocks_when_autocomplete_is_off(self):
+        with patch.object(cli_app, "_load_config", return_value={"autocomplete_enabled": False}), patch.object(
+            cli_app, "_ensure_command_store_backend_ready"
+        ) as backend_ready, patch.object(cli_app.console, "print") as print_mock:
+            cli_app._manage_command_store()
+
+        backend_ready.assert_not_called()
+        self.assertTrue(any("Autocomplete is turned off" in str(args[0]) for args, _ in print_mock.call_args_list))
 
 
 if __name__ == "__main__":

@@ -12,6 +12,7 @@ typeset -g AGENSIC_SUGGESTION_INDEX=1
 typeset -g AGENSIC_STATUS_PREFIX="__AGENSIC_STATUS__:"
 typeset -g AGENSIC_MAX_LLM_CALLS_PER_LINE=4
 typeset -g AGENSIC_LLM_BUDGET_UNLIMITED=0
+typeset -g AGENSIC_AUTOCOMPLETE_ENABLED=1
 typeset -g AGENSIC_LLM_BUDGET_REACHED_HINT="LLM budget reached for this command line"
 typeset -g AGENSIC_LINE_LLM_CALLS_USED=0
 typeset -g AGENSIC_LINE_HAS_SPACE=0
@@ -338,6 +339,7 @@ _agensic_reload_disabled_patterns_if_needed() {
     AGENSIC_DISABLED_PATTERNS=()
     AGENSIC_MAX_LLM_CALLS_PER_LINE=4
     AGENSIC_LLM_BUDGET_UNLIMITED=0
+    AGENSIC_AUTOCOMPLETE_ENABLED=1
 
     if [[ -z "$current_mtime" ]]; then
         return
@@ -387,9 +389,11 @@ if parsed_budget < 0 or parsed_budget > 99:
     parsed_budget = 4
 budget = parsed_budget
 unlimited = bool(payload.get('llm_budget_unlimited', False))
+autocomplete_enabled = bool(payload.get('autocomplete_enabled', True))
 
 print(str(budget))
 print('1' if unlimited else '0')
+print('1' if autocomplete_enabled else '0')
 print('\x1f'.join(patterns))
 " 2>/dev/null)
 
@@ -402,11 +406,19 @@ print('\x1f'.join(patterns))
         if [[ "${response_lines[2]}" == "1" ]]; then
             AGENSIC_LLM_BUDGET_UNLIMITED=1
         fi
-        local patterns_line="${response_lines[3]}"
+        if [[ "${response_lines[3]}" == "0" ]]; then
+            AGENSIC_AUTOCOMPLETE_ENABLED=0
+        fi
+        local patterns_line="${response_lines[4]}"
         if [[ -n "$patterns_line" ]]; then
             AGENSIC_DISABLED_PATTERNS=("${(ps:$sep:)patterns_line}")
         fi
     fi
+}
+
+_agensic_autocomplete_is_disabled() {
+    _agensic_reload_disabled_patterns_if_needed
+    [[ "${AGENSIC_AUTOCOMPLETE_ENABLED:-1}" != "1" ]]
 }
 
 _agensic_matches_disabled_pattern() {
@@ -615,6 +627,14 @@ _agensic_log_fetch_error() {
 
 _agensic_fetch_suggestions() {
     if _agensic_session_is_disabled; then
+        AGENSIC_SUGGESTIONS=()
+        AGENSIC_DISPLAY_TEXTS=()
+        AGENSIC_ACCEPT_MODES=()
+        AGENSIC_SUGGESTION_KINDS=()
+        AGENSIC_SUGGESTION_INDEX=1
+        return
+    fi
+    if _agensic_autocomplete_is_disabled; then
         AGENSIC_SUGGESTIONS=()
         AGENSIC_DISPLAY_TEXTS=()
         AGENSIC_ACCEPT_MODES=()
@@ -1016,6 +1036,12 @@ _agensic_resolve_intent_command() {
         zle -R
         return 1
     fi
+    if _agensic_autocomplete_is_disabled; then
+        _agensic_print_intent_refusal "$body" "Autocomplete is turned off. Turn it on in 'agensic setup' to use '#' intent mode."
+        _agensic_reset_intent_state
+        zle -R
+        return 1
+    fi
 
     if [[ "$AGENSIC_LAST_NL_KIND" == "intent" && "$AGENSIC_LAST_NL_INPUT" == "$raw" && -n "$AGENSIC_LAST_NL_COMMAND" ]]; then
         BUFFER="$AGENSIC_LAST_NL_COMMAND"
@@ -1112,6 +1138,12 @@ _agensic_resolve_general_assist() {
         _agensic_set_status_message "Add a question after '##'."
         _agensic_update_display
         zle -R
+        return 1
+    fi
+    if _agensic_autocomplete_is_disabled; then
+        _agensic_print_assist_reply "Autocomplete is turned off. Turn it on in 'agensic setup' to use '##' assistant mode."
+        BUFFER=""
+        CURSOR=0
         return 1
     fi
 
@@ -1703,6 +1735,9 @@ _agensic_send_feedback() {
     local buffer="$1"
     local accepted="$2"
     local accept_mode="${3:-suffix_append}"
+    if _agensic_autocomplete_is_disabled; then
+        return
+    fi
     if _agensic_matches_disabled_pattern "$buffer" || _agensic_matches_disabled_pattern "$accepted"; then
         return
     fi
@@ -2494,6 +2529,10 @@ _agensic_try_fetch_on_space() {
         _agensic_clear_suggestions
         return
     fi
+    if _agensic_autocomplete_is_disabled; then
+        _agensic_clear_suggestions
+        return
+    fi
     if _agensic_buffer_has_hash; then
         _agensic_clear_suggestions
         return
@@ -2664,6 +2703,12 @@ _agensic_on_timer_trigger() {
         zle -R
         return
     fi
+    if _agensic_autocomplete_is_disabled; then
+        _agensic_clear_suggestions
+        _agensic_update_display
+        zle -R
+        return
+    fi
     # This is called when the 0.15s timer expires
     AGENSIC_TIMER_PID=""
 
@@ -2727,6 +2772,12 @@ _agensic_self_insert() {
     _agensic_mark_manual_line_edit "human_typed"
 
     if _agensic_session_is_disabled; then
+        _agensic_clear_suggestions
+        _agensic_update_display
+        zle -R
+        return
+    fi
+    if _agensic_autocomplete_is_disabled; then
         _agensic_clear_suggestions
         _agensic_update_display
         zle -R
@@ -2997,6 +3048,12 @@ _agensic_up_line_or_history() {
 # --- Manual Trigger (Ctrl+Space) ---
 _agensic_manual_trigger() {
     if [[ ${#BUFFER} -ge 2 ]]; then
+        if _agensic_autocomplete_is_disabled; then
+            _agensic_clear_suggestions
+            _agensic_update_display
+            zle -R
+            return
+        fi
         if _agensic_should_skip_agensic_for_buffer; then
             _agensic_clear_suggestions
             _agensic_update_display

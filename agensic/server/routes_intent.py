@@ -10,6 +10,17 @@ async def resolve_intent(ctx: IntentContext, request: Request) -> IntentResponse
     deps.enter_request_or_503()
     try:
         config = deps.load_config()
+        if not deps.autocomplete_enabled_from_config(config):
+            return {
+                "status": "refusal",
+                "primary_command": "",
+                "explanation": "Autocomplete is turned off. Turn it on in `agensic setup` to use '#' intent mode.",
+                "alternatives": [],
+                "copy_block": "",
+                "ai_agent": "",
+                "ai_provider": "",
+                "ai_model": "",
+            }
         provider = str(config.get("provider", "openai") or "openai").strip().lower()
         if provider == "history_only":
             return {

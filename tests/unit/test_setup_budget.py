@@ -67,6 +67,8 @@ class SetupBudgetTests(unittest.TestCase):
 
         def _fake_select(_message, choices):
             observed_choices.extend(choices)
+            if "Agensic Autocomplete" in choices:
+                return "Agensic Autocomplete"
             return cli_app.BACK_SIGNAL
 
         with patch.object(cli_app, "_rotate_auth_token_or_exit"), patch.object(
@@ -78,7 +80,7 @@ class SetupBudgetTests(unittest.TestCase):
 
     def test_setup_redraws_clean_screen_when_returning_to_main_menu(self):
         with patch.object(cli_app, "_rotate_auth_token_or_exit"), patch.object(
-            cli_app, "_setup_select", side_effect=["Daemon launch", cli_app.BACK_SIGNAL]
+            cli_app, "_setup_select", side_effect=["Agensic Autocomplete", "Daemon launch", cli_app.BACK_SIGNAL]
         ), patch.object(cli_app, "_manage_daemon_launch"), patch.object(
             cli_app.console, "print"
         ), patch.object(cli_app.console, "clear") as clear_mock:

@@ -1362,6 +1362,30 @@ def _with_disabled_patterns(config: dict, patterns: list[str]) -> dict:
     return updated
 
 
+def _is_autocomplete_enabled(config: dict) -> bool:
+    normalized = normalize_config_payload(config)
+    return bool(normalized["autocomplete_enabled"])
+
+
+def _with_autocomplete_enabled(config: dict, enabled: bool) -> dict:
+    updated = normalize_config_payload(config)
+    updated["autocomplete_enabled"] = bool(enabled)
+    return updated
+
+
+def _autocomplete_toggle_label(config: dict) -> str:
+    return "Turn Off Autocomplete" if _is_autocomplete_enabled(config) else "Turn On Autocomplete"
+
+
+def _confirm_disable_autocomplete() -> bool:
+    console.print("[red]Turn off Agensic autocomplete?[/red]")
+    console.print(
+        "[red]This disables inline suggestions, command learning, command store changes, '#' intent mode, and '##' assistant mode.[/red]"
+    )
+    confirmed = _setup_confirm("Continue?", default=False)
+    return bool(confirmed) and not _is_back(confirmed)
+
+
 def _get_llm_calls_per_line(config: dict) -> int:
     normalized = normalize_config_payload(config)
     return int(normalized["llm_calls_per_line"])
@@ -2273,6 +2297,11 @@ def _manage_command_store_resync():
     )
 
 def _manage_command_store():
+    config = _load_config()
+    if not _is_autocomplete_enabled(config):
+        _reset_setup_screen("Manage command store")
+        console.print("[yellow]Autocomplete is turned off. Turn it back on in setup to manage the command store.[/yellow]")
+        return
     if not _ensure_command_store_backend_ready():
         return
 
@@ -2570,6 +2599,7 @@ def _autocomplete_setup_menu() -> None:
     while True:
         _reset_setup_screen(section_title="Agensic Autocomplete")
         existing_config = _load_config()
+        toggle_label = _autocomplete_toggle_label(existing_config)
         action = _setup_select(
             "Choose one:",
             choices=[
@@ -2578,10 +2608,19 @@ def _autocomplete_setup_menu() -> None:
                 "Customize LLM budget",
                 "Manage Agensic command patterns",
                 "Add/Remove commands from store",
+                toggle_label,
             ],
         )
         if _is_back(action) or not action:
             return
+        if action == toggle_label:
+            enabled = _is_autocomplete_enabled(existing_config)
+            if enabled and not _confirm_disable_autocomplete():
+                console.print("[yellow]Autocomplete setting unchanged.[/yellow]")
+                continue
+            _save_config(_with_autocomplete_enabled(existing_config, not enabled))
+            console.print(f"[green]✓ Autocomplete turned {'off' if enabled else 'on'}.[/green]")
+            continue
         if action == "Choose AI provider":
             completed = _configure_provider(existing_config)
             if completed:

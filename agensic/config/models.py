@@ -3,6 +3,7 @@ from dataclasses import dataclass, field
 
 @dataclass
 class AgensicConfig:
+    autocomplete_enabled: bool = True
     provider: str = "openai"
     model: str = "gpt-5-mini"
     api_key: str = ""

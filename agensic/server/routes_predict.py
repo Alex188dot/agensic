@@ -21,6 +21,17 @@ async def predict_completion(ctx: Context, request: Request) -> PredictResponse:
             }
 
         config = deps.load_config()
+        if not deps.autocomplete_enabled_from_config(config):
+            return {
+                "suggestions": ["", "", ""],
+                "pool": [],
+                "pool_meta": [],
+                "bootstrap": deps.engine.get_bootstrap_status(),
+                "used_ai": False,
+                "ai_agent": "",
+                "ai_provider": "",
+                "ai_model": "",
+            }
         provider = str(config.get("provider", "openai") or "openai").strip().lower()
         effective_allow_ai = bool(ctx.allow_ai and provider != "history_only")
         if effective_allow_ai:

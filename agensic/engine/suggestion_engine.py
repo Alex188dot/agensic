@@ -1157,6 +1157,11 @@ class SuggestionEngine:
                 pool.append("")
             return pool
 
+        if not bool(config.get("autocomplete_enabled", True)):
+            suggestions = ["", "", ""]
+            pool = _pad_pool(suggestions, size=20)
+            return (suggestions, pool, [], False)
+
         provider = str(config.get("provider", "openai") or "openai").strip().lower()
         if provider == "history_only":
             allow_ai = False
@@ -1574,6 +1579,13 @@ class SuggestionEngine:
     ):
         if not buffer:
             return
+        try:
+            cfg = load_config_file()
+        except Exception:
+            cfg = {}
+        if not bool(cfg.get("autocomplete_enabled", True)):
+            logger.debug("Skipping feedback recording because autocomplete is disabled")
+            return
         mode = (accept_mode or "suffix_append").strip().lower()
         try:
             vector_db = self._ensure_vector_db()
@@ -1687,6 +1699,9 @@ class SuggestionEngine:
             cfg = load_config_file()
         except Exception:
             cfg = {}
+        if not bool(cfg.get("autocomplete_enabled", True)):
+            logger.debug("Skipping command ingestion into suggestion store because autocomplete is disabled")
+            return
         include_ai_executed = bool(cfg.get("include_ai_executed_in_suggestions", False))
         if normalized_source == "runtime" and exit_code != 0:
             logger.debug("Skipping runtime command ingestion into suggestion store after provenance persistence")

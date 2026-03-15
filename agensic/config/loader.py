@@ -45,6 +45,8 @@ def normalize_config_payload(payload: dict | None) -> dict:
     ):
         config.pop(key, None)
 
+    config["autocomplete_enabled"] = bool(config.get("autocomplete_enabled", True))
+
     budget = _parse_int(
         config.get("llm_calls_per_line", DEFAULT_LLM_CALLS_PER_LINE),
         DEFAULT_LLM_CALLS_PER_LINE,

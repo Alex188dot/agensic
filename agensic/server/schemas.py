@@ -103,6 +103,7 @@ class AssistResponse(BaseModel):
 
 class GenericStatusResponse(BaseModel):
     status: str
+    reason: str | None = None
 
 
 class RepairExportResponse(BaseModel):
@@ -199,6 +200,7 @@ class CommandStoreListResponse(BaseModel):
 
 class CommandStoreAddResponse(BaseModel):
     status: str
+    reason: str | None = None
     requested: int = 0
     normalized: int = 0
     inserted: int = 0
@@ -208,6 +210,7 @@ class CommandStoreAddResponse(BaseModel):
 
 class CommandStoreRemoveResponse(BaseModel):
     status: str
+    reason: str | None = None
     history_file: str
     history_removed_lines: int = 0
     warnings: list[str] = Field(default_factory=list)
@@ -219,6 +222,7 @@ class CommandStoreRemoveResponse(BaseModel):
 
 class CommandStoreResyncResponse(BaseModel):
     status: str
+    reason: str | None = None
     history_file: str
     parsed_entries: int = 0
     unique_commands: int = 0

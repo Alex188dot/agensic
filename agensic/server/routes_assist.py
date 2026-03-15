@@ -10,6 +10,10 @@ async def resolve_assist(ctx: AssistContext, request: Request) -> AssistResponse
     deps.enter_request_or_503()
     try:
         config = deps.load_config()
+        if not deps.autocomplete_enabled_from_config(config):
+            return {
+                "answer": "Autocomplete is turned off. Turn it on in `agensic setup` to use '##' assistant mode."
+            }
         provider = str(config.get("provider", "openai") or "openai").strip().lower()
         if provider == "history_only":
             return {
@@ -44,6 +48,9 @@ async def resolve_assist(ctx: AssistContext, request: Request) -> AssistResponse
 def log_feedback(fb: Feedback, background_tasks: BackgroundTasks) -> GenericStatusResponse:
     deps.enter_request_or_503()
     try:
+        config = deps.load_config()
+        if not deps.autocomplete_enabled_from_config(config):
+            return {"status": "ignored", "reason": "autocomplete_disabled"}
         background_tasks.add_task(
             deps.run_background_task,
             deps.engine.log_feedback,

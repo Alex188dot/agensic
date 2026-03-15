@@ -1,3 +1,4 @@
+import json
 import os
 import subprocess
 import sys
@@ -14,7 +15,7 @@ PYTHON_BIN = Path(sys.executable)
 
 
 class AgensicSessionShellTests(unittest.TestCase):
-    def _run_zsh(self, body: str) -> subprocess.CompletedProcess:
+    def _run_zsh(self, body: str, config: dict | None = None) -> subprocess.CompletedProcess:
         script = textwrap.dedent(
             f"""
             source {AGENSIC_ZSH}
@@ -22,6 +23,13 @@ class AgensicSessionShellTests(unittest.TestCase):
             """
         )
         with tempfile.TemporaryDirectory() as temp_home:
+            if config is not None:
+                config_dir = Path(temp_home) / ".config" / "agensic"
+                config_dir.mkdir(parents=True, exist_ok=True)
+                (config_dir / "config.json").write_text(
+                    json.dumps(config),
+                    encoding="utf-8",
+                )
             env = dict(os.environ)
             env["HOME"] = temp_home
             env["AGENSIC_RUNTIME_PYTHON"] = str(PYTHON_BIN)
@@ -75,7 +83,7 @@ class AgensicSessionShellTests(unittest.TestCase):
         )
         self.assertEqual(result.returncode, 0, msg=result.stderr)
         self.assertIn("code=2", result.stdout)
-        self.assertIn("ai-session is no longer supported", result.stderr)
+        self.assertIn("Use `agensic run <agent>` for observed agent sessions.", result.stderr)
 
     def test_session_signer_no_longer_arms_ai_proof(self):
         result = self._run_zsh(
@@ -356,6 +364,35 @@ class AgensicSessionShellTests(unittest.TestCase):
         self.assertIn("skip_shred=0", lines)
         self.assertIn("skip_passwd=0", lines)
         self.assertIn("skip_echo=1", lines)
+
+    def test_autocomplete_disabled_skips_inline_fetch_but_keeps_runtime_logging_state(self):
+        result = self._run_zsh(
+            """
+            BUFFER="echo hello"
+            AGENSIC_LAST_EXECUTED_CMD="echo keep-provenance"
+            _agensic_fetch_suggestions 1 "manual_ctrl_space"
+            print -r -- "suggestions=${#AGENSIC_SUGGESTIONS[@]}"
+            print -r -- "last_cmd=${AGENSIC_LAST_EXECUTED_CMD:-}"
+            """,
+            config={"autocomplete_enabled": False},
+        )
+        self.assertEqual(result.returncode, 0, msg=result.stderr)
+        lines = [line.strip() for line in result.stdout.splitlines() if line.strip()]
+        self.assertIn("suggestions=0", lines)
+        self.assertIn("last_cmd=echo keep-provenance", lines)
+
+    def test_autocomplete_disabled_blocks_hash_modes_locally(self):
+        result = self._run_zsh(
+            """
+            BUFFER="# show git status"
+            _agensic_resolve_intent_command "$BUFFER" || true
+            BUFFER="## explain ls"
+            _agensic_resolve_general_assist "$BUFFER" || true
+            """,
+            config={"autocomplete_enabled": False},
+        )
+        self.assertEqual(result.returncode, 0, msg=result.stderr)
+        self.assertIn("Autocomplete is turned off", result.stdout)
 
 
 if __name__ == "__main__":

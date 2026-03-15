@@ -148,6 +148,9 @@ def command_store_list(shell: str = "", include_all: bool = False) -> CommandSto
 def command_store_add(data: CommandStorePayload) -> CommandStoreAddResponse:
     deps.enter_request_or_503()
     try:
+        config = deps.load_config()
+        if not deps.autocomplete_enabled_from_config(config):
+            return {"status": "ignored", "reason": "autocomplete_disabled"}
         vector_db = deps.engine._ensure_vector_db()
         result = vector_db.add_manual_commands(data.commands or [])
         return {
@@ -166,6 +169,14 @@ def command_store_add(data: CommandStorePayload) -> CommandStoreAddResponse:
 def command_store_remove(data: CommandStoreRemovePayload) -> CommandStoreRemoveResponse:
     deps.enter_request_or_503()
     try:
+        config = deps.load_config()
+        if not deps.autocomplete_enabled_from_config(config):
+            target_shell = (data.shell or os.environ.get("SHELL", "zsh")).strip()
+            return {
+                "status": "ignored",
+                "reason": "autocomplete_disabled",
+                "history_file": deps.get_history_file(target_shell),
+            }
         target_shell = (data.shell or os.environ.get("SHELL", "zsh")).strip()
         history_file = deps.get_history_file(target_shell)
         vector_db = deps.engine._ensure_vector_db()
@@ -204,8 +215,15 @@ def command_store_remove(data: CommandStoreRemovePayload) -> CommandStoreRemoveR
 def command_store_resync_history(data: CommandStoreHistoryPayload) -> CommandStoreResyncResponse:
     deps.enter_request_or_503()
     try:
+        config = deps.load_config()
         target_shell = (data.shell or os.environ.get("SHELL", "zsh")).strip()
         history_file = deps.get_history_file(target_shell)
+        if not deps.autocomplete_enabled_from_config(config):
+            return {
+                "status": "ignored",
+                "reason": "autocomplete_disabled",
+                "history_file": history_file,
+            }
         vector_db = deps.engine._ensure_vector_db()
         result = vector_db.resync_history(history_file)
         return {

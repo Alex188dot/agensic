@@ -136,6 +136,35 @@ class SuggestionIngestionFilterTests(unittest.TestCase):
         self.assertEqual(kwargs.get("exit_code"), 9)
         self.assertNotIn("captured_stderr_tail", kwargs.get("payload", {}))
 
+    def test_autocomplete_disabled_persists_provenance_but_skips_ingestion(self):
+        engine, vector_db = self._build_engine()
+        with patch(
+            "agensic.engine.suggestion_engine.classify_command_run",
+            return_value=_classification("HUMAN_TYPED"),
+        ), patch(
+            "agensic.engine.suggestion_engine.load_config_file",
+            return_value={"autocomplete_enabled": False},
+        ):
+            engine.log_executed_command(
+                "echo hello",
+                exit_code=0,
+                source="runtime",
+                provenance_payload={},
+            )
+
+        vector_db.insert_command.assert_not_called()
+        engine.state_store.record_command_provenance.assert_called_once()
+
+    def test_autocomplete_disabled_skips_feedback_learning(self):
+        engine, vector_db = self._build_engine()
+        with patch(
+            "agensic.engine.suggestion_engine.load_config_file",
+            return_value={"autocomplete_enabled": False},
+        ):
+            engine.log_feedback("git", " status")
+
+        vector_db.record_feedback.assert_not_called()
+
 
 if __name__ == "__main__":
     unittest.main()

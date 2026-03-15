@@ -189,6 +189,36 @@ class ServerContractTests(unittest.TestCase):
             self.assertEqual(observed_allow_ai, [False])
             self.assertFalse(rate_limit.called)
 
+    def test_predict_autocomplete_disabled_returns_empty_without_engine_call(self):
+        with patch.object(deps, "load_config", return_value={"autocomplete_enabled": False}), patch.object(
+            deps.engine,
+            "get_suggestions",
+        ) as get_suggestions, patch.object(
+            deps,
+            "check_and_track_llm_rate_limit",
+        ) as rate_limit, patch.object(
+            deps.engine,
+            "get_bootstrap_status",
+            return_value={"ready": True, "phase": "ready"},
+        ):
+            response = self.client.post(
+                "/predict",
+                json={
+                    "command_buffer": "git",
+                    "cursor_position": 3,
+                    "working_directory": "/tmp",
+                    "shell": "zsh",
+                    "allow_ai": True,
+                },
+            )
+            self.assertEqual(response.status_code, 200)
+            body = response.json()
+            self.assertEqual(body.get("suggestions"), ["", "", ""])
+            self.assertEqual(body.get("pool"), [])
+            self.assertEqual(body.get("pool_meta"), [])
+            self.assertFalse(get_suggestions.called)
+            self.assertFalse(rate_limit.called)
+
     def test_intent_and_assist_contracts(self):
         async def _fake_intent(config, req_context, text):
             return {
@@ -338,6 +368,51 @@ class ServerContractTests(unittest.TestCase):
             self.assertFalse(rate_limit.called)
             self.assertFalse(assist_llm.called)
 
+    def test_intent_autocomplete_disabled_returns_refusal_without_llm(self):
+        with patch.object(deps, "load_config", return_value={"autocomplete_enabled": False}), patch.object(
+            deps,
+            "check_and_track_llm_rate_limit",
+        ) as rate_limit, patch.object(
+            deps.engine,
+            "get_intent_command",
+        ) as intent_llm:
+            response = self.client.post(
+                "/intent",
+                json={
+                    "intent_text": "list files",
+                    "working_directory": "/tmp",
+                    "shell": "zsh",
+                },
+            )
+            self.assertEqual(response.status_code, 200)
+            body = response.json()
+            self.assertEqual(body.get("status"), "refusal")
+            self.assertIn("Autocomplete is turned off", body.get("explanation", ""))
+            self.assertFalse(rate_limit.called)
+            self.assertFalse(intent_llm.called)
+
+    def test_assist_autocomplete_disabled_returns_message_without_llm(self):
+        with patch.object(deps, "load_config", return_value={"autocomplete_enabled": False}), patch.object(
+            deps,
+            "check_and_track_llm_rate_limit",
+        ) as rate_limit, patch.object(
+            deps.engine,
+            "get_general_assistant_reply",
+        ) as assist_llm:
+            response = self.client.post(
+                "/assist",
+                json={
+                    "prompt_text": "hi",
+                    "working_directory": "/tmp",
+                    "shell": "zsh",
+                },
+            )
+            self.assertEqual(response.status_code, 200)
+            body = response.json()
+            self.assertIn("Autocomplete is turned off", body.get("answer", ""))
+            self.assertFalse(rate_limit.called)
+            self.assertFalse(assist_llm.called)
+
     def test_assist_rate_limit_response(self):
         with patch.object(deps, "load_config", return_value={"provider": "openai"}), patch.object(
             deps,
@@ -390,6 +465,49 @@ class ServerContractTests(unittest.TestCase):
             )
             self.assertEqual(resync_response.status_code, 200)
             self.assertEqual(resync_response.json()["status"], "ok")
+
+    def test_feedback_and_command_store_mutations_ignore_when_autocomplete_disabled(self):
+        with patch.object(deps, "load_config", return_value={"autocomplete_enabled": False}), patch.object(
+            deps.engine,
+            "log_feedback",
+        ) as log_feedback, patch.object(
+            deps.engine,
+            "_ensure_vector_db",
+        ) as ensure_db:
+            feedback = self.client.post(
+                "/feedback",
+                json={
+                    "command_buffer": "git",
+                    "accepted_suggestion": " status",
+                    "accept_mode": "suffix_append",
+                    "working_directory": "/tmp",
+                },
+            )
+            self.assertEqual(feedback.status_code, 200)
+            self.assertEqual(feedback.json(), {"status": "ignored", "reason": "autocomplete_disabled"})
+            self.assertFalse(log_feedback.called)
+
+            add = self.client.post("/command_store/add", json={"commands": ["git status"]})
+            self.assertEqual(add.status_code, 200)
+            self.assertEqual(add.json().get("status"), "ignored")
+            self.assertEqual(add.json().get("reason"), "autocomplete_disabled")
+
+            remove = self.client.post(
+                "/command_store/remove",
+                json={"commands": ["git status"], "shell": "zsh"},
+            )
+            self.assertEqual(remove.status_code, 200)
+            self.assertEqual(remove.json().get("status"), "ignored")
+            self.assertEqual(remove.json().get("reason"), "autocomplete_disabled")
+
+            resync = self.client.post(
+                "/command_store/resync_history",
+                json={"shell": "zsh"},
+            )
+            self.assertEqual(resync.status_code, 200)
+            self.assertEqual(resync.json().get("status"), "ignored")
+            self.assertEqual(resync.json().get("reason"), "autocomplete_disabled")
+            self.assertFalse(ensure_db.called)
 
     def test_log_command_accepts_working_directory(self):
         with patch.object(deps.engine, "log_executed_command") as log_exec:

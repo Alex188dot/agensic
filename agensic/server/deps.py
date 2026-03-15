@@ -235,6 +235,10 @@ def disabled_patterns_from_config(config: dict) -> list[str]:
     return sanitize_patterns(values)
 
 
+def autocomplete_enabled_from_config(config: dict) -> bool:
+    return bool(config.get("autocomplete_enabled", True))
+
+
 def command_matches_disabled_pattern(command: str, patterns: list[str]) -> bool:
     return command_matches_pattern(command, patterns)
 
