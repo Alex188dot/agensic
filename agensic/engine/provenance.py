@@ -309,6 +309,10 @@ def build_local_proof_metadata(
 
 def get_agent_registry(force_reload: bool = False) -> AgentRegistry:
     global _REGISTRY
+    current_override_path = str(APP_PATHS.agent_registry_local_override_path or "").strip()
+    registry_override_path = str(_REGISTRY.summary().get("local_override_path", "") or "").strip()
+    if current_override_path and current_override_path != registry_override_path:
+        _REGISTRY = AgentRegistry(local_override_path=current_override_path)
     if force_reload:
         _REGISTRY.reload()
     return _REGISTRY

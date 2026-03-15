@@ -457,13 +457,11 @@ def _setup_select(message: str, choices: list[str], **kwargs) -> Any:
     return _attach_escape_back(question).ask()
 
 
-def _setup_text(message: str, default: str = "", show_back_instruction: bool = False, **kwargs) -> Any:
+def _setup_text(message: str, default: str = "", **kwargs) -> Any:
     _require_questionary()
-    instruction = "Esc = back" if show_back_instruction else None
     question = questionary.text(
         message,
         default=default,
-        instruction=instruction,
         style=_setup_style(),
         **kwargs,
     )
@@ -2467,12 +2465,13 @@ def _wait_for_bootstrap_ready(started_pid: int | None = None) -> tuple[bool, int
             time.sleep(0.25)
 
 @app.command()
-def setup():
-    ensure_config_dir()
-    _clear_uninstall_sentinel()
-    _rotate_auth_token_or_exit("setup")
+def _setup_pause(message: str = "Press Enter to continue") -> Any:
+    return _setup_text(message, default="")
+
+
+def _autocomplete_setup_menu() -> None:
     while True:
-        _reset_setup_screen()
+        _reset_setup_screen(section_title="Agensic Autocomplete")
         existing_config = _load_config()
         action = _setup_select(
             "Choose one:",
@@ -2501,6 +2500,170 @@ def setup():
             _manage_pattern_controls(existing_config)
             continue
         _manage_command_store()
+
+
+def _setup_session_choice_label(session: dict[str, Any]) -> str:
+    from . import track as track_runtime
+
+    session_name = str(session.get("session_name", "") or "").strip() or "-"
+    session_id = str(session.get("session_id", "") or "").strip() or "-"
+    agent = str(session.get("agent_name", "") or session.get("agent", "") or "").strip() or "-"
+    started_at = str(track_runtime._format_ts(int(session.get("started_at", 0) or 0)))
+    return f"{session_name} | {session_id} | {agent} | {started_at}"
+
+
+def _select_setup_session(prompt: str) -> dict[str, Any] | None:
+    from . import track as track_runtime
+
+    sessions = track_runtime.list_recent_session_summaries(limit=200)
+    if not sessions:
+        console.print("[yellow]No tracked sessions found.[/yellow]")
+        _setup_pause()
+        return None
+    labels = [_setup_session_choice_label(session) for session in sessions]
+    mapping = {label: session for label, session in zip(labels, sessions)}
+    selected = _setup_select(prompt, choices=labels)
+    if _is_back(selected) or not selected:
+        return None
+    return mapping.get(str(selected))
+
+
+def _setup_add_custom_agent() -> None:
+    from . import track as track_runtime
+
+    _reset_setup_screen(section_title="Add custom Agent")
+    raw_value = _setup_text("Enter the agent CLI token, for example: claude")
+    if _is_back(raw_value) or raw_value is None:
+        return
+    try:
+        created = track_runtime.add_custom_agent(str(raw_value))
+    except ValueError as exc:
+        console.print(f"[red]{exc}[/red]")
+    else:
+        console.print(
+            f"[green]Agent '{created['agent_id']}' added.[/green] Tracked launch command: [bold]{created['command']}[/bold]"
+        )
+    _setup_pause()
+
+
+def _setup_remove_custom_agent() -> None:
+    from . import track as track_runtime
+
+    _reset_setup_screen(section_title="Remove custom Agent")
+    agents = track_runtime.list_custom_agents()
+    if not agents:
+        console.print("[yellow]No custom agents found.[/yellow]")
+        _setup_pause()
+        return
+    labels = [
+        f"{agent['agent_id']} | {agent['display_name']}"
+        for agent in agents
+    ]
+    mapping = {label: agent for label, agent in zip(labels, agents)}
+    selected = _setup_select("Choose a custom agent to remove:", choices=labels)
+    if _is_back(selected) or not selected:
+        return
+    agent = mapping.get(str(selected))
+    if agent is None:
+        return
+    confirmed = _setup_confirm(f"Remove custom agent {agent['agent_id']}?")
+    if _is_back(confirmed) or not confirmed:
+        return
+    try:
+        removed = track_runtime.remove_custom_agent(agent["agent_id"])
+    except ValueError as exc:
+        console.print(f"[red]{exc}[/red]")
+    else:
+        console.print(f"[green]Removed custom agent '{removed['agent_id']}'.[/green]")
+    _setup_pause()
+
+
+def _setup_rename_session() -> None:
+    from . import track as track_runtime
+
+    _reset_setup_screen(section_title="Rename session")
+    session = _select_setup_session("Choose a session to rename:")
+    if session is None:
+        return
+    current_name = str(session.get("session_name", "") or "").strip()
+    new_name = _setup_text("Enter the session name", default=current_name)
+    if _is_back(new_name) or new_name is None:
+        return
+    updated = track_runtime.rename_track_session(str(session.get("session_id", "") or ""), str(new_name))
+    if updated is None:
+        console.print("[red]Session not found.[/red]")
+    else:
+        console.print(
+            f"[green]Session renamed.[/green] session_id={str(updated.get('session_id', '') or '-')}"
+        )
+    _setup_pause()
+
+
+def _setup_remove_session() -> None:
+    from . import track as track_runtime
+
+    _reset_setup_screen(section_title="Remove session")
+    session = _select_setup_session("Choose a session to remove:")
+    if session is None:
+        return
+    session_id = str(session.get("session_id", "") or "").strip()
+    confirmed = _setup_confirm(f"Remove tracked session {session_id}?")
+    if _is_back(confirmed) or not confirmed:
+        return
+    deleted = track_runtime.delete_track_session_artifacts(session_id, state=session)
+    if deleted:
+        console.print(f"[green]Removed tracked session {session_id}.[/green]")
+    else:
+        console.print("[red]Session not found.[/red]")
+    _setup_pause()
+
+
+def _setup_sessions_menu() -> None:
+    while True:
+        _reset_setup_screen(section_title="Agensic Sessions")
+        action = _setup_select(
+            "Choose one:",
+            choices=[
+                "Add custom Agent",
+                "Remove custom Agent",
+                "Rename session",
+                "Remove session",
+            ],
+        )
+        if _is_back(action) or not action:
+            return
+        if action == "Add custom Agent":
+            _setup_add_custom_agent()
+            continue
+        if action == "Remove custom Agent":
+            _setup_remove_custom_agent()
+            continue
+        if action == "Rename session":
+            _setup_rename_session()
+            continue
+        _setup_remove_session()
+
+
+@app.command()
+def setup():
+    ensure_config_dir()
+    _clear_uninstall_sentinel()
+    _rotate_auth_token_or_exit("setup")
+    while True:
+        _reset_setup_screen()
+        action = _setup_select(
+            "Choose one:",
+            choices=[
+                "Agensic Sessions",
+                "Agensic Autocomplete",
+            ],
+        )
+        if _is_back(action) or not action:
+            return
+        if action == "Agensic Sessions":
+            _setup_sessions_menu()
+            continue
+        _autocomplete_setup_menu()
 
 def _enable_startup_impl(start_now: bool) -> None:
     if sys.platform != "darwin":
@@ -3631,7 +3794,6 @@ def shortcuts_command():
 @app.command("run", context_settings={"allow_extra_args": True, "ignore_unknown_options": True})
 def track_command(
     ctx: typer.Context,
-    agent: str = typer.Option("", "--agent", help="Override tracked agent identifier"),
     model: str = typer.Option("", "--model", help="Explicit tracked model identifier for any provider"),
     agent_name: str = typer.Option("", "--agent-name", help="Override tracked agent display name"),
     replay: bool = typer.Option(False, "--replay", help="Replay the decoded transcript when using 'run inspect'"),
@@ -3650,6 +3812,14 @@ def track_command(
 
     if not args:
         console.print("[red]No agent app or command provided.[/red]")
+        raise typer.Exit(code=2)
+
+    if args[0] == "--":
+        console.print("[red]Raw command mode is no longer supported. Use `agensic run <agent>`. [/red]")
+        raise typer.Exit(code=2)
+
+    if args[0].startswith("-"):
+        console.print(f"[red]Unsupported run option:[/red] {args[0]}")
         raise typer.Exit(code=2)
 
     if args[0] == "status" and len(args) == 1:
@@ -3691,7 +3861,6 @@ def track_command(
     try:
         launch = track_runtime.prepare_track_launch(
             args,
-            agent_override=agent,
             model_override=model,
             agent_name_override=agent_name,
         )
@@ -3717,6 +3886,14 @@ def main(
         metavar="COMMAND",
         help="Explain a shell command and exit",
     ),
+    add_agent: str = typer.Option(
+        "",
+        "--add_agent",
+        "--add-agent",
+        metavar="AGENT",
+        help="Add a custom tracked agent and exit",
+        is_eager=True,
+    ),
 ):
     """Agensic: Forensic Observability for AI Agents and AI-powered terminal autocomplete"""
     if version:
@@ -3725,6 +3902,8 @@ def main(
     if explain:
         _explain_command_or_exit(explain)
         raise typer.Exit()
+    if add_agent:
+        _add_custom_agent_and_exit(add_agent)
     _run_storage_preflight_if_enabled(ctx.invoked_subcommand)
     if ctx.invoked_subcommand is None:
         console.print("[bold cyan]Agensic[/bold cyan] - Use --help for commands.")
@@ -3754,6 +3933,20 @@ def show_shortcuts():
             expand=False,
         )
     )
+
+
+def _add_custom_agent_and_exit(agent_token: str) -> None:
+    from . import track as track_runtime
+
+    try:
+        created = track_runtime.add_custom_agent(agent_token)
+    except ValueError as exc:
+        console.print(f"[red]{exc}[/red]")
+        raise typer.Exit(code=2)
+    console.print(
+        f"[green]Agent '{created['agent_id']}' added.[/green] Tracked launch command: [bold]{created['command']}[/bold]"
+    )
+    raise typer.Exit(code=0)
 
 if __name__ == "__main__":
     app()

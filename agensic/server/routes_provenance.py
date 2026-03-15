@@ -148,3 +148,18 @@ def provenance_registry_agent(agent_id: str) -> ProvenanceRegistrySummaryRespons
     finally:
         deps.release_request_slot()
 
+
+@router.post(
+    "/provenance/registry/reload",
+    response_model=ProvenanceRegistrySummaryResponse,
+    response_model_exclude_unset=True,
+)
+def provenance_registry_reload() -> ProvenanceRegistrySummaryResponse:
+    deps.enter_request_or_503()
+    try:
+        return {
+            "status": "ok",
+            "summary": deps.engine.reload_provenance_registry(),
+        }
+    finally:
+        deps.release_request_slot()

@@ -1833,6 +1833,9 @@ class SuggestionEngine:
     def get_provenance_registry_summary(self) -> dict:
         return get_registry_summary(force_reload=False)
 
+    def reload_provenance_registry(self) -> dict:
+        return get_registry_summary(force_reload=True)
+
     def list_session_summaries(
         self,
         limit: int = 50,
@@ -1879,6 +1882,33 @@ class SuggestionEngine:
                 self.privacy_guard.sanitize_for_log(str(exc)),
             )
             return None
+
+    def rename_session(self, session_id: str, session_name: str) -> dict | None:
+        if self.state_store is None:
+            return None
+        try:
+            changed = self.state_store.rename_tracked_session(session_id, session_name)
+            if not changed:
+                return None
+            return self.state_store.get_session_summary(session_id)
+        except Exception as exc:
+            logger.error(
+                "Failed to rename tracked session: %s",
+                self.privacy_guard.sanitize_for_log(str(exc)),
+            )
+            return None
+
+    def delete_session(self, session_id: str) -> bool:
+        if self.state_store is None:
+            return False
+        try:
+            return bool(self.state_store.delete_tracked_session(session_id))
+        except Exception as exc:
+            logger.error(
+                "Failed to delete tracked session: %s",
+                self.privacy_guard.sanitize_for_log(str(exc)),
+            )
+            return False
 
     def list_provenance_registry_agents(self, status_filter: str = "") -> list[dict]:
         return list_registry_agents(status_filter=status_filter, force_reload=False)

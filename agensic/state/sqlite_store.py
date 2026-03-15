@@ -135,6 +135,7 @@ class SQLiteStateStore:
                     agent TEXT NOT NULL DEFAULT '',
                     model TEXT NOT NULL DEFAULT '',
                     agent_name TEXT NOT NULL DEFAULT '',
+                    session_name TEXT NOT NULL DEFAULT '',
                     working_directory TEXT NOT NULL DEFAULT '',
                     root_command TEXT NOT NULL DEFAULT '',
                     transcript_path TEXT NOT NULL DEFAULT '',
@@ -225,6 +226,7 @@ class SQLiteStateStore:
         required_columns = {
             "session_capability": "TEXT NOT NULL DEFAULT ''",
             "capability_issued_at": "INTEGER NOT NULL DEFAULT 0",
+            "session_name": "TEXT NOT NULL DEFAULT ''",
         }
         for name, ddl in required_columns.items():
             if name in existing:
@@ -751,6 +753,7 @@ class SQLiteStateStore:
         agent: str = "",
         model: str = "",
         agent_name: str = "",
+        session_name: str = "",
         working_directory: str = "",
         root_command: str = "",
         transcript_path: str = "",
@@ -773,17 +776,21 @@ class SQLiteStateStore:
             conn.execute(
                 """
                 INSERT INTO tracked_sessions(
-                    session_id, status, launch_mode, agent, model, agent_name, working_directory,
+                    session_id, status, launch_mode, agent, model, agent_name, session_name, working_directory,
                     root_command, transcript_path, controller_pid, root_pid, started_at, ended_at,
                     updated_at, session_capability, capability_issued_at, violation_code, exit_code
                 )
-                VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 ON CONFLICT(session_id) DO UPDATE SET
                     status = excluded.status,
                     launch_mode = excluded.launch_mode,
                     agent = excluded.agent,
                     model = excluded.model,
                     agent_name = excluded.agent_name,
+                    session_name = CASE
+                        WHEN excluded.session_name != '' THEN excluded.session_name
+                        ELSE tracked_sessions.session_name
+                    END,
                     working_directory = excluded.working_directory,
                     root_command = excluded.root_command,
                     transcript_path = excluded.transcript_path,
@@ -822,6 +829,7 @@ class SQLiteStateStore:
                     str(agent or "").strip().lower(),
                     str(model or "").strip(),
                     str(agent_name or "").strip(),
+                    str(session_name or "").strip(),
                     str(working_directory or "").strip(),
                     str(root_command or "").strip(),
                     str(transcript_path or "").strip(),
@@ -838,6 +846,36 @@ class SQLiteStateStore:
             )
             conn.commit()
         return True
+
+    def rename_tracked_session(self, session_id: str, session_name: str, *, updated_at: Optional[int] = None) -> bool:
+        clean_session_id = str(session_id or "").strip()
+        if not clean_session_id:
+            return False
+        now_ts = int(updated_at or time.time())
+        with self._lock, self._conn() as conn:
+            cursor = conn.execute(
+                """
+                UPDATE tracked_sessions
+                SET session_name = ?,
+                    updated_at = ?
+                WHERE session_id = ?
+                """,
+                (str(session_name or "").strip(), now_ts, clean_session_id),
+            )
+            conn.commit()
+        return int(cursor.rowcount or 0) > 0
+
+    def delete_tracked_session(self, session_id: str) -> bool:
+        clean_session_id = str(session_id or "").strip()
+        if not clean_session_id:
+            return False
+        with self._lock, self._conn() as conn:
+            cursor = conn.execute(
+                "DELETE FROM tracked_sessions WHERE session_id = ?",
+                (clean_session_id,),
+            )
+            conn.commit()
+        return int(cursor.rowcount or 0) > 0
 
     def clear_tracked_session_capability(self, session_id: str) -> bool:
         clean_session_id = str(session_id or "").strip()

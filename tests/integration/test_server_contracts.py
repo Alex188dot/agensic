@@ -233,6 +233,7 @@ class ServerContractTests(unittest.TestCase):
             "session_id": "sess-1",
             "status": "exited",
             "agent": "codex",
+            "session_name": "Release prep",
             "model": "gpt-5.4",
             "started_at": 1700000000,
             "ended_at": 1700000005,
@@ -263,14 +264,34 @@ class ServerContractTests(unittest.TestCase):
             list_response = self.client.get("/sessions")
             self.assertEqual(list_response.status_code, 200)
             self.assertEqual(list_response.json()["total"], 1)
+            self.assertEqual(list_response.json()["sessions"][0]["session_name"], "Release prep")
 
             detail_response = self.client.get("/sessions/sess-1")
             self.assertEqual(detail_response.status_code, 200)
             self.assertEqual(detail_response.json()["session"]["session_id"], "sess-1")
+            self.assertEqual(detail_response.json()["session"]["session_name"], "Release prep")
 
             events_response = self.client.get("/sessions/sess-1/events")
             self.assertEqual(events_response.status_code, 200)
             self.assertEqual(events_response.json()["total"], 1)
+
+    def test_session_mutation_contracts(self):
+        session = {"session_id": "sess-1", "session_name": "Updated"}
+        with patch.object(deps.engine, "rename_session", return_value=session), patch.object(
+            deps.engine,
+            "get_session_summary",
+            return_value=session,
+        ), patch(
+            "agensic.server.routes_sessions.track_runtime.delete_track_session_artifacts",
+            return_value=True,
+        ):
+            rename_response = self.client.patch("/sessions/sess-1", json={"session_name": "Updated"})
+            self.assertEqual(rename_response.status_code, 200)
+            self.assertEqual(rename_response.json()["session"]["session_name"], "Updated")
+
+            delete_response = self.client.delete("/sessions/sess-1")
+            self.assertEqual(delete_response.status_code, 200)
+            self.assertEqual(delete_response.json()["status"], "ok")
 
     def test_intent_history_only_returns_refusal_without_llm(self):
         with patch.object(deps, "load_config", return_value={"provider": "history_only"}), patch.object(

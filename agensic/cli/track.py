@@ -62,6 +62,7 @@ TRACK_ESCAPE_PRIMITIVE_TOKENS = (
 TRACK_TTY_RESET_SEQ = "\x1b[?1000l\x1b[?1002l\x1b[?1003l\x1b[?1004l\x1b[?1006l\x1b[?1015l"
 TRACK_CHECKPOINT_INTERVAL_MS = 120
 TRACK_CHECKPOINT_INTERVAL_EVENTS = 48
+DEFAULT_LOCAL_REGISTRY_VERSION = "local-override"
 
 
 @dataclass
@@ -116,6 +117,222 @@ def _daemon_request(method: str, path: str, timeout: float, **kwargs):
     if isinstance(supplied_headers, dict):
         merged_headers.update({str(k): str(v) for k, v in supplied_headers.items()})
     return requests.request(method.upper(), url, headers=merged_headers, timeout=timeout, **kwargs)
+
+
+def _load_local_agent_registry_override() -> dict[str, Any]:
+    path = Path(APP_PATHS.agent_registry_local_override_path).expanduser()
+    if not path.is_file():
+        return {}
+    try:
+        payload = json.loads(path.read_text(encoding="utf-8"))
+    except Exception:
+        return {}
+    return payload if isinstance(payload, dict) else {}
+
+
+def _write_local_agent_registry_override(payload: dict[str, Any]) -> None:
+    migrate_legacy_layout()
+    ensure_app_layout()
+    atomic_write_json_private(APP_PATHS.agent_registry_local_override_path, payload, indent=2, sort_keys=True)
+
+
+def _builtin_agent_tokens() -> set[str]:
+    registry = get_agent_registry(force_reload=True)
+    builtin_path = Path(str(registry.summary().get("builtin_path", "") or "")).expanduser()
+    if not builtin_path.is_file():
+        return set()
+    try:
+        payload = json.loads(builtin_path.read_text(encoding="utf-8"))
+    except Exception:
+        return set()
+    agents = payload.get("agents", [])
+    if not isinstance(agents, list):
+        return set()
+    tokens: set[str] = set()
+    for row in agents:
+        if not isinstance(row, dict):
+            continue
+        for key in ("agent_id",):
+            value = str(row.get(key, "") or "").strip().lower()
+            if value:
+                tokens.add(value)
+        for list_key in ("aliases", "executables"):
+            values = row.get(list_key, [])
+            if not isinstance(values, list):
+                continue
+            for item in values:
+                value = str(item or "").strip().lower()
+                if value:
+                    tokens.add(value)
+    return tokens
+
+
+def list_custom_agents() -> list[dict[str, str]]:
+    payload = _load_local_agent_registry_override()
+    agents = payload.get("agents", [])
+    if not isinstance(agents, list):
+        return []
+    out: list[dict[str, str]] = []
+    for row in agents:
+        if not isinstance(row, dict):
+            continue
+        try:
+            agent_id = _normalize_custom_agent_token(str(row.get("agent_id", "") or ""))
+        except ValueError:
+            continue
+        out.append(
+            {
+                "agent_id": agent_id,
+                "display_name": str(row.get("display_name", "") or _display_name_for_agent(agent_id)).strip()
+                or _display_name_for_agent(agent_id),
+            }
+        )
+    out.sort(key=lambda item: item["agent_id"])
+    return out
+
+
+def _display_name_for_agent(agent_id: str) -> str:
+    cleaned = str(agent_id or "").strip().replace("-", " ").replace("_", " ")
+    collapsed = " ".join(part for part in cleaned.split() if part)
+    return collapsed.title() if collapsed else str(agent_id or "").strip()
+
+
+def _normalize_custom_agent_token(value: str) -> str:
+    clean = str(value or "").strip().lower()
+    if not clean:
+        raise ValueError("Agent token is required.")
+    if any(ch.isspace() for ch in clean):
+        raise ValueError("Agent token must not contain spaces.")
+    if not re.fullmatch(r"[a-z0-9][a-z0-9._-]*", clean):
+        raise ValueError("Agent token may only contain lowercase letters, numbers, '.', '_' or '-'.")
+    return clean
+
+
+def _reload_agent_registry_caches() -> None:
+    get_agent_registry(force_reload=True)
+    try:
+        response = _daemon_request("POST", "/provenance/registry/reload", timeout=2.0)
+        if response.status_code >= 400:
+            return
+    except Exception:
+        return
+
+
+def add_custom_agent(agent_token: str) -> dict[str, str]:
+    clean_agent = _normalize_custom_agent_token(agent_token)
+    if clean_agent in _builtin_agent_tokens():
+        raise ValueError(f"Agent '{clean_agent}' is already mapped.")
+    registry = get_agent_registry(force_reload=True)
+    if registry.get_agent(clean_agent) is not None:
+        raise ValueError(f"Agent '{clean_agent}' is already mapped.")
+
+    local_payload = _load_local_agent_registry_override()
+    agents = local_payload.get("agents", [])
+    if not isinstance(agents, list):
+        agents = []
+    agents.append(
+        {
+            "agent_id": clean_agent,
+            "display_name": _display_name_for_agent(clean_agent),
+            "aliases": [clean_agent],
+            "executables": [clean_agent],
+            "process_tokens": [clean_agent],
+            "status": "community",
+        }
+    )
+    out = {
+        "version": str(local_payload.get("version", "") or DEFAULT_LOCAL_REGISTRY_VERSION).strip()
+        or DEFAULT_LOCAL_REGISTRY_VERSION,
+        "agents": agents,
+    }
+    _write_local_agent_registry_override(out)
+    _reload_agent_registry_caches()
+    return {
+        "agent_id": clean_agent,
+        "display_name": _display_name_for_agent(clean_agent),
+        "command": f"agensic run {clean_agent}",
+    }
+
+
+def remove_custom_agent(agent_token: str) -> dict[str, str]:
+    clean_agent = _normalize_custom_agent_token(agent_token)
+    payload = _load_local_agent_registry_override()
+    agents = payload.get("agents", [])
+    if not isinstance(agents, list):
+        agents = []
+    kept: list[dict[str, Any]] = []
+    removed: dict[str, str] | None = None
+    for row in agents:
+        if not isinstance(row, dict):
+            continue
+        agent_id = str(row.get("agent_id", "") or "").strip().lower()
+        if agent_id == clean_agent and removed is None:
+            removed = {
+                "agent_id": clean_agent,
+                "display_name": str(row.get("display_name", "") or _display_name_for_agent(clean_agent)).strip()
+                or _display_name_for_agent(clean_agent),
+            }
+            continue
+        kept.append(dict(row))
+    if removed is None:
+        raise ValueError(f"Custom agent '{clean_agent}' was not found.")
+    out = {
+        "version": str(payload.get("version", "") or DEFAULT_LOCAL_REGISTRY_VERSION).strip()
+        or DEFAULT_LOCAL_REGISTRY_VERSION,
+        "agents": kept,
+    }
+    _write_local_agent_registry_override(out)
+    _reload_agent_registry_caches()
+    return removed
+
+
+def rename_track_session(session_id: str, session_name: str) -> dict[str, object] | None:
+    clean_session_id = str(session_id or "").strip()
+    if not clean_session_id:
+        return None
+    store = _state_store()
+    changed = store.rename_tracked_session(clean_session_id, str(session_name or "").strip())
+    if not changed:
+        return None
+    return store.get_session_summary(clean_session_id)
+
+
+def delete_track_session_artifacts(session_id: str, *, state: dict[str, object] | None = None) -> bool:
+    clean_session_id = str(session_id or "").strip()
+    if not clean_session_id:
+        return False
+    store = _state_store()
+    session = dict(state or {}) or store.get_session_summary(clean_session_id)
+    if not session:
+        return False
+
+    candidate_paths = {
+        str(session.get("transcript_path", "") or "").strip(),
+        str(session.get("event_stream_path", "") or "").strip(),
+        _track_checkpoint_path(clean_session_id),
+    }
+    transcript_path = str(session.get("transcript_path", "") or "").strip()
+    if transcript_path.endswith(".transcript.jsonl"):
+        candidate_paths.add(transcript_path[: -len(".transcript.jsonl")] + ".checkpoints.jsonl")
+
+    deleted = store.delete_tracked_session(clean_session_id)
+    if not deleted:
+        return False
+
+    for raw_path in candidate_paths:
+        clean_path = str(raw_path or "").strip()
+        if not clean_path:
+            continue
+        try:
+            Path(clean_path).expanduser().unlink(missing_ok=True)
+        except Exception:
+            continue
+    return True
+
+
+def list_recent_session_summaries(limit: int = 200) -> list[dict[str, object]]:
+    reconcile_tracked_sessions()
+    return _state_store().list_session_summaries(limit=max(1, min(200, int(limit or 200))))
 
 
 def _track_private_key_path() -> str:
@@ -1072,7 +1289,6 @@ def _build_tracked_child_env(launch: TrackLaunch, session_id: str) -> dict[str, 
 def prepare_track_launch(
     raw_args: list[str],
     *,
-    agent_override: str = "",
     model_override: str = "",
     agent_name_override: str = "",
 ) -> TrackLaunch:
@@ -1080,35 +1296,19 @@ def prepare_track_launch(
     if not args:
         raise ValueError("No app or command provided.")
 
-    clean_agent_override = str(agent_override or "").strip().lower()
     clean_model_override = str(model_override or "").strip()
     clean_agent_name_override = str(agent_name_override or "").strip()
     working_directory = os.getcwd()
 
     if args[0] == "--":
-        command = args[1:]
-        if not command:
-            raise ValueError("No command provided after '--'.")
-        descriptor = _find_command_descriptor(command)
-        inferred_agent = str((descriptor or {}).get("agent_id", "") or "").strip().lower()
-        inferred_name = str((descriptor or {}).get("display_name", "") or "").strip()
-        resolved_agent = clean_agent_override or inferred_agent or "unknown"
-        return TrackLaunch(
-            command=command,
-            launch_mode="raw_command",
-            agent=resolved_agent,
-            model=clean_model_override or _infer_track_model(command=command, agent=resolved_agent) or "unknown-model",
-            agent_name=clean_agent_name_override or inferred_name,
-            working_directory=working_directory,
-            root_command=shlex.join(command),
-        )
+        raise ValueError("Raw command mode is no longer supported. Use `agensic run <agent>`.")
 
     descriptor = _find_registry_descriptor(args[0])
     if descriptor is not None:
         executables = [str(item or "").strip() for item in descriptor.get("executables", []) if str(item or "").strip()]
         executable = executables[0] if executables else str(args[0] or "").strip()
         command = [executable, *args[1:]]
-        resolved_agent = clean_agent_override or str(descriptor.get("agent_id", "") or "").strip().lower() or "unknown"
+        resolved_agent = str(descriptor.get("agent_id", "") or "").strip().lower()
         return TrackLaunch(
             command=command,
             launch_mode="registry_alias",
@@ -1119,18 +1319,9 @@ def prepare_track_launch(
             root_command=shlex.join(command),
         )
 
-    descriptor = _find_command_descriptor(args)
-    inferred_agent = str((descriptor or {}).get("agent_id", "") or "").strip().lower()
-    inferred_name = str((descriptor or {}).get("display_name", "") or "").strip()
-    resolved_agent = clean_agent_override or inferred_agent or "unknown"
-    return TrackLaunch(
-        command=args,
-        launch_mode="raw_command",
-        agent=resolved_agent,
-        model=clean_model_override or _infer_track_model(command=args, agent=resolved_agent) or "unknown-model",
-        agent_name=clean_agent_name_override or inferred_name,
-        working_directory=working_directory,
-        root_command=shlex.join(args),
+    attempted = str(args[0] or "").strip()
+    raise ValueError(
+        f"Agent '{attempted}' is not recognized. Add it with: agensic --add_agent \"{attempted}\""
     )
 
 
@@ -1436,9 +1627,10 @@ def print_sessions_text(limit: int = 20) -> int:
     console.print(f"sessions={len(rows)}", highlight=False)
     for row in rows:
         console.print(
-            "session_id={session_id} status={status} agent={agent} model={model} started_at={started_at} "
+            "session_id={session_id} session_name={session_name} status={status} agent={agent} model={model} started_at={started_at} "
             "repo={repo} branch={branch} exit_code={exit_code} violation={violation}".format(
                 session_id=str(row.get("session_id", "") or "-"),
+                session_name=str(row.get("session_name", "") or "-"),
                 status=str(row.get("status", "") or "-"),
                 agent=str(row.get("agent", "") or "-"),
                 model=str(row.get("model", "") or "-"),
@@ -1460,9 +1652,10 @@ def inspect_track_session(session_id: str = "", *, replay: bool = False, tail_ev
         return 1
 
     console.print(
-        "session_id={session_id} status={status} agent={agent} model={model} launch_mode={launch_mode} "
+        "session_id={session_id} session_name={session_name} status={status} agent={agent} model={model} launch_mode={launch_mode} "
         "root_pid={root_pid} controller_pid={controller_pid}".format(
             session_id=str(state.get("session_id", "") or "-"),
+            session_name=str(state.get("session_name", "") or "-"),
             status=str(state.get("status", "") or "-"),
             agent=str(state.get("agent", "") or "-"),
             model=str(state.get("model", "") or "-"),

@@ -2,6 +2,7 @@ import importlib
 import json
 import multiprocessing
 import os
+import shlex
 import subprocess
 import tempfile
 import time
@@ -17,6 +18,7 @@ from agensic.state.sqlite_store import SQLiteStateStore
 
 cli_app = importlib.import_module("agensic.cli.app")
 track_module = importlib.import_module("agensic.cli.track")
+provenance_module = importlib.import_module("agensic.engine.provenance")
 app = cli_app.app
 
 
@@ -36,8 +38,26 @@ def _run_tracked_command_in_child(env: dict[str, str], command: list[str], resul
     cli_app.APP_PATHS = temp_paths
     ag_paths.APP_PATHS = temp_paths
     track_module.APP_PATHS = temp_paths
-    launch = track_module.prepare_track_launch(command)
+    launch = _make_test_launch(command[1:] if command and command[0] == "--" else command)
     result_queue.put(track_module.run_tracked_command(launch))
+
+
+def _make_test_launch(
+    command: list[str],
+    *,
+    agent: str = "codex",
+    model: str = "unknown-model",
+    agent_name: str = "OpenAI Codex",
+) -> track_module.TrackLaunch:
+    return track_module.TrackLaunch(
+        command=list(command),
+        launch_mode="raw_command",
+        agent=agent,
+        model=model,
+        agent_name=agent_name,
+        working_directory=os.getcwd(),
+        root_command=shlex.join(command),
+    )
 
 
 class CliTrackTests(unittest.TestCase):
@@ -61,6 +81,10 @@ class CliTrackTests(unittest.TestCase):
                 temp_paths,
             ), patch.object(
                 track_module,
+                "APP_PATHS",
+                temp_paths,
+            ), patch.object(
+                provenance_module,
                 "APP_PATHS",
                 temp_paths,
             ):
@@ -260,6 +284,63 @@ class CliTrackTests(unittest.TestCase):
         self.assertEqual(launch.model, "unknown-model")
         self.assertIn("Codex", launch.agent_name)
 
+    def test_add_custom_agent_shorthand_registers_agent(self):
+        with self._temp_app_paths() as (env, temp_paths), patch.object(
+            cli_app, "_run_storage_preflight_if_enabled"
+        ):
+            result = self.runner.invoke(app, ["--add_agent", "stepclaw"], env=env)
+            self.assertEqual(result.exit_code, 0)
+            self.assertIn("agensic run stepclaw", result.stdout)
+            override_path = Path(temp_paths.agent_registry_local_override_path)
+            self.assertTrue(override_path.is_file())
+            payload = json.loads(override_path.read_text(encoding="utf-8"))
+            self.assertEqual(payload["agents"][0]["agent_id"], "stepclaw")
+
+    def test_add_custom_agent_rejects_builtin_agent(self):
+        with self._temp_app_paths() as (env, _), patch.object(
+            cli_app, "_run_storage_preflight_if_enabled"
+        ):
+            result = self.runner.invoke(app, ["--add_agent", "codex"], env=env)
+
+        self.assertEqual(result.exit_code, 2)
+        self.assertIn("already mapped", result.stdout)
+
+    def test_run_accepts_custom_agent_after_registration(self):
+        with self._temp_app_paths() as (env, _), patch.object(
+            cli_app, "_run_storage_preflight_if_enabled"
+        ), patch.object(
+            track_module,
+            "run_tracked_command",
+            return_value=0,
+        ) as run_mock:
+            added = self.runner.invoke(app, ["--add_agent", "stepclaw"], env=env)
+            self.assertEqual(added.exit_code, 0)
+            result = self.runner.invoke(app, ["run", "stepclaw"], env=env)
+
+        self.assertEqual(result.exit_code, 0)
+        launch = run_mock.call_args.args[0]
+        self.assertEqual(launch.agent, "stepclaw")
+        self.assertEqual(launch.command[0], "stepclaw")
+
+    def test_remove_custom_agent_deletes_local_override_entry(self):
+        with self._temp_app_paths() as (env, temp_paths), patch.object(
+            cli_app, "_run_storage_preflight_if_enabled"
+        ):
+            added = self.runner.invoke(app, ["--add_agent", "stepclaw"], env=env)
+            self.assertEqual(added.exit_code, 0)
+            removed = track_module.remove_custom_agent("stepclaw")
+
+            self.assertEqual(removed["agent_id"], "stepclaw")
+            payload = json.loads(Path(temp_paths.agent_registry_local_override_path).read_text(encoding="utf-8"))
+            self.assertEqual(payload["agents"], [])
+
+    def test_run_rejects_agent_override_option(self):
+        with patch.object(cli_app, "_run_storage_preflight_if_enabled"):
+            result = self.runner.invoke(app, ["run", "--agent", "foo", "codex"])
+
+        self.assertEqual(result.exit_code, 2)
+        self.assertIn("Unsupported run option:", result.stdout)
+
     def test_track_alias_launch_infers_codex_model_from_codex_home(self):
         with tempfile.TemporaryDirectory() as temp_dir:
             codex_home = Path(temp_dir) / ".codex"
@@ -308,7 +389,7 @@ class CliTrackTests(unittest.TestCase):
         launch = run_mock.call_args.args[0]
         self.assertEqual(launch.model, "gemini-2.5-flash")
 
-    def test_track_raw_launch_infers_claude_model_from_workspace_settings_local_json(self):
+    def test_track_alias_launch_infers_claude_model_from_workspace_settings_local_json(self):
         with tempfile.TemporaryDirectory() as temp_dir:
             workspace_dir = Path(temp_dir)
             claude_dir = workspace_dir / ".claude"
@@ -322,20 +403,20 @@ class CliTrackTests(unittest.TestCase):
                 "run_tracked_command",
                 return_value=0,
             ) as run_mock, patch("os.getcwd", return_value=str(workspace_dir)):
-                result = self.runner.invoke(app, ["run", "--", "claude"])
+                result = self.runner.invoke(app, ["run", "claude"])
 
         self.assertEqual(result.exit_code, 0)
         launch = run_mock.call_args.args[0]
         self.assertEqual(launch.agent, "claude_code")
         self.assertEqual(launch.model, "claude-sonnet-4-5")
 
-    def test_track_raw_launch_prefers_claude_model_flag(self):
+    def test_track_alias_launch_prefers_claude_model_flag(self):
         with patch.object(cli_app, "_run_storage_preflight_if_enabled"), patch.object(
             track_module,
             "run_tracked_command",
             return_value=0,
         ) as run_mock:
-            result = self.runner.invoke(app, ["run", "--", "claude", "--model", "claude-opus-4-1"])
+            result = self.runner.invoke(app, ["run", "claude", "--model", "claude-opus-4-1"])
 
         self.assertEqual(result.exit_code, 0)
         launch = run_mock.call_args.args[0]
@@ -380,7 +461,7 @@ class CliTrackTests(unittest.TestCase):
         self.assertEqual(launch.agent, "opencode")
         self.assertEqual(launch.model, "gpt-4.1")
 
-    def test_track_raw_launch_infers_kilo_model_from_project_config(self):
+    def test_track_alias_launch_infers_kilo_model_from_project_config(self):
         with tempfile.TemporaryDirectory() as temp_dir:
             workspace_dir = Path(temp_dir)
             (workspace_dir / "kilocode.json").write_text(
@@ -392,14 +473,14 @@ class CliTrackTests(unittest.TestCase):
                 "run_tracked_command",
                 return_value=0,
             ) as run_mock, patch("os.getcwd", return_value=str(workspace_dir)):
-                result = self.runner.invoke(app, ["run", "--", "kilo"])
+                result = self.runner.invoke(app, ["run", "kilo"])
 
         self.assertEqual(result.exit_code, 0)
         launch = run_mock.call_args.args[0]
         self.assertEqual(launch.agent, "kilocode")
         self.assertEqual(launch.model, "gemini-2.5-pro")
 
-    def test_track_raw_launch_infers_github_copilot_model_from_config_dir(self):
+    def test_track_alias_launch_infers_github_copilot_model_from_config_dir(self):
         with tempfile.TemporaryDirectory() as temp_dir:
             copilot_home = Path(temp_dir) / ".copilot"
             copilot_home.mkdir()
@@ -412,66 +493,39 @@ class CliTrackTests(unittest.TestCase):
                 "run_tracked_command",
                 return_value=0,
             ) as run_mock, patch.dict(os.environ, {"HOME": str(Path(temp_dir))}, clear=False):
-                result = self.runner.invoke(app, ["run", "--", "gh", "copilot"])
+                result = self.runner.invoke(app, ["run", "copilot"])
 
         self.assertEqual(result.exit_code, 0)
         launch = run_mock.call_args.args[0]
         self.assertEqual(launch.agent, "github_copilot")
         self.assertEqual(launch.model, "gpt-5")
 
-    def test_track_raw_launch_does_not_treat_generic_gh_as_copilot(self):
+    def test_track_alias_launch_rejects_unrecognized_agent(self):
         with patch.object(cli_app, "_run_storage_preflight_if_enabled"), patch.object(
             track_module,
             "run_tracked_command",
             return_value=0,
         ) as run_mock:
-            result = self.runner.invoke(app, ["run", "--", "gh", "repo", "list"])
+            result = self.runner.invoke(app, ["run", "gh"])
 
-        self.assertEqual(result.exit_code, 0)
-        launch = run_mock.call_args.args[0]
-        self.assertEqual(launch.agent, "unknown")
-        self.assertEqual(launch.model, "unknown-model")
+        self.assertEqual(result.exit_code, 2)
+        self.assertIn("is not recognized", result.stdout)
+        self.assertIn('agensic --add_agent "gh"', result.stdout)
+        run_mock.assert_not_called()
 
-    def test_track_raw_launch_infers_ollama_model_from_run_subcommand(self):
+    def test_track_alias_launch_infers_ollama_model_from_run_subcommand(self):
         with patch.object(cli_app, "_run_storage_preflight_if_enabled"), patch.object(
             track_module,
             "run_tracked_command",
             return_value=0,
         ) as run_mock:
-            result = self.runner.invoke(app, ["run", "--", "ollama", "run", "llama3.2"])
+            result = self.runner.invoke(app, ["run", "ollama", "run", "llama3.2"])
 
         self.assertEqual(result.exit_code, 0)
         launch = run_mock.call_args.args[0]
         self.assertEqual(launch.model, "llama3.2")
 
-    def test_track_open_app_launch_recognizes_ollama_agent_and_model(self):
-        with patch.object(cli_app, "_run_storage_preflight_if_enabled"), patch.object(
-            track_module,
-            "run_tracked_command",
-            return_value=0,
-        ) as run_mock:
-            result = self.runner.invoke(
-                app,
-                [
-                    "run",
-                    "--",
-                    "open",
-                    "-j",
-                    "-a",
-                    "/Applications/Ollama.app",
-                    "--args",
-                    "run",
-                    "sam860/LFM2:1.2b",
-                ],
-            )
-
-        self.assertEqual(result.exit_code, 0)
-        launch = run_mock.call_args.args[0]
-        self.assertEqual(launch.agent, "ollama")
-        self.assertEqual(launch.agent_name, "Ollama")
-        self.assertEqual(launch.model, "sam860/LFM2:1.2b")
-
-    def test_track_raw_launch_infers_openclaw_model_from_openclaw_config(self):
+    def test_track_alias_launch_infers_openclaw_model_from_openclaw_config(self):
         with tempfile.TemporaryDirectory() as temp_dir:
             home_dir = Path(temp_dir)
             openclaw_dir = home_dir / ".openclaw"
@@ -485,13 +539,13 @@ class CliTrackTests(unittest.TestCase):
                 "run_tracked_command",
                 return_value=0,
             ) as run_mock, patch.dict(os.environ, {"HOME": str(home_dir)}, clear=False):
-                result = self.runner.invoke(app, ["run", "--agent", "openclaw", "--", "openclaw"])
+                result = self.runner.invoke(app, ["run", "openclaw"])
 
         self.assertEqual(result.exit_code, 0)
         launch = run_mock.call_args.args[0]
         self.assertEqual(launch.model, "anthropic/claude-sonnet-4-5")
 
-    def test_track_raw_launch_infers_openclaw_model_from_models_json_fallback(self):
+    def test_track_alias_launch_infers_openclaw_model_from_models_json_fallback(self):
         with tempfile.TemporaryDirectory() as temp_dir:
             home_dir = Path(temp_dir)
             agent_dir = home_dir / ".openclaw" / "agents" / "main" / "agent"
@@ -515,13 +569,13 @@ class CliTrackTests(unittest.TestCase):
                 "run_tracked_command",
                 return_value=0,
             ) as run_mock, patch.dict(os.environ, {"HOME": str(home_dir)}, clear=False):
-                result = self.runner.invoke(app, ["run", "--agent", "openclaw", "--", "openclaw"])
+                result = self.runner.invoke(app, ["run", "openclaw"])
 
         self.assertEqual(result.exit_code, 0)
         launch = run_mock.call_args.args[0]
         self.assertEqual(launch.model, "qwen-portal/coder-model")
 
-    def test_track_raw_launch_supports_double_dash(self):
+    def test_track_run_rejects_raw_mode(self):
         with patch.object(cli_app, "_run_storage_preflight_if_enabled"), patch.object(
             track_module,
             "run_tracked_command",
@@ -529,10 +583,9 @@ class CliTrackTests(unittest.TestCase):
         ) as run_mock:
             result = self.runner.invoke(app, ["run", "--", "zsh", "-lc", "echo hi"])
 
-        self.assertEqual(result.exit_code, 0)
-        launch = run_mock.call_args.args[0]
-        self.assertEqual(launch.launch_mode, "raw_command")
-        self.assertEqual(launch.command, ["zsh", "-lc", "echo hi"])
+        self.assertEqual(result.exit_code, 2)
+        self.assertIn("Agent 'zsh' is not recognized", result.stdout)
+        run_mock.assert_not_called()
 
     def test_track_alias_launch_honors_explicit_model_override(self):
         with patch.object(cli_app, "_run_storage_preflight_if_enabled"), patch.object(
@@ -546,25 +599,22 @@ class CliTrackTests(unittest.TestCase):
         launch = run_mock.call_args.args[0]
         self.assertEqual(launch.model, "gemini-2.5-pro")
 
-    def test_track_raw_launch_honors_explicit_model_override_for_unmanaged_provider(self):
+    def test_track_alias_launch_honors_explicit_model_override(self):
         with patch.object(cli_app, "_run_storage_preflight_if_enabled"), patch.object(
             track_module,
             "run_tracked_command",
             return_value=0,
         ) as run_mock:
-            result = self.runner.invoke(
-                app,
-                ["run", "--agent", "claude", "--model", "claude-sonnet-4", "--", "claude"],
-            )
+            result = self.runner.invoke(app, ["run", "--model", "claude-sonnet-4", "claude"])
 
         self.assertEqual(result.exit_code, 0)
         launch = run_mock.call_args.args[0]
-        self.assertEqual(launch.agent, "claude")
+        self.assertEqual(launch.agent, "claude_code")
         self.assertEqual(launch.model, "claude-sonnet-4")
 
     def test_build_tracked_child_env_only_injects_tracking_metadata(self):
         with self._temp_app_paths():
-            launch = track_module.prepare_track_launch(["--", "zsh", "-lc", "echo hi"])
+            launch = _make_test_launch(["zsh", "-lc", "echo hi"])
             child_env = track_module._build_tracked_child_env(launch, "session-policy")
 
             self.assertEqual(child_env["AGENSIC_TRACK_ACTIVE"], "1")
@@ -590,7 +640,7 @@ class CliTrackTests(unittest.TestCase):
 
     def test_run_tracked_command_records_transcript_and_provenance(self):
         with self._temp_app_paths() as (_, temp_paths), self._mock_track_daemon(temp_paths):
-            launch = track_module.prepare_track_launch(["--", "zsh", "-lc", "echo hi; sleep 0.8 & wait"])
+            launch = _make_test_launch(["zsh", "-lc", "echo hi; sleep 0.8 & wait"])
             code = track_module.run_tracked_command(launch)
 
             self.assertEqual(code, 0)
@@ -644,8 +694,8 @@ class CliTrackTests(unittest.TestCase):
             subprocess.run(["git", "commit", "-m", "init"], cwd=repo_dir, check=True, capture_output=True, text=True)
 
             with patch("os.getcwd", return_value=repo_dir):
-                launch = track_module.prepare_track_launch(
-                    ["--", "zsh", "-lc", "echo changed > README.md; git add README.md; git commit -m 'update readme'"],
+                launch = _make_test_launch(
+                    ["zsh", "-lc", "echo changed > README.md; git add README.md; git commit -m 'update readme'"],
                 )
             code = track_module.run_tracked_command(launch)
 
@@ -712,7 +762,7 @@ class CliTrackTests(unittest.TestCase):
 
     def test_run_tracked_command_uses_app_scoped_provenance_keys(self):
         with self._temp_app_paths() as (_, temp_paths):
-            launch = track_module.prepare_track_launch(["--", "zsh", "-lc", "true"])
+            launch = _make_test_launch(["zsh", "-lc", "true"])
             code = track_module.run_tracked_command(launch)
 
             self.assertEqual(code, 0)
@@ -721,7 +771,7 @@ class CliTrackTests(unittest.TestCase):
 
     def test_run_tracked_command_records_short_lived_child_process(self):
         with self._temp_app_paths() as (_, temp_paths), self._mock_track_daemon(temp_paths):
-            launch = track_module.prepare_track_launch(["--", "zsh", "-lc", "echo hi; sleep 0.2 & wait"])
+            launch = _make_test_launch(["zsh", "-lc", "echo hi; sleep 0.2 & wait"])
             code = track_module.run_tracked_command(launch)
 
             self.assertEqual(code, 0)
@@ -740,7 +790,7 @@ class CliTrackTests(unittest.TestCase):
                 "os.setsid();"
                 "time.sleep(1.5)\""
             )
-            launch = track_module.prepare_track_launch(["--", "zsh", "-lc", daemonize])
+            launch = _make_test_launch(["zsh", "-lc", daemonize])
             code = track_module.run_tracked_command(launch)
 
             self.assertEqual(code, 0)
@@ -754,8 +804,8 @@ class CliTrackTests(unittest.TestCase):
 
     def test_run_tracked_command_observes_escape_primitives_without_blocking(self):
         with self._temp_app_paths() as (_, temp_paths):
-            launch = track_module.prepare_track_launch(
-                ["--", "zsh", "-ic", "nohup sleep 5 >/tmp/agensic-track-test.log 2>&1 & disown; echo should-not-print"]
+            launch = _make_test_launch(
+                ["zsh", "-ic", "nohup sleep 5 >/tmp/agensic-track-test.log 2>&1 & disown; echo should-not-print"]
             )
             code = track_module.run_tracked_command(launch)
 
@@ -794,7 +844,7 @@ class CliTrackTests(unittest.TestCase):
         with self._temp_app_paths() as (env, temp_paths), patch.object(
             cli_app, "_run_storage_preflight_if_enabled"
         ), self._mock_track_daemon(temp_paths):
-            launch = track_module.prepare_track_launch(["--", "zsh", "-lc", "echo hi"])
+            launch = _make_test_launch(["zsh", "-lc", "echo hi"])
             code = track_module.run_tracked_command(launch)
             self.assertEqual(code, 0)
 

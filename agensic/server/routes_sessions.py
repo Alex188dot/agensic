@@ -3,8 +3,10 @@ from fastapi import APIRouter, HTTPException
 from agensic.cli import track as track_runtime
 from agensic.server import deps
 from agensic.server.schemas import (
+    GenericStatusResponse,
     SessionDetailResponse,
     SessionEventsResponse,
+    SessionRenamePayload,
     SessionSummariesResponse,
 )
 
@@ -98,5 +100,45 @@ def get_session_events(session_id: str) -> SessionEventsResponse:
             "events": normalized_events,
             "total": len(normalized_events),
         }
+    finally:
+        deps.release_request_slot()
+
+
+@router.patch(
+    "/sessions/{session_id}",
+    response_model=SessionDetailResponse,
+    response_model_exclude_unset=True,
+)
+def rename_session(session_id: str, payload: SessionRenamePayload) -> SessionDetailResponse:
+    deps.enter_request_or_503()
+    try:
+        track_runtime.reconcile_tracked_sessions()
+        session = deps.engine.rename_session(session_id, payload.session_name)
+        if session is None:
+            raise HTTPException(status_code=404, detail="session_not_found")
+        return {
+            "status": "ok",
+            "session": session,
+        }
+    finally:
+        deps.release_request_slot()
+
+
+@router.delete(
+    "/sessions/{session_id}",
+    response_model=GenericStatusResponse,
+    response_model_exclude_unset=True,
+)
+def delete_session(session_id: str) -> GenericStatusResponse:
+    deps.enter_request_or_503()
+    try:
+        track_runtime.reconcile_tracked_sessions()
+        session = deps.engine.get_session_summary(session_id)
+        if session is None:
+            raise HTTPException(status_code=404, detail="session_not_found")
+        deleted = track_runtime.delete_track_session_artifacts(session_id, state=session)
+        if not deleted:
+            raise HTTPException(status_code=404, detail="session_not_found")
+        return {"status": "ok"}
     finally:
         deps.release_request_slot()

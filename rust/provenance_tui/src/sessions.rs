@@ -1,9 +1,9 @@
-use base64::engine::general_purpose::STANDARD as BASE64_STANDARD;
-use base64::Engine;
 use crate::checkpoints::{
     checkpoint_path_for_transcript, decode_checkpoint_state, load_checkpoint_records,
     CheckpointRecord,
 };
+use base64::engine::general_purpose::STANDARD as BASE64_STANDARD;
+use base64::Engine;
 use chrono::TimeZone;
 use clap::Parser;
 use crossterm::event::{
@@ -22,10 +22,11 @@ use ratatui::text::{Line, Span, Text};
 use ratatui::widgets::{Block, Borders, Cell, Clear, Paragraph, Row, Table, TableState, Wrap};
 use ratatui::Terminal;
 use reqwest::blocking::Client;
-use serde::Deserialize;
+use reqwest::Method;
+use serde::{Deserialize, Serialize};
 use serde_json::Value;
-use std::collections::HashMap;
 use std::cmp::{max, min};
+use std::collections::HashMap;
 use std::fs;
 use std::io::{self, Write};
 use std::path::Path;
@@ -77,6 +78,8 @@ struct SessionSummary {
     agent: String,
     model: String,
     agent_name: String,
+    #[serde(default)]
+    session_name: String,
     working_directory: String,
     root_command: String,
     transcript_path: String,
@@ -105,6 +108,11 @@ struct SessionsResponse {
 #[derive(Debug, Default, Deserialize)]
 struct SessionDetailResponse {
     session: Option<SessionSummary>,
+}
+
+#[derive(Debug, Default, Serialize)]
+struct SessionRenamePayload {
+    session_name: String,
 }
 
 #[allow(dead_code)]
@@ -627,6 +635,7 @@ struct App {
     hovered_header_copy: bool,
     hovered_replay_toggle: bool,
     copy_feedback: Option<CopyFeedback>,
+    rename_modal: Option<RenameModalState>,
 }
 
 #[derive(Clone, Debug, Default)]
@@ -673,6 +682,12 @@ enum CopyFeedbackTarget {
     SessionId,
 }
 
+#[derive(Clone, Debug, Default)]
+struct RenameModalState {
+    session_id: String,
+    input: String,
+}
+
 impl CopyFeedback {
     fn active_target(&self) -> Option<CopyFeedbackTarget> {
         (Instant::now() <= self.expires_at).then_some(self.target)
@@ -698,6 +713,7 @@ impl App {
             hovered_header_copy: false,
             hovered_replay_toggle: false,
             copy_feedback: None,
+            rename_modal: None,
         };
         app.refresh_sessions()?;
         if !args.session_id.trim().is_empty() {
@@ -706,18 +722,22 @@ impl App {
         Ok(app)
     }
 
-    fn request(&self, path: &str) -> reqwest::blocking::RequestBuilder {
+    fn request_with_method(&self, method: Method, path: &str) -> reqwest::blocking::RequestBuilder {
         let url = format!(
             "{}/{}",
             self.args.daemon_url.trim_end_matches('/'),
             path.trim_start_matches('/')
         );
-        let builder = self.client.get(url);
+        let builder = self.client.request(method, url);
         if self.args.auth_token.trim().is_empty() {
             builder
         } else {
             builder.bearer_auth(self.args.auth_token.trim())
         }
+    }
+
+    fn request(&self, path: &str) -> reqwest::blocking::RequestBuilder {
+        self.request_with_method(Method::GET, path)
     }
 
     fn refresh_sessions(&mut self) -> Result<(), String> {
@@ -796,6 +816,7 @@ impl App {
         self.hovered_header_copy = false;
         self.hovered_replay_toggle = false;
         self.copy_feedback = None;
+        self.rename_modal = None;
         self.needs_terminal_clear = true;
         Ok(())
     }
@@ -848,6 +869,92 @@ impl App {
         let out = default_timeline_export_path(&detail.session.session_id, "csv");
         export_timeline_rows(detail, &out)?;
         Ok(out)
+    }
+
+    fn selected_session_id(&self) -> Option<String> {
+        self.sessions
+            .get(self.selected)
+            .map(|session| session.session_id.clone())
+    }
+
+    fn select_session_id(&mut self, session_id: &str) {
+        if let Some(index) = self
+            .sessions
+            .iter()
+            .position(|session| session.session_id == session_id)
+        {
+            self.selected = index;
+        }
+    }
+
+    fn open_rename_modal(&mut self, session_id: String, current_name: String) {
+        self.rename_modal = Some(RenameModalState {
+            session_id,
+            input: current_name,
+        });
+        self.event_modal_open = false;
+        self.event_modal_scroll = 0;
+    }
+
+    fn start_rename_selected(&mut self) {
+        if let Some(session) = self.sessions.get(self.selected) {
+            self.open_rename_modal(session.session_id.clone(), session.session_name.clone());
+        }
+    }
+
+    fn start_rename_detail(&mut self) {
+        if let Some(detail) = self.detail.as_ref() {
+            self.open_rename_modal(
+                detail.session.session_id.clone(),
+                detail.session.session_name.clone(),
+            );
+        }
+    }
+
+    fn submit_rename(&mut self) -> Result<(), String> {
+        let modal = self
+            .rename_modal
+            .clone()
+            .ok_or_else(|| "Rename modal is not open".to_string())?;
+        let selected_before = self.selected_session_id().unwrap_or_default();
+        let response = self
+            .request_with_method(Method::PATCH, &format!("/sessions/{}", modal.session_id))
+            .json(&SessionRenamePayload {
+                session_name: modal.input.trim().to_string(),
+            })
+            .send()
+            .map_err(|err| format!("session rename request failed: {}", err))?;
+        if response.status().as_u16() == 405 {
+            return Err(
+                "Session rename is unavailable because the running Agensic daemon is outdated. Restart Agensic and try again."
+                    .to_string(),
+            );
+        }
+        if response.status().as_u16() != 200 {
+            return Err(format!(
+                "session rename request failed: {}",
+                response.status()
+            ));
+        }
+        let payload: SessionDetailResponse = response
+            .json()
+            .map_err(|err| format!("invalid session rename payload: {}", err))?;
+        let updated = payload
+            .session
+            .ok_or_else(|| "session rename payload missing session".to_string())?;
+        self.refresh_sessions()?;
+        if !selected_before.trim().is_empty() {
+            self.select_session_id(&selected_before);
+        }
+        self.select_session_id(&updated.session_id);
+        if let Some(detail) = self.detail.as_mut() {
+            if detail.session.session_id == updated.session_id {
+                detail.session.session_name = updated.session_name.clone();
+            }
+        }
+        self.rename_modal = None;
+        self.status = format!("Renamed session {}", updated.session_id);
+        Ok(())
     }
 }
 
@@ -924,6 +1031,31 @@ fn handle_key(app: &mut App, key: KeyEvent) -> Result<bool, String> {
         }
         app.detail = None;
         return Ok(true);
+    }
+    if app.rename_modal.is_some() {
+        match key.code {
+            KeyCode::Esc => {
+                app.rename_modal = None;
+                app.status = "Rename cancelled".to_string();
+            }
+            KeyCode::Enter => {
+                if let Err(err) = app.submit_rename() {
+                    app.set_flash(err);
+                }
+            }
+            KeyCode::Backspace | KeyCode::Delete => {
+                if let Some(modal) = app.rename_modal.as_mut() {
+                    modal.input.pop();
+                }
+            }
+            KeyCode::Char(c) => {
+                if let Some(modal) = app.rename_modal.as_mut() {
+                    modal.input.push(c);
+                }
+            }
+            _ => {}
+        }
+        return Ok(false);
     }
     if app.detail.is_some() {
         let mut flash_message: Option<String> = None;
@@ -1040,6 +1172,7 @@ fn handle_key(app: &mut App, key: KeyEvent) -> Result<bool, String> {
                             flash_message = Some("No command to copy".to_string());
                         }
                     }
+                    KeyCode::Char('R') => app.start_rename_detail(),
                     KeyCode::Char('E') => export_timeline_csv = true,
                     KeyCode::Left if detail.focus == FocusPane::Replay => {
                         detail.scroll_replay_horizontal(-4)
@@ -1091,6 +1224,7 @@ fn handle_key(app: &mut App, key: KeyEvent) -> Result<bool, String> {
             }
         }
         KeyCode::Enter => app.open_selected()?,
+        KeyCode::Char('R') => app.start_rename_selected(),
         KeyCode::Char('r') => app.refresh_sessions()?,
         _ => {}
     }
@@ -1102,6 +1236,9 @@ fn draw_ui(frame: &mut ratatui::Frame<'_>, app: &App) {
         draw_detail(frame, app, detail);
     } else {
         draw_browser(frame, app);
+    }
+    if let Some(modal) = app.rename_modal.as_ref() {
+        draw_rename_modal(frame, modal);
     }
 }
 
@@ -1123,6 +1260,11 @@ fn draw_browser(frame: &mut ratatui::Frame<'_>, app: &App) {
         .map(|session| {
             Row::new(vec![
                 Cell::from(session.session_id.clone()),
+                Cell::from(if session.session_name.trim().is_empty() {
+                    "-".to_string()
+                } else {
+                    truncate(&session.session_name, 18)
+                }),
                 Cell::from(format_ts(session.started_at)),
                 Cell::from(if session.agent_name.trim().is_empty() {
                     session.agent.clone()
@@ -1150,6 +1292,7 @@ fn draw_browser(frame: &mut ratatui::Frame<'_>, app: &App) {
         rows,
         [
             Constraint::Length(18),
+            Constraint::Length(20),
             Constraint::Length(19),
             Constraint::Length(18),
             Constraint::Length(16),
@@ -1161,7 +1304,7 @@ fn draw_browser(frame: &mut ratatui::Frame<'_>, app: &App) {
     )
     .header(
         Row::new(vec![
-            "session", "started", "agent", "model", "repo", "branch", "duration", "outcome",
+            "session", "name", "started", "agent", "model", "repo", "branch", "duration", "outcome",
         ])
         .style(
             Style::default()
@@ -1191,7 +1334,7 @@ fn draw_browser(frame: &mut ratatui::Frame<'_>, app: &App) {
     frame.render_stateful_widget(table, chunks[0], &mut state);
     frame.render_widget(
         Paragraph::new(format!(
-            "↑↓ move  Enter open  r refresh  Esc quit    {}",
+            "↑↓ move  Enter open  R rename  r refresh  Esc quit    {}",
             app.status_text()
         ))
         .style(Style::default().fg(Color::White)),
@@ -1230,7 +1373,7 @@ fn draw_detail(frame: &mut ratatui::Frame<'_>, app: &App, detail: &DetailState) 
     frame.render_widget(build_replay(app, detail, layout.replay), layout.replay);
     let mut footer_lines = vec![
         Line::from(Span::styled(
-            "Space: Play/Pause   ↑↓: Move  ←/→: Horizontal scroll  Tab/Shift+Tab: Jump 500  c: Copy  E: Export(csv)  f: Toggle fullscreen  s: Switch pane  t: Toggle replay mode  Enter: Details  Esc: Back",
+            "Space: Play/Pause   ↑↓: Move  ←/→: Horizontal scroll  Tab/Shift+Tab: Jump 500  c: Copy  R: Rename  E: Export(csv)  f: Toggle fullscreen  s: Switch pane  t: Toggle replay mode  Enter: Details  Esc: Back",
             Style::default().fg(Color::Yellow),
         )),
         Line::from(app.status_text().to_string()),
@@ -1242,8 +1385,7 @@ fn draw_detail(frame: &mut ratatui::Frame<'_>, app: &App, detail: &DetailState) 
         )));
     }
     frame.render_widget(
-        Paragraph::new(footer_lines)
-        .style(Style::default().fg(Color::White)),
+        Paragraph::new(footer_lines).style(Style::default().fg(Color::White)),
         layout.footer,
     );
 
@@ -1303,6 +1445,13 @@ fn build_header(app: &App, detail: &DetailState) -> Paragraph<'static> {
                 header_copy_button,
                 copy_button_style(app.hovered_header_copy, app.header_copy_copied(), false),
             ),
+            Span::raw("    ".to_string()),
+            Span::styled("name ", metadata_key_style),
+            Span::raw(if detail.session.session_name.trim().is_empty() {
+                "-".to_string()
+            } else {
+                sanitize_inline_text(&detail.session.session_name)
+            }),
             Span::raw("    ".to_string()),
             Span::styled("duration ", metadata_key_style),
             Span::raw(format_duration(
@@ -1616,10 +1765,7 @@ fn build_replay(app: &App, detail: &DetailState, area: Rect) -> Paragraph<'stati
             mode_label, frame_size_label, status_label, horizontal_scroll_hint
         )),
         Span::raw("  "),
-        Span::styled(
-            toggle_label,
-            replay_toggle_style(app.hovered_replay_toggle),
-        ),
+        Span::styled(toggle_label, replay_toggle_style(app.hovered_replay_toggle)),
         Span::raw("  "),
     ]);
     let (text, scroll_y, scroll_x) = match detail.replay_mode {
@@ -1769,6 +1915,35 @@ fn draw_event_modal(
         .wrap(Wrap { trim: true });
     frame.render_widget(Clear, popup);
     frame.render_widget(panel, popup);
+}
+
+fn draw_rename_modal(frame: &mut ratatui::Frame<'_>, modal: &RenameModalState) {
+    let popup = centered_rect(56, 26, frame.area());
+    frame.render_widget(Clear, popup);
+    let content = vec![
+        Line::from("Rename session"),
+        Line::from(""),
+        Line::from(format!("session: {}", modal.session_id)),
+        Line::from(format!("name: {}", modal.input)),
+        Line::from(""),
+        Line::from(Span::styled(
+            "Enter: save  Esc: cancel  Backspace/Delete: edit",
+            Style::default().fg(Color::Yellow),
+        )),
+    ];
+    frame.render_widget(
+        Paragraph::new(content)
+            .block(
+                Block::default()
+                    .borders(Borders::ALL)
+                    .title(Line::from(Span::styled(
+                        "Rename Session",
+                        crate::agensic_title_style(),
+                    ))),
+            )
+            .wrap(Wrap { trim: true }),
+        popup,
+    );
 }
 
 fn centered_rect(percent_x: u16, percent_y: u16, r: Rect) -> Rect {
@@ -2119,7 +2294,11 @@ fn detail_header_height(detail: &DetailState) -> u16 {
 }
 
 fn detail_footer_height(detail: &DetailState) -> u16 {
-    if detail.replay_loading { 3 } else { 2 }
+    if detail.replay_loading {
+        3
+    } else {
+        2
+    }
 }
 
 fn changes_panel_constraints(detail: &DetailState) -> [Constraint; 2] {
@@ -2345,12 +2524,7 @@ fn build_terminal_replay_frames_from_checkpoints(
         }
         let mut parser = VtParser::new(record.rows.max(1), record.cols.max(1), 0);
         parser.process(&state);
-        maybe_push_terminal_frame(
-            &mut frames,
-            &mut last_frame,
-            &parser,
-            Some(record.seq),
-        );
+        maybe_push_terminal_frame(&mut frames, &mut last_frame, &parser, Some(record.seq));
     }
     frames
 }
@@ -2708,7 +2882,9 @@ fn replay_toggle_style(hovered: bool) -> Style {
             .fg(Color::LightCyan)
             .add_modifier(Modifier::UNDERLINED | Modifier::BOLD)
     } else {
-        Style::default().fg(Color::Cyan).add_modifier(Modifier::BOLD)
+        Style::default()
+            .fg(Color::Cyan)
+            .add_modifier(Modifier::BOLD)
     }
 }
 
@@ -3169,6 +3345,9 @@ fn sanitize_terminal_output(value: &str) -> String {
 }
 
 fn handle_mouse(app: &mut App, mouse: MouseEvent) {
+    if app.rename_modal.is_some() {
+        return;
+    }
     if app.detail.is_some() {
         let mut flash_message: Option<String> = None;
         let mut copy_target: Option<CopyFeedbackTarget> = None;
@@ -3520,7 +3699,11 @@ mod tests {
         text::Line,
     };
     use serde_json::json;
-    use std::{collections::HashMap, env, fs, time::{Duration, Instant}};
+    use std::{
+        collections::HashMap,
+        env, fs,
+        time::{Duration, Instant},
+    };
 
     #[test]
     fn sanitize_terminal_output_strips_ansi_sequences() {

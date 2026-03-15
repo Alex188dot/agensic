@@ -273,6 +273,7 @@ class SessionSummaryEntry(BaseModel):
     agent: str = ""
     model: str = ""
     agent_name: str = ""
+    session_name: str = ""
     working_directory: str = ""
     root_command: str = ""
     transcript_path: str = ""
@@ -314,6 +315,10 @@ class SessionEventsResponse(BaseModel):
     session_id: str = ""
     events: list[dict[str, Any]] = Field(default_factory=list)
     total: int = 0
+
+
+class SessionRenamePayload(BaseModel):
+    session_name: str = ""
 
 
 class ProvenanceRegistrySummaryResponse(BaseModel):
