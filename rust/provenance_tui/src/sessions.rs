@@ -15,6 +15,7 @@ use crossterm::terminal::{
     disable_raw_mode, enable_raw_mode, size as terminal_size, EnterAlternateScreen,
     LeaveAlternateScreen,
 };
+use flate2::read::GzDecoder;
 use ratatui::backend::CrosstermBackend;
 use ratatui::layout::{Constraint, Direction, Layout, Rect};
 use ratatui::style::{Color, Modifier, Style};
@@ -27,8 +28,8 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use std::cmp::{max, min};
 use std::collections::HashMap;
-use std::fs;
-use std::io::{self, Write};
+use std::fs::{self, File};
+use std::io::{self, Read, Write};
 use std::path::Path;
 use std::sync::mpsc::{self, Receiver, TryRecvError};
 use std::thread;
@@ -147,15 +148,6 @@ enum ReplayMode {
     Text,
 }
 
-impl ReplayMode {
-    fn label(self) -> &'static str {
-        match self {
-            ReplayMode::Terminal => "terminal",
-            ReplayMode::Text => "text",
-        }
-    }
-}
-
 #[derive(Clone, Debug)]
 struct TimelineEntry {
     event_index: usize,
@@ -188,6 +180,58 @@ struct TranscriptChunk {
     seq: Option<i64>,
     rows: Option<u16>,
     cols: Option<u16>,
+}
+
+fn artifact_candidate_paths(path: &str) -> Vec<String> {
+    let clean = path.trim();
+    if clean.is_empty() {
+        return Vec::new();
+    }
+    if clean.ends_with(".gz") {
+        return vec![clean.to_string(), clean.trim_end_matches(".gz").to_string()];
+    }
+    vec![clean.to_string(), format!("{clean}.gz")]
+}
+
+fn artifact_exists(path: &str) -> bool {
+    artifact_candidate_paths(path)
+        .into_iter()
+        .any(|candidate| Path::new(&candidate).is_file())
+}
+
+fn read_text_artifact(path: &str) -> Option<String> {
+    for candidate in artifact_candidate_paths(path) {
+        let target = Path::new(&candidate);
+        if !target.is_file() {
+            continue;
+        }
+        if candidate.ends_with(".gz") {
+            let mut contents = String::new();
+            let file = File::open(target).ok()?;
+            let mut decoder = GzDecoder::new(file);
+            decoder.read_to_string(&mut contents).ok()?;
+            return Some(contents);
+        }
+        return fs::read_to_string(target).ok();
+    }
+    None
+}
+
+fn terminal_replay_notice(transcript_path: &str, text_available: bool) -> String {
+    let transcript_missing =
+        !transcript_path.trim().is_empty() && !artifact_exists(transcript_path);
+    match (transcript_missing, text_available) {
+        (true, true) => "Terminal replay unavailable: tracked terminal artifacts expired or were pruned (kept 7 days / 1 GiB total). Showing the cleaned transcript fallback instead.".to_string(),
+        (true, false) => "Terminal replay unavailable: tracked terminal artifacts expired or were pruned (kept 7 days / 1 GiB total).".to_string(),
+        (false, true) => {
+            "Terminal replay unavailable for this session. Showing the cleaned transcript fallback instead."
+                .to_string()
+        }
+        (false, false) => {
+            "Terminal replay unavailable for this session. The tracked terminal transcript could not be decoded."
+                .to_string()
+        }
+    }
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
@@ -232,21 +276,17 @@ impl DetailState {
         let transcript_chunks = load_transcript_chunks(&session.transcript_path);
         let checkpoint_records =
             load_checkpoint_records(&checkpoint_path_for_transcript(&session.transcript_path));
-        let transcript_missing = !session.transcript_path.trim().is_empty()
-            && !Path::new(session.transcript_path.trim()).is_file();
+        let text_fallback_available = !text_replay_chunks.is_empty();
         let replay_mode = if transcript_chunks.is_empty() {
             ReplayMode::Text
         } else {
             ReplayMode::Terminal
         };
-        let replay_notice = if transcript_missing {
-            Some(if text_replay_chunks.is_empty() {
-                "Replay unavailable: tracked transcript expired or was pruned (kept 7 days / 1 GiB total)."
-                    .to_string()
-            } else {
-                "Terminal replay expired or was pruned (kept 7 days / 1 GiB total). Showing cleaned session transcript fallback."
-                    .to_string()
-            })
+        let replay_notice = if replay_mode == ReplayMode::Text {
+            Some(terminal_replay_notice(
+                &session.transcript_path,
+                text_fallback_available,
+            ))
         } else {
             None
         };
@@ -306,6 +346,9 @@ impl DetailState {
     }
 
     fn current_terminal_cache_request(&self) -> Option<(TerminalReplayCacheKey, u16, u16)> {
+        if self.transcript_chunks.is_empty() && self.checkpoint_records.is_empty() {
+            return None;
+        }
         let layout = session_detail_layout(self)?;
         let viewport_rows = layout.replay.height.saturating_sub(2).max(1);
         let viewport_cols = layout.replay.width.saturating_sub(2).max(1);
@@ -378,6 +421,12 @@ impl DetailState {
             self.replay_loading = false;
             if self.replay_mode == ReplayMode::Terminal && self.terminal_replay_frames.is_empty() {
                 self.replay_mode = ReplayMode::Text;
+                if self.replay_notice.is_none() {
+                    self.replay_notice = Some(terminal_replay_notice(
+                        &self.session.transcript_path,
+                        !self.text_replay_chunks.is_empty(),
+                    ));
+                }
             }
             return;
         }
@@ -400,34 +449,6 @@ impl DetailState {
         self.pending_replay_cache_key = None;
         self.replay_cache_rx = None;
         self.replay_loading = false;
-    }
-
-    fn set_replay_mode(&mut self, mode: ReplayMode) {
-        if mode == ReplayMode::Terminal {
-            self.ensure_terminal_replay_cache();
-            if self.terminal_replay_frames.is_empty() {
-                self.replay_mode = ReplayMode::Text;
-                self.sync_replay_to_timeline();
-                return;
-            }
-        }
-        self.replay_mode = mode;
-        self.replay_follow_end = self.replay_mode == ReplayMode::Text;
-        if self.replay_follow_end {
-            self.replay_scroll = u16::MAX;
-        } else {
-            self.replay_scroll = 0;
-        }
-        self.replay_scroll_x = 0;
-        self.sync_replay_to_timeline();
-    }
-
-    fn toggle_replay_mode(&mut self) {
-        let next = match self.replay_mode {
-            ReplayMode::Terminal => ReplayMode::Text,
-            ReplayMode::Text => ReplayMode::Terminal,
-        };
-        self.set_replay_mode(next);
     }
 
     fn rebuild_replay_text(&mut self, step: usize) {
@@ -636,6 +657,7 @@ struct App {
     hovered_replay_toggle: bool,
     copy_feedback: Option<CopyFeedback>,
     rename_modal: Option<RenameModalState>,
+    delete_modal: Option<DeleteModalState>,
 }
 
 #[derive(Clone, Debug, Default)]
@@ -688,6 +710,12 @@ struct RenameModalState {
     input: String,
 }
 
+#[derive(Clone, Debug, Default)]
+struct DeleteModalState {
+    session_id: String,
+    session_name: String,
+}
+
 impl CopyFeedback {
     fn active_target(&self) -> Option<CopyFeedbackTarget> {
         (Instant::now() <= self.expires_at).then_some(self.target)
@@ -714,6 +742,7 @@ impl App {
             hovered_replay_toggle: false,
             copy_feedback: None,
             rename_modal: None,
+            delete_modal: None,
         };
         app.refresh_sessions()?;
         if !args.session_id.trim().is_empty() {
@@ -803,8 +832,12 @@ impl App {
 
         let detail = DetailState::new(session, events_payload.events, replay);
         self.status = if detail.replay_notice.is_some() {
-            "Tracked terminal replay expired or was pruned; showing fallback text transcript."
-                .to_string()
+            if detail.text_replay_chunks.is_empty() {
+                "Terminal replay unavailable for this session.".to_string()
+            } else {
+                "Terminal replay unavailable for this session; using the transcript fallback."
+                    .to_string()
+            }
         } else {
             format!("Opened session {}", session_id)
         };
@@ -817,6 +850,7 @@ impl App {
         self.hovered_replay_toggle = false;
         self.copy_feedback = None;
         self.rename_modal = None;
+        self.delete_modal = None;
         self.needs_terminal_clear = true;
         Ok(())
     }
@@ -892,6 +926,7 @@ impl App {
             session_id,
             input: current_name,
         });
+        self.delete_modal = None;
         self.event_modal_open = false;
         self.event_modal_scroll = 0;
     }
@@ -905,6 +940,31 @@ impl App {
     fn start_rename_detail(&mut self) {
         if let Some(detail) = self.detail.as_ref() {
             self.open_rename_modal(
+                detail.session.session_id.clone(),
+                detail.session.session_name.clone(),
+            );
+        }
+    }
+
+    fn open_delete_modal(&mut self, session_id: String, session_name: String) {
+        self.delete_modal = Some(DeleteModalState {
+            session_id,
+            session_name,
+        });
+        self.rename_modal = None;
+        self.event_modal_open = false;
+        self.event_modal_scroll = 0;
+    }
+
+    fn start_delete_selected(&mut self) {
+        if let Some(session) = self.sessions.get(self.selected) {
+            self.open_delete_modal(session.session_id.clone(), session.session_name.clone());
+        }
+    }
+
+    fn start_delete_detail(&mut self) {
+        if let Some(detail) = self.detail.as_ref() {
+            self.open_delete_modal(
                 detail.session.session_id.clone(),
                 detail.session.session_name.clone(),
             );
@@ -954,6 +1014,49 @@ impl App {
         }
         self.rename_modal = None;
         self.status = format!("Renamed session {}", updated.session_id);
+        Ok(())
+    }
+
+    fn submit_delete(&mut self) -> Result<(), String> {
+        let modal = self
+            .delete_modal
+            .clone()
+            .ok_or_else(|| "Delete modal is not open".to_string())?;
+        let selected_before = self.selected_session_id().unwrap_or_default();
+        let deleted_from_detail = self
+            .detail
+            .as_ref()
+            .map(|detail| detail.session.session_id == modal.session_id)
+            .unwrap_or(false);
+        let response = self
+            .request_with_method(Method::DELETE, &format!("/sessions/{}", modal.session_id))
+            .send()
+            .map_err(|err| format!("session delete request failed: {}", err))?;
+        if response.status().as_u16() == 405 {
+            return Err(
+                "Session deletion is unavailable because the running Agensic daemon is outdated. Restart Agensic and try again."
+                    .to_string(),
+            );
+        }
+        if response.status().as_u16() != 200 {
+            return Err(format!(
+                "session delete request failed: {}",
+                response.status()
+            ));
+        }
+        self.refresh_sessions()?;
+        if !selected_before.trim().is_empty() && selected_before != modal.session_id {
+            self.select_session_id(&selected_before);
+        }
+        if deleted_from_detail {
+            if let Some(detail) = self.detail.as_mut() {
+                detail.clear_terminal_replay_caches();
+            }
+            self.detail = None;
+            self.needs_terminal_clear = true;
+        }
+        self.delete_modal = None;
+        self.status = format!("Deleted session {}", modal.session_id);
         Ok(())
     }
 }
@@ -1031,6 +1134,21 @@ fn handle_key(app: &mut App, key: KeyEvent) -> Result<bool, String> {
         }
         app.detail = None;
         return Ok(true);
+    }
+    if app.delete_modal.is_some() {
+        match key.code {
+            KeyCode::Esc => {
+                app.delete_modal = None;
+                app.status = "Delete cancelled".to_string();
+            }
+            KeyCode::Enter => {
+                if let Err(err) = app.submit_delete() {
+                    app.set_flash(err);
+                }
+            }
+            _ => {}
+        }
+        return Ok(false);
     }
     if app.rename_modal.is_some() {
         match key.code {
@@ -1114,10 +1232,6 @@ fn handle_key(app: &mut App, key: KeyEvent) -> Result<bool, String> {
                         close_detail = true;
                     }
                     KeyCode::Char('s') => detail.cycle_focus(),
-                    KeyCode::Char('t') => {
-                        detail.toggle_replay_mode();
-                        app.status = format!("Replay mode: {}", detail.replay_mode.label());
-                    }
                     KeyCode::Char('f') => {
                         detail.toggle_replay_fullscreen();
                         app.status = if detail.replay_fullscreen {
@@ -1173,6 +1287,7 @@ fn handle_key(app: &mut App, key: KeyEvent) -> Result<bool, String> {
                         }
                     }
                     KeyCode::Char('R') => app.start_rename_detail(),
+                    KeyCode::Char('D') => app.start_delete_detail(),
                     KeyCode::Char('E') => export_timeline_csv = true,
                     KeyCode::Left if detail.focus == FocusPane::Replay => {
                         detail.scroll_replay_horizontal(-4)
@@ -1225,6 +1340,7 @@ fn handle_key(app: &mut App, key: KeyEvent) -> Result<bool, String> {
         }
         KeyCode::Enter => app.open_selected()?,
         KeyCode::Char('R') => app.start_rename_selected(),
+        KeyCode::Char('D') => app.start_delete_selected(),
         KeyCode::Char('r') => app.refresh_sessions()?,
         _ => {}
     }
@@ -1239,6 +1355,9 @@ fn draw_ui(frame: &mut ratatui::Frame<'_>, app: &App) {
     }
     if let Some(modal) = app.rename_modal.as_ref() {
         draw_rename_modal(frame, modal);
+    }
+    if let Some(modal) = app.delete_modal.as_ref() {
+        draw_delete_modal(frame, modal);
     }
 }
 
@@ -1334,7 +1453,7 @@ fn draw_browser(frame: &mut ratatui::Frame<'_>, app: &App) {
     frame.render_stateful_widget(table, chunks[0], &mut state);
     frame.render_widget(
         Paragraph::new(format!(
-            "↑↓ move  Enter open  R rename  r refresh  Esc quit    {}",
+            "↑↓ move  Enter open  R rename  D delete  r refresh  Esc quit    {}",
             app.status_text()
         ))
         .style(Style::default().fg(Color::White)),
@@ -1373,7 +1492,7 @@ fn draw_detail(frame: &mut ratatui::Frame<'_>, app: &App, detail: &DetailState) 
     frame.render_widget(build_replay(app, detail, layout.replay), layout.replay);
     let mut footer_lines = vec![
         Line::from(Span::styled(
-            "Space: Play/Pause   ↑↓: Move  ←/→: Horizontal scroll  Tab/Shift+Tab: Jump 500  c: Copy  R: Rename  E: Export(csv)  f: Toggle fullscreen  s: Switch pane  t: Toggle replay mode  Enter: Details  Esc: Back",
+            "Space: Play/Pause   ↑↓: Move  ←/→: Horizontal scroll  Tab/Shift+Tab: Jump 500  c: Copy  R: Rename  D: Delete  E: Export(csv)  f: Toggle fullscreen  s: Switch pane  Enter: Details  Esc: Back",
             Style::default().fg(Color::Yellow),
         )),
         Line::from(app.status_text().to_string()),
@@ -1740,8 +1859,8 @@ fn build_replay(app: &App, detail: &DetailState, area: Rect) -> Paragraph<'stati
     let focused = detail.focus == FocusPane::Replay;
     let status_label = replay_status_label(detail.autoplay);
     let mode_label = match detail.replay_mode {
-        ReplayMode::Terminal => "Terminal, faithful screen state",
-        ReplayMode::Text => "Text, session transcript",
+        ReplayMode::Terminal => "terminal replay",
+        ReplayMode::Text => "fallback transcript",
     };
     let active_frame = detail
         .terminal_replay_frames
@@ -1938,6 +2057,42 @@ fn draw_rename_modal(frame: &mut ratatui::Frame<'_>, modal: &RenameModalState) {
                     .borders(Borders::ALL)
                     .title(Line::from(Span::styled(
                         "Rename Session",
+                        crate::agensic_title_style(),
+                    ))),
+            )
+            .wrap(Wrap { trim: true }),
+        popup,
+    );
+}
+
+fn draw_delete_modal(frame: &mut ratatui::Frame<'_>, modal: &DeleteModalState) {
+    let popup = centered_rect(56, 28, frame.area());
+    frame.render_widget(Clear, popup);
+    let session_name = if modal.session_name.trim().is_empty() {
+        "-".to_string()
+    } else {
+        modal.session_name.clone()
+    };
+    let content = vec![
+        Line::from("Delete session"),
+        Line::from(""),
+        Line::from(format!("session: {}", modal.session_id)),
+        Line::from(format!("name: {}", session_name)),
+        Line::from(""),
+        Line::from("This permanently removes the tracked session and its artifacts."),
+        Line::from(""),
+        Line::from(Span::styled(
+            "Enter: delete  Esc: cancel",
+            Style::default().fg(Color::Yellow),
+        )),
+    ];
+    frame.render_widget(
+        Paragraph::new(content)
+            .block(
+                Block::default()
+                    .borders(Borders::ALL)
+                    .title(Line::from(Span::styled(
+                        "Delete Session",
                         crate::agensic_title_style(),
                     ))),
             )
@@ -2436,11 +2591,7 @@ fn event_command(event: &SessionEvent) -> Option<String> {
 }
 
 fn load_transcript_chunks(path: &str) -> Vec<TranscriptChunk> {
-    let target = path.trim();
-    if target.is_empty() {
-        return Vec::new();
-    }
-    let Ok(contents) = fs::read_to_string(target) else {
+    let Some(contents) = read_text_artifact(path) else {
         return Vec::new();
     };
     contents
@@ -3646,8 +3797,8 @@ fn replay_toggle_hit(mouse: MouseEvent, detail: &DetailState) -> Option<bool> {
         .map(|_| " ←/→ horizontal scroll")
         .unwrap_or("");
     let mode_label = match detail.replay_mode {
-        ReplayMode::Terminal => "Terminal, faithful screen state",
-        ReplayMode::Text => "Text, session transcript",
+        ReplayMode::Terminal => "terminal replay",
+        ReplayMode::Text => "fallback transcript",
     };
     let status_label = replay_status_label(detail.autoplay);
     let prefix = format!(
@@ -3686,24 +3837,68 @@ mod tests {
     use super::{
         build_display_model, build_terminal_replay_frames, collect_terminal_lines, diff_stat_line,
         export_timeline_rows, format_duration, format_header_outcome, format_outcome,
-        format_timeline_ordinal, rendered_text_height, replay_max_scroll, repo_display_name,
-        sanitize_inline_text, sanitize_terminal_output, session_detail_layout_in_area,
-        strip_inline_progress_noise, terminal_replay_end_padding, terminal_replay_max_scroll_x,
-        terminal_replay_scroll, vt100_color_to_ratatui, DetailState, FocusPane, ReplayMode,
-        SessionEvent, SessionSummary, TerminalReplayFrame, TimelineEntry, TranscriptChunk,
-        TEXT_REPLAY_TICK_MS,
+        format_timeline_ordinal, handle_key, load_transcript_chunks, rendered_text_height,
+        replay_max_scroll, repo_display_name, sanitize_inline_text, sanitize_terminal_output,
+        session_detail_layout_in_area, strip_inline_progress_noise, terminal_replay_end_padding,
+        terminal_replay_max_scroll_x, terminal_replay_scroll, vt100_color_to_ratatui, App,
+        DeleteModalState, DetailState, FocusPane, ReplayMode, SessionEvent, SessionSummary,
+        SessionsArgs, TerminalReplayFrame, TimelineEntry, TranscriptChunk, TEXT_REPLAY_TICK_MS,
     };
+    use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+    use flate2::write::GzEncoder;
+    use flate2::Compression;
     use ratatui::{
         layout::Rect,
         style::{Color, Modifier},
         text::Line,
     };
+    use reqwest::blocking::Client;
     use serde_json::json;
     use std::{
         collections::HashMap,
         env, fs,
+        io::{Read, Write},
+        net::TcpListener,
+        thread,
         time::{Duration, Instant},
     };
+
+    fn sample_session(session_id: &str, session_name: &str) -> SessionSummary {
+        SessionSummary {
+            session_id: session_id.to_string(),
+            session_name: session_name.to_string(),
+            ..SessionSummary::default()
+        }
+    }
+
+    fn sample_app(daemon_url: &str, sessions: Vec<SessionSummary>) -> App {
+        App {
+            client: Client::builder().build().expect("build reqwest client"),
+            args: SessionsArgs {
+                daemon_url: daemon_url.to_string(),
+                auth_token: String::new(),
+                session_id: String::new(),
+                limit: 200,
+                replay: false,
+            },
+            sessions,
+            selected: 0,
+            detail: None,
+            status: "Ready".to_string(),
+            flash_status: None,
+            deep_link: false,
+            needs_terminal_clear: false,
+            event_modal_open: false,
+            event_modal_scroll: 0,
+            hovered_timeline_copy_row: None,
+            hovered_event_modal_copy: false,
+            hovered_header_copy: false,
+            hovered_replay_toggle: false,
+            copy_feedback: None,
+            rename_modal: None,
+            delete_modal: None,
+        }
+    }
 
     #[test]
     fn sanitize_terminal_output_strips_ansi_sequences() {
@@ -4176,6 +4371,83 @@ mod tests {
     }
 
     #[test]
+    fn uppercase_d_opens_delete_modal_for_selected_session() {
+        let mut app = sample_app(
+            "http://127.0.0.1:9",
+            vec![sample_session("sess-1", "Release prep")],
+        );
+
+        handle_key(
+            &mut app,
+            KeyEvent::new(KeyCode::Char('D'), KeyModifiers::SHIFT),
+        )
+        .expect("handle key succeeds");
+
+        let modal = app.delete_modal.expect("delete modal should open");
+        assert_eq!(modal.session_id, "sess-1");
+        assert_eq!(modal.session_name, "Release prep");
+    }
+
+    #[test]
+    fn submit_delete_removes_selected_session_and_closes_detail() {
+        let listener = TcpListener::bind("127.0.0.1:0").expect("bind test listener");
+        let base_url = format!("http://{}", listener.local_addr().expect("listener addr"));
+        let server = thread::spawn(move || {
+            for expected_method in ["DELETE", "GET"] {
+                let (mut stream, _) = listener.accept().expect("accept request");
+                let mut buffer = [0_u8; 4096];
+                let read = stream.read(&mut buffer).expect("read request");
+                let request = String::from_utf8_lossy(&buffer[..read]);
+                assert!(
+                    request.starts_with(expected_method),
+                    "unexpected request: {request}"
+                );
+                let body = if expected_method == "DELETE" {
+                    r#"{"status":"ok"}"#
+                } else {
+                    r#"{"sessions":[{"session_id":"sess-1","status":"exited","launch_mode":"","agent":"","model":"","agent_name":"","session_name":"Kept","working_directory":"","root_command":"","transcript_path":"","started_at":0,"ended_at":0,"updated_at":0,"violation_code":"","exit_code":0,"repo_root":"","branch_start":"","branch_end":"","head_start":"","head_end":"","aggregate":{},"changes":{}}]}"#
+                };
+                let response = format!(
+                    "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+                    body.len(),
+                    body
+                );
+                stream
+                    .write_all(response.as_bytes())
+                    .expect("write response");
+            }
+        });
+
+        let mut app = sample_app(
+            &base_url,
+            vec![
+                sample_session("sess-1", "Kept"),
+                sample_session("sess-2", "Delete me"),
+            ],
+        );
+        app.selected = 1;
+        app.detail = Some(DetailState::new(
+            sample_session("sess-2", "Delete me"),
+            Vec::new(),
+            false,
+        ));
+        app.delete_modal = Some(DeleteModalState {
+            session_id: "sess-2".to_string(),
+            session_name: "Delete me".to_string(),
+        });
+
+        app.submit_delete().expect("delete request succeeds");
+        server.join().expect("server thread exits");
+
+        assert_eq!(app.sessions.len(), 1);
+        assert_eq!(app.sessions[0].session_id, "sess-1");
+        assert_eq!(app.selected, 0);
+        assert!(app.detail.is_none());
+        assert!(app.delete_modal.is_none());
+        assert_eq!(app.status, "Deleted session sess-2");
+    }
+
+    #[test]
     fn strip_inline_progress_noise_removes_working_substring() {
         let input = "Read .env •Working(17s • esc to interrupt) > next";
         assert_eq!(strip_inline_progress_noise(input), "Read .env > next");
@@ -4224,6 +4496,51 @@ mod tests {
         assert_eq!(format_timeline_ordinal(42), "42");
         assert_eq!(format_timeline_ordinal(12_345), "12.3k");
         assert_eq!(format_timeline_ordinal(3_100_000), "3.1m");
+    }
+
+    #[test]
+    fn load_transcript_chunks_reads_gzip_artifacts() {
+        let out = env::temp_dir().join(format!(
+            "agensic-transcript-loader-{}.transcript.jsonl.gz",
+            std::process::id()
+        ));
+        let file = fs::File::create(&out).expect("create gzip transcript");
+        let mut encoder = GzEncoder::new(file, Compression::default());
+        encoder
+            .write_all(br#"{"direction":"pty","data_b64":"aGVsbG8=","seq":5}"#)
+            .expect("write payload");
+        encoder.write_all(b"\n").expect("write newline");
+        encoder.finish().expect("finish gzip transcript");
+
+        let chunks = load_transcript_chunks(out.to_str().expect("valid temp path"));
+        assert_eq!(chunks.len(), 1);
+        assert_eq!(chunks[0].direction, "pty");
+        assert_eq!(chunks[0].data, b"hello");
+
+        let _ = fs::remove_file(out);
+    }
+
+    #[test]
+    fn detail_state_uses_text_fallback_notice_when_terminal_replay_is_missing() {
+        let detail = DetailState::new(
+            SessionSummary {
+                transcript_path: "/tmp/missing.transcript.jsonl.gz".to_string(),
+                ..SessionSummary::default()
+            },
+            vec![SessionEvent {
+                seq: 1,
+                event_type: "terminal.stdout".to_string(),
+                payload: json!({"data": "hello\n"}),
+                ..SessionEvent::default()
+            }],
+            false,
+        );
+        assert_eq!(detail.replay_mode, ReplayMode::Text);
+        assert!(detail
+            .replay_notice
+            .as_deref()
+            .unwrap_or_default()
+            .contains("Showing the cleaned transcript fallback instead."));
     }
 
     #[test]

@@ -1,4 +1,5 @@
 import importlib
+import gzip
 import json
 import multiprocessing
 import os
@@ -699,9 +700,10 @@ class CliTrackTests(unittest.TestCase):
 
             self.assertEqual(code, 0)
             transcript_dir = Path(temp_paths.state_dir) / "tracked_sessions"
-            transcripts = list(transcript_dir.glob("*.transcript.jsonl"))
+            transcripts = list(transcript_dir.glob("*.transcript.jsonl.gz"))
             self.assertTrue(transcripts)
-            transcript_payload = transcripts[0].read_text(encoding="utf-8")
+            with gzip.open(transcripts[0], "rt", encoding="utf-8") as handle:
+                transcript_payload = handle.read()
             self.assertIn('"direction":"pty"', transcript_payload)
             self.assertIn('"seq":', transcript_payload)
 
@@ -763,11 +765,38 @@ class CliTrackTests(unittest.TestCase):
             self.assertGreaterEqual(int(summary["aggregate"].get("command_count", 0) or 0), 1)
             self.assertIn("README.md", list(summary["changes"].get("files_changed", []) or []))
             self.assertTrue(list(summary["changes"].get("commits_created", []) or []))
+            transcript_path = Path(str(summary.get("transcript_path", "") or ""))
             event_stream_path = Path(str(summary.get("event_stream_path", "") or ""))
+            self.assertTrue(str(transcript_path).endswith(".gz"))
+            self.assertTrue(str(event_stream_path).endswith(".gz"))
+            self.assertTrue(transcript_path.is_file())
             self.assertTrue(event_stream_path.is_file())
-            event_payload = event_stream_path.read_text(encoding="utf-8")
+            with gzip.open(event_stream_path, "rt", encoding="utf-8") as handle:
+                event_payload = handle.read()
             self.assertIn('"type":"git.snapshot.start"', event_payload)
             self.assertIn('"type":"command.recorded"', event_payload)
+
+    def test_loaders_read_compressed_track_artifacts(self):
+        with self._temp_app_paths() as (_, temp_paths):
+            transcript_dir = Path(temp_paths.state_dir) / "tracked_sessions"
+            transcript_dir.mkdir(parents=True, exist_ok=True)
+            transcript_path = transcript_dir / "demo.transcript.jsonl.gz"
+            event_path = transcript_dir / "demo.events.jsonl.gz"
+
+            with gzip.open(transcript_path, "wt", encoding="utf-8") as handle:
+                handle.write('{"ts":1.0,"direction":"pty","data_b64":"aGVsbG8="}\n')
+            with gzip.open(event_path, "wt", encoding="utf-8") as handle:
+                handle.write(
+                    '{"session_id":"demo","seq":1,"ts_wall":1.0,"ts_monotonic_ms":1,"type":"terminal.stdout","payload":{"data_b64":"aGVsbG8="}}\n'
+                )
+
+            transcript_events = track_module._load_transcript_events(str(transcript_path))
+            session_events = track_module._load_session_events(str(event_path))
+
+            self.assertEqual(len(transcript_events), 1)
+            self.assertEqual(transcript_events[0]["data"], b"hello")
+            self.assertEqual(len(session_events), 1)
+            self.assertEqual(session_events[0]["payload"]["data"], b"hello")
 
     def test_prune_tracked_transcripts_removes_files_older_than_seven_days(self):
         with self._temp_app_paths() as (_, temp_paths):

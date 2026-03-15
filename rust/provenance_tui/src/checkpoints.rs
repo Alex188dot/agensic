@@ -1,11 +1,12 @@
 use base64::engine::general_purpose::STANDARD as BASE64_STANDARD;
 use base64::Engine;
 use clap::Parser;
+use flate2::read::GzDecoder;
 use serde::{Deserialize, Serialize};
 use std::collections::hash_map::DefaultHasher;
 use std::fs::{self, File};
 use std::hash::{Hash, Hasher};
-use std::io::{self, BufRead, BufReader, Write};
+use std::io::{self, BufRead, BufReader, Read, Write};
 use std::path::Path;
 use std::time::{Duration, Instant};
 
@@ -157,12 +158,17 @@ impl CheckpointRecorder {
         }
         let now = Instant::now();
         let seq_gap = seq.saturating_sub(self.last_checkpoint_seq);
-        if !force && seq_gap < self.interval_events && now.duration_since(self.last_checkpoint_at) < self.interval {
+        if !force
+            && seq_gap < self.interval_events
+            && now.duration_since(self.last_checkpoint_at) < self.interval
+        {
             return Ok(());
         }
         let state = self.parser.screen().state_formatted();
         let state_hash = hash_bytes(&state);
-        if state_hash == self.last_state_hash && (!force || seq.max(self.last_seen_seq) == self.last_checkpoint_seq) {
+        if state_hash == self.last_state_hash
+            && (!force || seq.max(self.last_seen_seq) == self.last_checkpoint_seq)
+        {
             return Ok(());
         }
         let (rows, cols) = self.parser.screen().size();
@@ -192,10 +198,42 @@ fn hash_bytes(bytes: &[u8]) -> u64 {
     hasher.finish()
 }
 
+fn artifact_candidate_paths(path: &str) -> Vec<String> {
+    let clean = path.trim();
+    if clean.is_empty() {
+        return Vec::new();
+    }
+    if clean.ends_with(".gz") {
+        return vec![clean.to_string(), clean.trim_end_matches(".gz").to_string()];
+    }
+    vec![clean.to_string(), format!("{clean}.gz")]
+}
+
+fn read_text_artifact(path: &str) -> Option<String> {
+    for candidate in artifact_candidate_paths(path) {
+        let target = Path::new(&candidate);
+        if !target.is_file() {
+            continue;
+        }
+        if candidate.ends_with(".gz") {
+            let mut contents = String::new();
+            let file = File::open(target).ok()?;
+            let mut decoder = GzDecoder::new(file);
+            decoder.read_to_string(&mut contents).ok()?;
+            return Some(contents);
+        }
+        return fs::read_to_string(target).ok();
+    }
+    None
+}
+
 pub fn checkpoint_path_for_transcript(transcript_path: &str) -> String {
     let clean = transcript_path.trim();
     if clean.is_empty() {
         return String::new();
+    }
+    if let Some(prefix) = clean.strip_suffix(".transcript.jsonl.gz") {
+        return format!("{prefix}.checkpoints.jsonl.gz");
     }
     if let Some(prefix) = clean.strip_suffix(".transcript.jsonl") {
         return format!("{prefix}.checkpoints.jsonl");
@@ -213,14 +251,10 @@ pub fn decode_checkpoint_state(record: &CheckpointRecord) -> Vec<u8> {
 }
 
 pub fn load_checkpoint_records(path: &str) -> Vec<CheckpointRecord> {
-    let target = path.trim();
-    if target.is_empty() {
-        return Vec::new();
-    }
-    let Ok(handle) = File::open(target) else {
+    let Some(contents) = read_text_artifact(path) else {
         return Vec::new();
     };
-    BufReader::new(handle)
+    BufReader::new(contents.as_bytes())
         .lines()
         .filter_map(|line| line.ok())
         .filter_map(|line| serde_json::from_str::<CheckpointRecord>(&line).ok())
@@ -265,7 +299,10 @@ mod tests {
         CheckpointInputEvent, CheckpointRecorder,
     };
     use base64::Engine;
+    use flate2::write::GzEncoder;
+    use flate2::Compression;
     use std::fs;
+    use std::io::Write;
     use std::path::PathBuf;
     use std::time::{SystemTime, UNIX_EPOCH};
 
@@ -274,6 +311,10 @@ mod tests {
         assert_eq!(
             checkpoint_path_for_transcript("/tmp/demo.transcript.jsonl"),
             "/tmp/demo.checkpoints.jsonl"
+        );
+        assert_eq!(
+            checkpoint_path_for_transcript("/tmp/demo.transcript.jsonl.gz"),
+            "/tmp/demo.checkpoints.jsonl.gz"
         );
     }
 
@@ -308,8 +349,8 @@ mod tests {
             .unwrap_or(0);
         let path: PathBuf =
             std::env::temp_dir().join(format!("resize-burst-{suffix}.checkpoints.jsonl"));
-        let mut recorder =
-            CheckpointRecorder::new(path.to_str().unwrap_or_default(), 1_000, 1_000).expect("recorder");
+        let mut recorder = CheckpointRecorder::new(path.to_str().unwrap_or_default(), 1_000, 1_000)
+            .expect("recorder");
         recorder
             .handle_event(CheckpointInputEvent {
                 direction: "resize".to_string(),
@@ -328,12 +369,43 @@ mod tests {
                 data_b64: String::new(),
             })
             .expect("second resize");
-        recorder.flush_pending_resize_checkpoint(true).expect("flush");
+        recorder
+            .flush_pending_resize_checkpoint(true)
+            .expect("flush");
         let records = load_checkpoint_records(path.to_str().unwrap_or_default());
         assert_eq!(records.len(), 1);
         assert_eq!(records[0].seq, 2);
         assert_eq!(records[0].rows, 24);
         assert_eq!(records[0].cols, 100);
+        let _ = fs::remove_file(path);
+    }
+
+    #[test]
+    fn checkpoint_loader_reads_gzip_sidecars() {
+        let suffix = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .map(|duration| duration.as_nanos())
+            .unwrap_or(0);
+        let path: PathBuf =
+            std::env::temp_dir().join(format!("gzip-demo-{suffix}.checkpoints.jsonl.gz"));
+        let mut parser = vt100::Parser::new(3, 12, 0);
+        parser.process(b"hello");
+        let record = serde_json::json!({
+            "seq": 9,
+            "rows": 3,
+            "cols": 12,
+            "state_b64": base64::engine::general_purpose::STANDARD.encode(parser.screen().state_formatted()),
+        });
+        let file = fs::File::create(&path).expect("create gzip checkpoint");
+        let mut encoder = GzEncoder::new(file, Compression::default());
+        encoder
+            .write_all(format!("{record}\n").as_bytes())
+            .expect("write compressed checkpoint");
+        encoder.finish().expect("finish gzip checkpoint");
+
+        let records = load_checkpoint_records(path.to_str().unwrap_or_default());
+        assert_eq!(records.len(), 1);
+        assert_eq!(records[0].seq, 9);
         let _ = fs::remove_file(path);
     }
 }

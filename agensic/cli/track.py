@@ -1,12 +1,14 @@
 import base64
 import errno
 import fcntl
+import gzip
 import json
 import os
 import re
 import secrets
 import select
 import shlex
+import shutil
 import signal
 import struct
 import subprocess
@@ -45,6 +47,7 @@ TRACK_STOP_GRACE_SECONDS = 2.0
 TRACK_INSPECT_TAIL_EVENTS = 8
 TRACK_TRANSCRIPT_RETENTION_SECONDS = 7 * 24 * 3600
 TRACK_TRANSCRIPT_MAX_TOTAL_BYTES = 1024 * 1024 * 1024
+TRACK_ARTIFACT_COMPRESSION_SUFFIX = ".gz"
 TRACK_UNMANAGED_WINDOW_TOKENS = (
     "terminal.app",
     "iterm.app",
@@ -361,19 +364,19 @@ def delete_track_session_artifacts(session_id: str, *, state: dict[str, object] 
     transcript_path = str(session.get("transcript_path", "") or "").strip()
     if transcript_path.endswith(".transcript.jsonl"):
         candidate_paths.add(transcript_path[: -len(".transcript.jsonl")] + ".checkpoints.jsonl")
+    elif transcript_path.endswith(".transcript.jsonl.gz"):
+        candidate_paths.add(transcript_path[: -len(".transcript.jsonl.gz")] + ".checkpoints.jsonl.gz")
 
     deleted = store.delete_tracked_session(clean_session_id)
     if not deleted:
         return False
 
     for raw_path in candidate_paths:
-        clean_path = str(raw_path or "").strip()
-        if not clean_path:
-            continue
-        try:
-            Path(clean_path).expanduser().unlink(missing_ok=True)
-        except Exception:
-            continue
+        for candidate in _track_artifact_cleanup_paths(str(raw_path or "").strip()):
+            try:
+                candidate.unlink(missing_ok=True)
+            except Exception:
+                continue
     return True
 
 
@@ -414,6 +417,82 @@ def _track_event_stream_path(session_id: str) -> str:
 def _track_checkpoint_path(session_id: str) -> str:
     clean_session_id = str(session_id or "").strip() or uuid.uuid4().hex[:16]
     return os.path.join(_track_transcripts_dir(), f"{clean_session_id}.checkpoints.jsonl")
+
+
+def _track_artifact_cleanup_paths(path: str) -> set[Path]:
+    clean_path = str(path or "").strip()
+    if not clean_path:
+        return set()
+    target = Path(clean_path).expanduser()
+    if clean_path.endswith(TRACK_ARTIFACT_COMPRESSION_SUFFIX):
+        return {
+            target,
+            Path(clean_path[: -len(TRACK_ARTIFACT_COMPRESSION_SUFFIX)]).expanduser(),
+        }
+    return {
+        target,
+        Path(clean_path + TRACK_ARTIFACT_COMPRESSION_SUFFIX).expanduser(),
+    }
+
+
+def _resolve_track_artifact_path(path: str) -> Path | None:
+    clean_path = str(path or "").strip()
+    if not clean_path:
+        return None
+    if clean_path.endswith(TRACK_ARTIFACT_COMPRESSION_SUFFIX):
+        candidates = [
+            Path(clean_path).expanduser(),
+            Path(clean_path[: -len(TRACK_ARTIFACT_COMPRESSION_SUFFIX)]).expanduser(),
+        ]
+    else:
+        candidates = [
+            Path(clean_path).expanduser(),
+            Path(clean_path + TRACK_ARTIFACT_COMPRESSION_SUFFIX).expanduser(),
+        ]
+    for candidate in candidates:
+        if candidate.is_file():
+            return candidate
+    return None
+
+
+def _read_track_artifact_text(path: str) -> str | None:
+    target = _resolve_track_artifact_path(path)
+    if target is None:
+        return None
+    try:
+        if target.name.endswith(TRACK_ARTIFACT_COMPRESSION_SUFFIX):
+            with gzip.open(target, "rt", encoding="utf-8") as handle:
+                return handle.read()
+        return target.read_text(encoding="utf-8")
+    except Exception:
+        return None
+
+
+def _compress_track_artifact(path: str) -> str:
+    clean_path = str(path or "").strip()
+    if not clean_path:
+        return ""
+    source = Path(clean_path).expanduser()
+    if source.name.endswith(TRACK_ARTIFACT_COMPRESSION_SUFFIX):
+        return str(source)
+    if not source.is_file():
+        compressed = Path(clean_path + TRACK_ARTIFACT_COMPRESSION_SUFFIX).expanduser()
+        return str(compressed) if compressed.is_file() else clean_path
+
+    target = Path(str(source) + TRACK_ARTIFACT_COMPRESSION_SUFFIX)
+    tmp_target = Path(str(target) + ".tmp")
+    try:
+        with source.open("rb") as src, gzip.open(tmp_target, "wb", compresslevel=6) as dst:
+            shutil.copyfileobj(src, dst)
+        tmp_target.replace(target)
+        source.unlink(missing_ok=True)
+        return str(target)
+    except Exception:
+        try:
+            tmp_target.unlink(missing_ok=True)
+        except Exception:
+            pass
+        return clean_path
 
 
 def _platform_rust_target() -> str:
@@ -545,23 +624,29 @@ def _prune_tracked_transcripts(*, exclude_paths: set[str] | None = None) -> dict
         return {"removed_files": 0, "removed_bytes": 0}
 
     excluded = {
-        str(Path(path).expanduser().resolve(strict=False))
+        str(candidate.resolve(strict=False))
         for path in (exclude_paths or set())
-        if str(path or "").strip()
+        for candidate in _track_artifact_cleanup_paths(str(path or "").strip())
     }
     now = int(time.time())
     removed = 0
     removed_bytes = 0
 
     candidates: list[tuple[float, Path]] = []
-    for transcript_path in transcript_dir.glob("*.jsonl"):
-        if not transcript_path.is_file():
-            continue
-        try:
-            stat = transcript_path.stat()
-        except OSError:
-            continue
-        candidates.append((float(stat.st_mtime), transcript_path))
+    seen_paths: set[str] = set()
+    for pattern in ("*.jsonl", "*.jsonl.gz"):
+        for transcript_path in transcript_dir.glob(pattern):
+            if not transcript_path.is_file():
+                continue
+            resolved = str(transcript_path.resolve(strict=False))
+            if resolved in seen_paths:
+                continue
+            seen_paths.add(resolved)
+            try:
+                stat = transcript_path.stat()
+            except OSError:
+                continue
+            candidates.append((float(stat.st_mtime), transcript_path))
 
     candidates.sort(key=lambda item: (item[0], item[1].name))
 
@@ -584,19 +669,22 @@ def _prune_tracked_transcripts(*, exclude_paths: set[str] | None = None) -> dict
 
     remaining: list[tuple[float, Path, int]] = []
     total_size = 0
-    for transcript_path in transcript_dir.glob("*.jsonl"):
-        if not transcript_path.is_file():
-            continue
-        resolved = str(transcript_path.resolve(strict=False))
-        if resolved in excluded:
-            continue
-        try:
-            stat = transcript_path.stat()
-        except OSError:
-            continue
-        size = int(stat.st_size)
-        total_size += size
-        remaining.append((float(stat.st_mtime), transcript_path, size))
+    seen_paths.clear()
+    for pattern in ("*.jsonl", "*.jsonl.gz"):
+        for transcript_path in transcript_dir.glob(pattern):
+            if not transcript_path.is_file():
+                continue
+            resolved = str(transcript_path.resolve(strict=False))
+            if resolved in seen_paths or resolved in excluded:
+                continue
+            seen_paths.add(resolved)
+            try:
+                stat = transcript_path.stat()
+            except OSError:
+                continue
+            size = int(stat.st_size)
+            total_size += size
+            remaining.append((float(stat.st_mtime), transcript_path, size))
 
     remaining.sort(key=lambda item: (item[0], item[1].name))
     for _, transcript_path, size in remaining:
@@ -1478,15 +1566,11 @@ def _git_commits_between(repo_root: str, start_head: str, end_head: str) -> list
 
 
 def _load_session_events(path: str) -> list[dict[str, Any]]:
-    target = Path(path).expanduser()
-    if not target.is_file():
+    contents = _read_track_artifact_text(path)
+    if contents is None:
         return []
     events: list[dict[str, Any]] = []
-    try:
-        lines = target.read_text(encoding="utf-8").splitlines()
-    except Exception:
-        return []
-    for line in lines:
+    for line in contents.splitlines():
         try:
             payload = json.loads(line)
         except Exception:
@@ -1509,15 +1593,11 @@ def _load_session_events(path: str) -> list[dict[str, Any]]:
 
 
 def _load_transcript_events(path: str) -> list[dict[str, Any]]:
-    target = Path(path).expanduser()
-    if not target.is_file():
+    contents = _read_track_artifact_text(path)
+    if contents is None:
         return []
     events: list[dict[str, Any]] = []
-    try:
-        lines = target.read_text(encoding="utf-8").splitlines()
-    except Exception:
-        return []
-    for line in lines:
+    for line in contents.splitlines():
         try:
             payload = json.loads(line)
         except Exception:
@@ -2870,6 +2950,12 @@ def run_tracked_command(launch: TrackLaunch) -> int:
             checkpoint_recorder,
             final_seq=runtime._event_seq if "runtime" in locals() else None,
         )
+
+    transcript_path = _compress_track_artifact(transcript_path)
+    event_stream_path = _compress_track_artifact(event_stream_path)
+    checkpoint_path = _compress_track_artifact(checkpoint_path)
+    runtime.transcript_path = transcript_path
+    runtime.event_stream_path = event_stream_path
 
     final_state = state_store.get_tracked_session(session_id) or _load_track_state()
     final_status = "stopped" if str(final_state.get("status", "") or "").strip().lower() == "stopping" else "exited"
