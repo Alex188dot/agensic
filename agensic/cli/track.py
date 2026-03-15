@@ -167,6 +167,28 @@ def _builtin_agent_tokens() -> set[str]:
     return tokens
 
 
+def _builtin_agent_ids() -> set[str]:
+    registry = get_agent_registry(force_reload=True)
+    builtin_path = Path(str(registry.summary().get("builtin_path", "") or "")).expanduser()
+    if not builtin_path.is_file():
+        return set()
+    try:
+        payload = json.loads(builtin_path.read_text(encoding="utf-8"))
+    except Exception:
+        return set()
+    agents = payload.get("agents", [])
+    if not isinstance(agents, list):
+        return set()
+    out: set[str] = set()
+    for row in agents:
+        if not isinstance(row, dict):
+            continue
+        agent_id = str(row.get("agent_id", "") or "").strip().lower()
+        if agent_id:
+            out.add(agent_id)
+    return out
+
+
 def list_custom_agents() -> list[dict[str, str]]:
     payload = _load_local_agent_registry_override()
     agents = payload.get("agents", [])
@@ -188,6 +210,31 @@ def list_custom_agents() -> list[dict[str, str]]:
             }
         )
     out.sort(key=lambda item: item["agent_id"])
+    return out
+
+
+def list_known_agents() -> list[dict[str, Any]]:
+    registry = get_agent_registry(force_reload=True)
+    builtin_ids = _builtin_agent_ids()
+    out: list[dict[str, Any]] = []
+    for row in registry.list_agents():
+        if not isinstance(row, dict):
+            continue
+        agent_id = str(row.get("agent_id", "") or "").strip().lower()
+        if not agent_id:
+            continue
+        out.append(
+            {
+                "agent_id": agent_id,
+                "display_name": str(row.get("display_name", "") or _display_name_for_agent(agent_id)).strip()
+                or _display_name_for_agent(agent_id),
+                "source": ("builtin" if agent_id in builtin_ids else "custom"),
+                "status": str(row.get("status", "") or "").strip().lower() or "community",
+                "executables": [str(item) for item in row.get("executables", []) if str(item)],
+                "aliases": [str(item) for item in row.get("aliases", []) if str(item)],
+            }
+        )
+    out.sort(key=lambda item: (0 if item["source"] == "builtin" else 1, item["agent_id"]))
     return out
 
 

@@ -572,7 +572,8 @@ def classify_command_run(
         if not agent and inferred_from_payload.get("agent_id"):
             agent = str(inferred_from_payload.get("agent_id", "") or "")
             agent_source = agent_source or "provider_model_infer"
-        if not normalized_model:
+        inferred_agent = str(inferred_from_payload.get("agent_id", "") or "").strip().lower()
+        if not normalized_model and (not agent or not inferred_agent or inferred_agent == agent):
             normalized_model = str(inferred_from_payload.get("model_normalized", "") or "")
         if not registry_status and not proof_valid:
             registry_status = str(inferred_from_payload.get("registry_status", "") or "")

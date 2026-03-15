@@ -41,7 +41,7 @@ class ProvenanceClassifierTests(unittest.TestCase):
         self.assertTrue(out["proof_valid"])
         self.assertEqual(out["evidence_tier"], "proof")
         self.assertEqual(out["model_fingerprint"], "codex_gpt-5-codex")
-        self.assertEqual(out["registry_status"], "verified")
+        self.assertEqual(out["registry_status"], "community")
         self.assertEqual(out["agent_name"], "Planner A")
         self.assertIn("proof_signer_scope=local-ed25519", out["evidence"])
         self.assertIn("proof_key_fingerprint=abc123abc123abc1", out["evidence"])

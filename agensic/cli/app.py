@@ -2634,6 +2634,39 @@ def _setup_remove_custom_agent() -> None:
     _setup_pause()
 
 
+def _setup_show_all_agents() -> None:
+    from . import track as track_runtime
+
+    _reset_setup_screen(section_title="Show All Agents")
+    agents = track_runtime.list_known_agents()
+    if not agents:
+        console.print("[yellow]No agents found.[/yellow]")
+        _setup_pause()
+        return
+
+    table = Table(title="Agensic Known Agents")
+    table.add_column("Agent")
+    table.add_column("Name")
+    table.add_column("Source")
+    table.add_column("Status")
+    table.add_column("Executables")
+    table.add_column("Aliases", overflow="fold")
+    for agent in agents:
+        if not isinstance(agent, dict):
+            continue
+        table.add_row(
+            str(agent.get("agent_id", "") or ""),
+            str(agent.get("display_name", "") or ""),
+            str(agent.get("source", "") or ""),
+            str(agent.get("status", "") or ""),
+            ", ".join([str(x) for x in agent.get("executables", []) if str(x)]),
+            ", ".join([str(x) for x in agent.get("aliases", []) if str(x)]),
+        )
+    console.print(table)
+    console.print("`source` is where the mapping came from. `status` is the trust/registry classification.")
+    _setup_pause()
+
+
 def _setup_rename_session() -> None:
     from . import track as track_runtime
 
@@ -2680,6 +2713,7 @@ def _setup_sessions_menu() -> None:
         action = _setup_select(
             "Choose one:",
             choices=[
+                "Show All Agents",
                 "Add custom Agent",
                 "Remove custom Agent",
                 "Rename session",
@@ -2688,6 +2722,9 @@ def _setup_sessions_menu() -> None:
         )
         if _is_back(action) or not action:
             return
+        if action == "Show All Agents":
+            _setup_show_all_agents()
+            continue
         if action == "Add custom Agent":
             _setup_add_custom_agent()
             continue

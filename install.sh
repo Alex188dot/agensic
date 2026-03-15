@@ -1,6 +1,6 @@
 #!/bin/bash
 
-echo "🚀 Installing Agensic 🔒..."
+echo "🚀 Installing Agensic 🫆..."
 
 # 1. Create directory
 CONFIG_HOME="${XDG_CONFIG_HOME:-$HOME/.config}"
@@ -237,7 +237,7 @@ $RC_END_MARKER
 EOF
 
 echo ""
-echo "✅ Agensic 🔒 Installation complete!"
+echo "✅ Agensic 🫆 Installation complete!"
 echo "------------------------------------------------"
 echo "1. Open a new terminal, or run: export PATH=\"$USER_BIN_DIR:\$PATH\""
 if [ "$FIRST_INSTALL" -eq 1 ]; then

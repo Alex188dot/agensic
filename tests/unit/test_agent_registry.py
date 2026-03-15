@@ -11,13 +11,15 @@ class AgentRegistryTests(unittest.TestCase):
         agents = {row["agent_id"] for row in registry.list_agents()}
         self.assertIn("cursor", agents)
         self.assertIn("codex", agents)
+        self.assertIn("qwen_code", agents)
+        self.assertIn("mini_agent", agents)
+        self.assertIn("kimi_code", agents)
         self.assertIn("claude_code", agents)
         self.assertIn("opencode", agents)
         self.assertIn("openclaw", agents)
-        self.assertIn("windsurf", agents)
         self.assertIn("kiro", agents)
         self.assertIn("gemini_cli", agents)
-        self.assertIn("antigravity", agents)
+        self.assertIn("nanoclaw", agents)
         self.assertIn("ollama", agents)
 
     def test_provider_model_inference(self):
@@ -51,12 +53,12 @@ class AgentRegistryTests(unittest.TestCase):
                     "pid": 100,
                     "ppid": 1,
                     "comm": "python",
-                    "command": "python run_antigravity_helper.py",
+                    "command": "python run_aider_helper.py",
                 }
             ]
         )
         self.assertIsNotNone(match)
-        self.assertEqual(match.agent_id, "antigravity")
+        self.assertEqual(match.agent_id, "aider")
         self.assertEqual(match.evidence_tier, "community")
 
     def test_model_fingerprint_prefers_normalized(self):

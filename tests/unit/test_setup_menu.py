@@ -54,8 +54,16 @@ class SetupMenuTests(unittest.TestCase):
 
         self.assertEqual(
             captured_choices[0],
-            ["Add custom Agent", "Remove custom Agent", "Rename session", "Remove session"],
+            ["Show All Agents", "Add custom Agent", "Remove custom Agent", "Rename session", "Remove session"],
         )
+
+    def test_sessions_submenu_routes_show_all_agents(self):
+        with patch.object(cli_app, "_setup_select", side_effect=["Show All Agents", cli_app.BACK_SIGNAL]), patch.object(
+            cli_app, "_setup_show_all_agents"
+        ) as show_all_agents:
+            cli_app._setup_sessions_menu()
+
+        show_all_agents.assert_called_once_with()
 
 
 if __name__ == "__main__":

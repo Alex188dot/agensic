@@ -288,13 +288,28 @@ class CliTrackTests(unittest.TestCase):
         with self._temp_app_paths() as (env, temp_paths), patch.object(
             cli_app, "_run_storage_preflight_if_enabled"
         ):
-            result = self.runner.invoke(app, ["--add_agent", "stepclaw"], env=env)
+            result = self.runner.invoke(app, ["--add_agent", "myagent"], env=env)
             self.assertEqual(result.exit_code, 0)
-            self.assertIn("agensic run stepclaw", result.stdout)
+            self.assertIn("agensic run myagent", result.stdout)
             override_path = Path(temp_paths.agent_registry_local_override_path)
             self.assertTrue(override_path.is_file())
             payload = json.loads(override_path.read_text(encoding="utf-8"))
-            self.assertEqual(payload["agents"][0]["agent_id"], "stepclaw")
+            self.assertEqual(payload["agents"][0]["agent_id"], "myagent")
+
+    def test_list_known_agents_marks_builtin_and_custom_sources(self):
+        with self._temp_app_paths() as (env, _), patch.object(
+            cli_app, "_run_storage_preflight_if_enabled"
+        ):
+            added = self.runner.invoke(app, ["--add_agent", "myagent"], env=env)
+            self.assertEqual(added.exit_code, 0)
+            agents = track_module.list_known_agents()
+
+        by_id = {str(row["agent_id"]): row for row in agents}
+        self.assertEqual(by_id["cursor"]["source"], "builtin")
+        self.assertEqual(by_id["cursor"]["status"], "verified")
+        self.assertEqual(by_id["codex"]["status"], "community")
+        self.assertEqual(by_id["myagent"]["source"], "custom")
+        self.assertEqual(by_id["myagent"]["status"], "community")
 
     def test_add_custom_agent_rejects_builtin_agent(self):
         with self._temp_app_paths() as (env, _), patch.object(
@@ -313,26 +328,65 @@ class CliTrackTests(unittest.TestCase):
             "run_tracked_command",
             return_value=0,
         ) as run_mock:
-            added = self.runner.invoke(app, ["--add_agent", "stepclaw"], env=env)
+            added = self.runner.invoke(app, ["--add_agent", "myagent"], env=env)
             self.assertEqual(added.exit_code, 0)
-            result = self.runner.invoke(app, ["run", "stepclaw"], env=env)
+            result = self.runner.invoke(app, ["run", "myagent"], env=env)
 
         self.assertEqual(result.exit_code, 0)
         launch = run_mock.call_args.args[0]
-        self.assertEqual(launch.agent, "stepclaw")
-        self.assertEqual(launch.command[0], "stepclaw")
+        self.assertEqual(launch.agent, "myagent")
+        self.assertEqual(launch.command[0], "myagent")
 
     def test_remove_custom_agent_deletes_local_override_entry(self):
         with self._temp_app_paths() as (env, temp_paths), patch.object(
             cli_app, "_run_storage_preflight_if_enabled"
         ):
-            added = self.runner.invoke(app, ["--add_agent", "stepclaw"], env=env)
+            added = self.runner.invoke(app, ["--add_agent", "myagent"], env=env)
             self.assertEqual(added.exit_code, 0)
-            removed = track_module.remove_custom_agent("stepclaw")
+            removed = track_module.remove_custom_agent("myagent")
 
-            self.assertEqual(removed["agent_id"], "stepclaw")
+            self.assertEqual(removed["agent_id"], "myagent")
             payload = json.loads(Path(temp_paths.agent_registry_local_override_path).read_text(encoding="utf-8"))
             self.assertEqual(payload["agents"], [])
+
+    def test_run_accepts_qwen_alias_and_uses_qwen_executable(self):
+        with patch.object(cli_app, "_run_storage_preflight_if_enabled"), patch.object(
+            track_module,
+            "run_tracked_command",
+            return_value=0,
+        ) as run_mock:
+            result = self.runner.invoke(app, ["run", "qwen"])
+
+        self.assertEqual(result.exit_code, 0)
+        launch = run_mock.call_args.args[0]
+        self.assertEqual(launch.agent, "qwen_code")
+        self.assertEqual(launch.command[0], "qwen")
+
+    def test_run_accepts_cursor_alias_and_uses_cursor_agent_executable(self):
+        with patch.object(cli_app, "_run_storage_preflight_if_enabled"), patch.object(
+            track_module,
+            "run_tracked_command",
+            return_value=0,
+        ) as run_mock:
+            result = self.runner.invoke(app, ["run", "cursor"])
+
+        self.assertEqual(result.exit_code, 0)
+        launch = run_mock.call_args.args[0]
+        self.assertEqual(launch.agent, "cursor")
+        self.assertEqual(launch.command[0], "agent")
+
+    def test_run_accepts_kiro_alias_and_uses_kiro_cli_executable(self):
+        with patch.object(cli_app, "_run_storage_preflight_if_enabled"), patch.object(
+            track_module,
+            "run_tracked_command",
+            return_value=0,
+        ) as run_mock:
+            result = self.runner.invoke(app, ["run", "kiro"])
+
+        self.assertEqual(result.exit_code, 0)
+        launch = run_mock.call_args.args[0]
+        self.assertEqual(launch.agent, "kiro")
+        self.assertEqual(launch.command[0], "kiro-cli")
 
     def test_run_rejects_agent_override_option(self):
         with patch.object(cli_app, "_run_storage_preflight_if_enabled"):

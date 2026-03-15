@@ -2293,10 +2293,14 @@ _agensic_ai_session_agent_matches_executable() {
 
     case "$session_agent" in
         codex) [[ "$executable" == "codex" || "$executable" == "codex-agent" ]] ;;
+        qwen_code) [[ "$executable" == "qwen" ]] ;;
+        mini_agent) [[ "$executable" == "mini-agent" ]] ;;
+        kimi_code) [[ "$executable" == "kimi" ]] ;;
         claude|claude_code) [[ "$executable" == "claude" ]] ;;
         gemini|gemini_cli) [[ "$executable" == "gemini" ]] ;;
-        cursor) [[ "$executable" == "cursor" || "$executable" == "cursor-agent" ]] ;;
-        openclaw|opencode|windsurf|kiro|antigravity|aider|continue|ollama) [[ "$executable" == "$session_agent" ]] ;;
+        cursor) [[ "$executable" == "agent" ]] ;;
+        kiro) [[ "$executable" == "kiro-cli" || "$executable" == "kiro" ]] ;;
+        openclaw|opencode|aider|continue|ollama|nanoclaw) [[ "$executable" == "$session_agent" ]] ;;
         *) [[ "$executable" == "$session_agent" ]] ;;
     esac
 }

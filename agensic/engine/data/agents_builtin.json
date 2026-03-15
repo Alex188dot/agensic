@@ -1,11 +1,11 @@
 {
-  "version": "builtin-2026-03-13",
+  "version": "builtin-2026-03-15",
   "agents": [
     {
       "agent_id": "cursor",
       "display_name": "Cursor",
       "aliases": ["cursor-ai", "cursor_agent"],
-      "executables": ["cursor-agent", "cursor"],
+      "executables": ["agent"],
       "process_tokens": ["cursor", "cursor-agent"],
       "window_tokens": ["cursor"],
       "model_patterns": [
@@ -27,6 +27,45 @@
         {"pattern": "(?:^|/)(o[0-9][\\w.-]*)$", "normalized": "openai-reasoning"}
       ],
       "provider_hints": ["openai"],
+      "status": "community"
+    },
+    {
+      "agent_id": "qwen_code",
+      "display_name": "Qwen Code",
+      "aliases": ["qwen"],
+      "executables": ["qwen"],
+      "process_tokens": ["qwen code", "qwen"],
+      "window_tokens": ["qwen"],
+      "model_patterns": [
+        {"pattern": "(?:^|/)(qwen[\\w.-]*)$", "normalized": "qwen"}
+      ],
+      "provider_hints": ["dashscope", "qwen"],
+      "status": "community"
+    },
+    {
+      "agent_id": "mini_agent",
+      "display_name": "Mini Agent",
+      "aliases": ["mini-agent", "miniagent", "minimax-agent"],
+      "executables": ["mini-agent"],
+      "process_tokens": ["mini agent", "mini-agent", "minimax agent"],
+      "window_tokens": ["mini-agent"],
+      "model_patterns": [
+        {"pattern": "(?:^|/)(minimax[\\w.-]*|abab[\\w.-]*)$", "normalized": "minimax"}
+      ],
+      "provider_hints": ["minimax"],
+      "status": "community"
+    },
+    {
+      "agent_id": "kimi_code",
+      "display_name": "Kimi Code",
+      "aliases": ["kimi", "kimi-cli"],
+      "executables": ["kimi"],
+      "process_tokens": ["kimi code", "kimi"],
+      "window_tokens": ["kimi"],
+      "model_patterns": [
+        {"pattern": "(?:^|/)(kimi[\\w.-]*|moonshot[\\w.-]*)$", "normalized": "kimi"}
+      ],
+      "provider_hints": ["moonshot", "kimi"],
       "status": "verified"
     },
     {
@@ -53,12 +92,12 @@
         {"pattern": "(?:^|/)(gpt-[\\w.-]+|claude[\\w.-]+|gemini[\\w.-]+)$", "normalized": "llm-generic"}
       ],
       "provider_hints": ["opencode"],
-      "status": "verified"
+      "status": "community"
     },
     {
       "agent_id": "kilocode",
       "display_name": "Kilo Code",
-      "aliases": ["kilo-code", "kilo"],
+      "aliases": ["kilo"],
       "executables": ["kilo", "kilocode"],
       "process_tokens": ["kilo code", "kilocode"],
       "window_tokens": ["kilo", "kilocode"],
@@ -92,28 +131,15 @@
         {"pattern": "(?:^|/)(gpt-[\\w.-]+|claude[\\w.-]+)$", "normalized": "llm-generic"}
       ],
       "provider_hints": ["openclaw"],
-      "status": "verified"
-    },
-    {
-      "agent_id": "windsurf",
-      "display_name": "Windsurf",
-      "aliases": ["codeium-windsurf", "windsurf-ai"],
-      "executables": ["windsurf"],
-      "process_tokens": ["windsurf", "codeium"],
-      "window_tokens": ["windsurf"],
-      "model_patterns": [
-        {"pattern": "(?:^|/)(claude[\\w.-]+|gpt-[\\w.-]+)$", "normalized": "llm-generic"}
-      ],
-      "provider_hints": ["windsurf"],
-      "status": "verified"
+      "status": "community"
     },
     {
       "agent_id": "kiro",
       "display_name": "Kiro",
       "aliases": ["kiro", "kiro-ai"],
-      "executables": ["kiro-cli", "kiro"],
-      "process_tokens": ["kiro"],
-      "window_tokens": ["kiro"],
+      "executables": ["kiro-cli"],
+      "process_tokens": ["kiro", "kiro-cli"],
+      "window_tokens": ["kiro", "kiro-cli"],
       "model_patterns": [
         {"pattern": "(?:^|/)(claude[\\w.-]+|gpt-[\\w.-]+)$", "normalized": "llm-generic"}
       ],
@@ -131,19 +157,6 @@
         {"pattern": "(?:^|/)(gemini[\\w.-]*)$", "normalized": "gemini"}
       ],
       "provider_hints": ["gemini"],
-      "status": "verified"
-    },
-    {
-      "agent_id": "antigravity",
-      "display_name": "Antigravity",
-      "aliases": ["google-antigravity"],
-      "executables": ["antigravity"],
-      "process_tokens": ["antigravity"],
-      "window_tokens": ["antigravity"],
-      "model_patterns": [
-        {"pattern": "(?:^|/)(gemini[\\w.-]+)$", "normalized": "gemini"}
-      ],
-      "provider_hints": ["antigravity"],
       "status": "community"
     },
     {
@@ -157,7 +170,7 @@
         {"pattern": "(?:^|/)(gpt-[\\w.-]+|claude[\\w.-]+|gemini[\\w.-]+)$", "normalized": "llm-generic"}
       ],
       "provider_hints": ["aider"],
-      "status": "verified"
+      "status": "community"
     },
     {
       "agent_id": "continue",
@@ -170,7 +183,20 @@
         {"pattern": "(?:^|/)(gpt-[\\w.-]+|claude[\\w.-]+|gemini[\\w.-]+)$", "normalized": "llm-generic"}
       ],
       "provider_hints": ["continue"],
-      "status": "verified"
+      "status": "community"
+    },
+    {
+      "agent_id": "nanoclaw",
+      "display_name": "NanoClaw",
+      "aliases": ["nano-claw"],
+      "executables": ["nanoclaw"],
+      "process_tokens": ["nanoclaw", "nano claw"],
+      "window_tokens": ["nanoclaw"],
+      "model_patterns": [
+        {"pattern": "(?:^|/)(claude[\\w.-]+|gpt-[\\w.-]+)$", "normalized": "llm-generic"}
+      ],
+      "provider_hints": ["nanoclaw"],
+      "status": "community"
     },
     {
       "agent_id": "ollama",
@@ -183,7 +209,7 @@
         {"pattern": "(?:^|/)([\\w.-]+:[\\w.-]+|[\\w.-]+)$", "normalized": "ollama-local"}
       ],
       "provider_hints": ["ollama"],
-      "status": "verified"
+      "status": "community"
     }
   ]
 }
