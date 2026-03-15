@@ -43,6 +43,10 @@ class CommandStoreRemovePayload(BaseModel):
     shell: str | None = None
 
 
+class CommandStoreHistoryPayload(BaseModel):
+    shell: str | None = None
+
+
 class BootstrapStatus(BaseModel):
     running: bool = False
     ready: bool = False
@@ -211,6 +215,16 @@ class CommandStoreRemoveResponse(BaseModel):
     normalized: int = 0
     vector_removed: int = 0
     guarded: int = 0
+
+
+class CommandStoreResyncResponse(BaseModel):
+    status: str
+    history_file: str
+    parsed_entries: int = 0
+    unique_commands: int = 0
+    delta_commands: int = 0
+    imported_commands: int = 0
+    reason: str | None = None
 
 
 class StatusResponse(BaseModel):

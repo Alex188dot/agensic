@@ -1385,6 +1385,50 @@ class SQLiteStateStore:
                 ).fetchall()
         return [self._clean_command(str(row["command"] or "")) for row in rows if row["command"]]
 
+    def count_commands(self, include_removed: bool = False) -> int:
+        with self._lock, self._conn() as conn:
+            if include_removed:
+                row = conn.execute("SELECT COUNT(*) AS total FROM commands").fetchone()
+            else:
+                row = conn.execute(
+                    """
+                    SELECT COUNT(*) AS total
+                    FROM commands c
+                    LEFT JOIN removed_commands r ON r.command = c.command
+                    WHERE r.command IS NULL
+                    """
+                ).fetchone()
+        return int(row["total"] or 0) if row is not None else 0
+
+    def get_meta(self, key: str, default: str = "") -> str:
+        clean_key = str(key or "").strip()
+        if not clean_key:
+            return str(default or "")
+        with self._lock, self._conn() as conn:
+            row = conn.execute(
+                "SELECT value FROM meta WHERE key = ? LIMIT 1",
+                (clean_key,),
+            ).fetchone()
+        if row is None:
+            return str(default or "")
+        return str(row["value"] or "")
+
+    def set_meta(self, key: str, value: str) -> bool:
+        clean_key = str(key or "").strip()
+        if not clean_key:
+            return False
+        with self._lock, self._conn() as conn:
+            conn.execute(
+                """
+                INSERT INTO meta(key, value)
+                VALUES(?, ?)
+                ON CONFLICT(key) DO UPDATE SET value = excluded.value
+                """,
+                (clean_key, str(value or "")),
+            )
+            conn.commit()
+        return True
+
     @staticmethod
     def _decode_command_run_row(row: sqlite3.Row) -> Dict[str, object]:
         evidence_raw = str(row["evidence_json"] or "[]")

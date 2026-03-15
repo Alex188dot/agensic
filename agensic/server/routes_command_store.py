@@ -3,11 +3,13 @@ from fastapi import APIRouter, BackgroundTasks
 from agensic.server import deps
 from agensic.server.schemas import (
     CommandStoreAddResponse,
+    CommandStoreHistoryPayload,
     CommandStoreListResponse,
     LogCommandPayload,
     CommandStorePayload,
     CommandStoreRemovePayload,
     CommandStoreRemoveResponse,
+    CommandStoreResyncResponse,
     LogCommandResponse,
 )
 
@@ -189,6 +191,31 @@ def command_store_remove(data: CommandStoreRemovePayload) -> CommandStoreRemoveR
             "history_removed_lines": history_removed_lines,
             "warnings": warnings_list,
             **result,
+        }
+    finally:
+        deps.release_request_slot()
+
+
+@router.post(
+    "/command_store/resync_history",
+    response_model=CommandStoreResyncResponse,
+    response_model_exclude_unset=True,
+)
+def command_store_resync_history(data: CommandStoreHistoryPayload) -> CommandStoreResyncResponse:
+    deps.enter_request_or_503()
+    try:
+        target_shell = (data.shell or os.environ.get("SHELL", "zsh")).strip()
+        history_file = deps.get_history_file(target_shell)
+        vector_db = deps.engine._ensure_vector_db()
+        result = vector_db.resync_history(history_file)
+        return {
+            "status": str(result.get("status", "ok") or "ok"),
+            "history_file": history_file,
+            "parsed_entries": int(result.get("parsed_entries", 0) or 0),
+            "unique_commands": int(result.get("unique_commands", 0) or 0),
+            "delta_commands": int(result.get("delta_commands", 0) or 0),
+            "imported_commands": int(result.get("imported_commands", 0) or 0),
+            "reason": str(result.get("reason", "") or "") or None,
         }
     finally:
         deps.release_request_slot()

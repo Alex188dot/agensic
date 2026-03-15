@@ -39,6 +39,15 @@ class _FakeVectorDB:
     def align_history_index_state_to_end(self, history_file: str) -> bool:
         return True
 
+    def resync_history(self, history_file: str):
+        return {
+            "status": "ok",
+            "parsed_entries": 3,
+            "unique_commands": 2,
+            "delta_commands": 1,
+            "imported_commands": 1,
+        }
+
 
 class ServerContractTests(unittest.TestCase):
     AUTH_TOKEN = "test-auth-token"
@@ -354,6 +363,13 @@ class ServerContractTests(unittest.TestCase):
             self.assertEqual(remove_response.status_code, 200)
             self.assertEqual(remove_response.json()["status"], "ok")
 
+            resync_response = self.client.post(
+                "/command_store/resync_history",
+                json={"shell": "zsh"},
+            )
+            self.assertEqual(resync_response.status_code, 200)
+            self.assertEqual(resync_response.json()["status"], "ok")
+
     def test_log_command_accepts_working_directory(self):
         with patch.object(deps.engine, "log_executed_command") as log_exec:
             response = self.client.post(
@@ -591,6 +607,13 @@ class ServerContractTests(unittest.TestCase):
         )
         self.assertEqual(remove_response.status_code, 503)
         self.assertEqual(remove_response.json().get("detail"), "daemon_shutting_down")
+
+        resync_response = self.client.post(
+            "/command_store/resync_history",
+            json={"shell": "zsh"},
+        )
+        self.assertEqual(resync_response.status_code, 503)
+        self.assertEqual(resync_response.json().get("detail"), "daemon_shutting_down")
 
         status_response = self.client.get("/status")
         self.assertEqual(status_response.status_code, 200)

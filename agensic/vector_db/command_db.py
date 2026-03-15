@@ -73,6 +73,7 @@ class CommandVectorDB:
     REPO_CONF_MEDIUM_MIN_DISTINCT = 2
     REPO_CONF_HIGH_MIN_ACCEPTS = 6
     REPO_EXECUTE_CAP = 3
+    HISTORY_SEED_COMPLETED_META_KEY = "history_seed_completed"
     HELP_DAMPENING_PENALTY = 0.25
     BLOCKED_EXECUTABLES = {
         "rm",
@@ -1436,6 +1437,88 @@ class CommandVectorDB:
         atomic_write_json_private(self.state_file, state)
         self._harden_storage_permissions()
 
+    def _history_seed_completed(self) -> bool:
+        if self.state_store is not None:
+            try:
+                value = self.state_store.get_meta(self.HISTORY_SEED_COMPLETED_META_KEY, "")
+            except Exception as exc:
+                logger.warning(f"Could not read history seed state from SQLite: {exc}")
+                return False
+            return str(value or "").strip() == "1"
+        state = self._load_index_state()
+        return bool(state.get("seed_completed"))
+
+    def _mark_history_seed_completed(
+        self,
+        history_file: str,
+        *,
+        inode: int = 0,
+        device: int = 0,
+        offset: int = 0,
+    ) -> None:
+        if self.state_store is not None:
+            try:
+                self.state_store.set_meta(self.HISTORY_SEED_COMPLETED_META_KEY, "1")
+                if history_file:
+                    self.state_store.set_history_index_state(
+                        history_file=history_file,
+                        inode=int(inode or 0),
+                        device=int(device or 0),
+                        offset=int(offset or 0),
+                    )
+            except Exception as exc:
+                logger.warning(f"Could not persist history seed state to SQLite: {exc}")
+            return
+
+        state = self._load_index_state()
+        state.update(
+            {
+                "history_file": history_file,
+                "inode": int(inode or 0),
+                "device": int(device or 0),
+                "offset": int(offset or 0),
+                "seed_completed": True,
+            }
+        )
+        self._save_index_state(state)
+
+    def _count_active_commands(self) -> int:
+        if self.state_store is not None:
+            try:
+                return int(self.state_store.count_commands(include_removed=False) or 0)
+            except Exception as exc:
+                logger.warning(f"Could not count commands from SQLite: {exc}")
+        with self._io_lock:
+            return len(self.inserted_commands)
+
+    def _ensure_vector_cache_from_state(self) -> None:
+        if self.state_store is None or self.inserted_commands:
+            return
+        try:
+            self.insert_commands(self.state_store.list_all_commands(include_removed=False))
+        except Exception as exc:
+            logger.warning(f"Could not warm vector cache from SQLite: {exc}")
+
+    def _history_sync_delta_counts(self, command_counts: Dict[str, int]) -> Dict[str, int]:
+        if not command_counts:
+            return {}
+        if self.state_store is None:
+            return dict(command_counts)
+
+        try:
+            stats = self.state_store.get_command_stats(list(command_counts.keys()))
+        except Exception as exc:
+            logger.warning(f"Could not read history counts from SQLite for resync: {exc}")
+            return dict(command_counts)
+
+        deltas: Dict[str, int] = {}
+        for command, parsed_count in command_counts.items():
+            stored_count = int(stats.get(command, {}).get("history_count", 0) or 0)
+            delta = max(0, int(parsed_count or 0) - stored_count)
+            if delta > 0:
+                deltas[command] = delta
+        return deltas
+
     def _parse_history_line(self, line: str) -> str:
         line = line.strip()
         if not line:
@@ -1486,110 +1569,128 @@ class CommandVectorDB:
 
     def initialize_from_history(self, history_file: str):
         self._set_init_phase("syncing_history")
+        history_file = str(history_file or "").strip()
+        if not history_file:
+            self._set_init_phase("ready")
+            return {"status": "ignored", "reason": "history_file_missing"}
         history_path = Path(history_file).expanduser()
         if not history_path.exists():
             logger.warning(f"History file not found: {history_file}")
             self._set_init_phase("ready")
-            return
+            return {"status": "ignored", "reason": "history_file_missing"}
 
-        logger.info(f"Syncing database from history: {history_file}")
+        logger.info(f"Checking one-time history seed: {history_file}")
 
         try:
             stat = history_path.stat()
             history_key = str(history_path)
-            state = (
-                self.state_store.get_history_index_state(history_key)
-                if self.state_store is not None
-                else self._load_index_state()
-            ) or {}
-            saved_offset = state.get("offset")
-            saved_offset_int = int(saved_offset) if isinstance(saved_offset, int) else 0
+            seed_completed = self._history_seed_completed()
+            active_commands = self._count_active_commands()
 
-            if self.state_store is None and not state and self.inserted_commands:
-                self._save_index_state(
-                    {
-                        "history_file": history_key,
-                        "inode": stat.st_ino,
-                        "device": stat.st_dev,
-                        "offset": stat.st_size,
-                    }
+            if seed_completed or active_commands > 0:
+                logger.info(
+                    "Skipping automatic history seed (seed_completed=%s active_commands=%s)",
+                    seed_completed,
+                    active_commands,
                 )
-                logger.info("Database already populated; seeded incremental history pointer")
+                self._ensure_vector_cache_from_state()
                 self._set_init_phase("ready")
-                return
+                return {
+                    "status": "skipped",
+                    "reason": "seed_already_completed" if seed_completed else "store_not_empty",
+                    "history_file": history_key,
+                    "active_commands": active_commands,
+                }
 
-            start_offset = 0
-            if (
-                state.get("history_file") == history_key
-                and state.get("inode") == stat.st_ino
-                and state.get("device") == stat.st_dev
-                and isinstance(saved_offset, int)
-            ):
-                start_offset = max(0, min(saved_offset_int, stat.st_size))
-            elif stat.st_size < saved_offset_int:
-                start_offset = 0
-
-            if start_offset > 0:
-                logger.info(f"Incremental history sync from byte offset {start_offset}")
-
-            command_counts, end_offset = self._read_history_commands_from_offset(
-                history_path, start_offset
-            )
-            if not command_counts:
-                if self.state_store is not None:
-                    self.state_store.set_history_index_state(
-                        history_file=history_key,
-                        inode=stat.st_ino,
-                        device=stat.st_dev,
-                        offset=stat.st_size,
-                    )
-                    if not self.inserted_commands:
-                        self.insert_commands(self.state_store.list_all_commands(include_removed=False))
-                else:
-                    self._save_index_state(
-                        {
-                            "history_file": history_key,
-                            "inode": stat.st_ino,
-                            "device": stat.st_dev,
-                            "offset": stat.st_size,
-                        }
-                    )
-                self._set_init_phase("ready")
-                return
-
+            command_counts, end_offset = self._read_history_commands_from_offset(history_path, 0)
             total_occurrences = sum(command_counts.values())
-            logger.info(
-                f"Found {total_occurrences} new history entries across {len(command_counts)} unique commands"
-            )
+            if total_occurrences > 0:
+                logger.info(
+                    f"Found {total_occurrences} history entries across {len(command_counts)} unique commands for one-time seed"
+                )
+            else:
+                logger.info("History file is empty; marking initial seed as completed")
+
             if self.state_store is not None:
                 inserted = int(self.state_store.apply_history_counts(command_counts) or 0)
                 self.insert_commands(list(command_counts.keys()))
             else:
                 inserted = self.upsert_history_commands(command_counts)
             if inserted < 0:
-                logger.warning("History sync failed, keeping previous history pointer")
-                return
+                logger.warning("History seed failed; leaving seed state unchanged")
+                return {"status": "error", "reason": "history_seed_failed"}
 
-            if self.state_store is not None:
-                self.state_store.set_history_index_state(
-                    history_file=history_key,
-                    inode=stat.st_ino,
-                    device=stat.st_dev,
-                    offset=end_offset,
-                )
-            else:
-                self._save_index_state(
-                    {
-                        "history_file": history_key,
-                        "inode": stat.st_ino,
-                        "device": stat.st_dev,
-                        "offset": end_offset,
-                    }
-                )
+            self._mark_history_seed_completed(
+                history_key,
+                inode=stat.st_ino,
+                device=stat.st_dev,
+                offset=end_offset,
+            )
             self._set_init_phase("ready")
+            return {
+                "status": "ok",
+                "history_file": history_key,
+                "imported_commands": inserted,
+                "parsed_entries": total_occurrences,
+                "unique_commands": len(command_counts),
+            }
         except Exception as exc:
             logger.error(f"Error reading history file: {exc}")
             self._set_init_error(f"History sync failed: {exc}")
+            return {"status": "error", "reason": str(exc)}
+
+    def resync_history(self, history_file: str) -> Dict[str, object]:
+        self._set_init_phase("syncing_history")
+        history_file = str(history_file or "").strip()
+        if not history_file:
+            self._set_init_phase("ready")
+            return {"status": "ignored", "reason": "history_file_missing"}
+        history_path = Path(history_file).expanduser()
+        if not history_path.exists():
+            logger.warning(f"History file not found for manual resync: {history_file}")
+            self._set_init_phase("ready")
+            return {"status": "ignored", "reason": "history_file_missing"}
+
+        logger.info(f"Running manual history resync: {history_file}")
+
+        try:
+            stat = history_path.stat()
+            history_key = str(history_path)
+            command_counts, end_offset = self._read_history_commands_from_offset(history_path, 0)
+            total_occurrences = sum(command_counts.values())
+            delta_counts = self._history_sync_delta_counts(command_counts)
+
+            if self.state_store is not None:
+                inserted = int(self.state_store.apply_history_counts(delta_counts) or 0)
+                if delta_counts:
+                    self.insert_commands(list(delta_counts.keys()))
+                else:
+                    self._ensure_vector_cache_from_state()
+            else:
+                inserted = self.upsert_history_commands(delta_counts)
+            if inserted < 0:
+                logger.warning("Manual history resync failed")
+                return {"status": "error", "reason": "history_resync_failed"}
+
+            self._mark_history_seed_completed(
+                history_key,
+                inode=stat.st_ino,
+                device=stat.st_dev,
+                offset=end_offset,
+            )
+            self._set_init_phase("ready")
+            return {
+                "status": "ok",
+                "history_file": history_key,
+                "parsed_entries": total_occurrences,
+                "unique_commands": len(command_counts),
+                "delta_commands": len(delta_counts),
+                "imported_commands": inserted,
+            }
+        except Exception as exc:
+            logger.error(f"Error resyncing history file: {exc}")
+            self._set_init_error(f"History resync failed: {exc}")
+            return {"status": "error", "reason": str(exc)}
 
     def insert_commands(self, commands: List[str]) -> int:
         if self._is_closed:

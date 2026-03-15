@@ -232,7 +232,7 @@ def _print_screen_heading(title: str) -> None:
 
 def _print_setup_banner(title: str = "Agensic Configuration") -> None:
     console.print(
-        Panel.fit(f"[bold cyan]{title}[/bold cyan] [bold #ff8c00](Esc = back)[/bold #ff8c00]")
+        Panel.fit(f"[bold cyan]{title}[/bold cyan] [bold #ff8c00](Esc: back)[/bold #ff8c00]")
     )
 
 
@@ -2172,6 +2172,51 @@ def _manage_command_store_remove():
                     console.print(f"[yellow]{message}[/yellow]")
         return
 
+def _manage_command_store_resync():
+    console.print(
+        "[yellow]This only imports commands missing from current history counts "
+        "(for example if Agensic was not running when you ran the command).[/yellow]"
+    )
+    console.print(
+        "[red]Important:[/red] this could add wrong commands and non-zero-exit commands "
+        "to your command store."
+    )
+    confirmed = _setup_confirm(
+        "Resync command store from your shell history?"
+    )
+    if _is_back(confirmed) or not confirmed:
+        if confirmed is False:
+            console.print("[yellow]History resync cancelled.[/yellow]")
+        return
+
+    shell_name = os.environ.get("SHELL", "zsh")
+    result = _command_store_request(
+        "POST",
+        "/command_store/resync_history",
+        {"shell": shell_name},
+    )
+    if not result:
+        return
+
+    status = str(result.get("status", "ok") or "ok").strip().lower()
+    reason = str(result.get("reason", "") or "").strip()
+    if status != "ok":
+        if reason:
+            console.print(f"[yellow]History resync did not import commands:[/yellow] {reason}")
+        else:
+            console.print("[yellow]History resync did not import commands.[/yellow]")
+        return
+
+    parsed_entries = int(result.get("parsed_entries", 0) or 0)
+    unique_commands = int(result.get("unique_commands", 0) or 0)
+    delta_commands = int(result.get("delta_commands", 0) or 0)
+    imported_commands = int(result.get("imported_commands", 0) or 0)
+    console.print(
+        f"[green]✓ History resync complete[/green] parsed_entries={parsed_entries}, "
+        f"unique_commands={unique_commands}, delta_commands={delta_commands}, "
+        f"imported_commands={imported_commands}"
+    )
+
 def _manage_command_store():
     if not _ensure_command_store_backend_ready():
         return
@@ -2183,6 +2228,7 @@ def _manage_command_store():
             choices=[
                 "Add commands",
                 "Remove commands",
+                "Resync from history",
             ],
         )
         if _is_back(action) or not action:
@@ -2190,7 +2236,10 @@ def _manage_command_store():
         if action == "Add commands":
             _manage_command_store_add()
             continue
-        _manage_command_store_remove()
+        if action == "Remove commands":
+            _manage_command_store_remove()
+            continue
+        _manage_command_store_resync()
 
 def is_port_open(host: str = "127.0.0.1", port: int = 22000) -> bool:
     """Return True if something is already listening on host:port."""
