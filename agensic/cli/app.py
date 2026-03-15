@@ -2428,12 +2428,20 @@ def _fetch_daemon_status() -> dict | None:
     except Exception:
         return None
 
-def _wait_for_bootstrap_ready(started_pid: int | None = None) -> tuple[bool, int, str]:
+def _wait_for_bootstrap_ready(
+    started_pid: int | None = None,
+    pending_status_message: str | None = None,
+) -> tuple[bool, int, str]:
     import time
 
     last_indexed = 0
+    starting_message = "[yellow]Starting Agensic...[/yellow]"
+    waiting_message = "[yellow]Waiting for daemon status...[/yellow]"
+    if pending_status_message:
+        waiting_message = f"{waiting_message} {pending_status_message}"
+    initial_message = "[yellow]Warming up command index...[/yellow]"
 
-    with console.status("[yellow]Warming up command index...[/yellow]", spinner="dots") as status:
+    with console.status(initial_message, spinner="dots") as status:
         while True:
             if started_pid is not None and not _is_pid_alive(started_pid):
                 return (
@@ -2471,14 +2479,46 @@ def _wait_for_bootstrap_ready(started_pid: int | None = None) -> tuple[bool, int
                 elif phase == "initializing_db":
                     status.update("[yellow]Initializing vector database...[/yellow]")
                 else:
-                    status.update("[yellow]Starting Agensic...[/yellow]")
+                    status.update(starting_message)
             else:
                 if is_port_open():
-                    status.update("[yellow]Waiting for daemon status...[/yellow]")
+                    status.update(waiting_message)
                 else:
-                    status.update("[yellow]Starting Agensic...[/yellow]")
+                    status.update(starting_message)
 
             time.sleep(0.25)
+
+
+def _doctor_suggestion_preview(buffer: str, payload: dict[str, Any]) -> str:
+    display = payload.get("display", [])
+    pool = payload.get("pool", [])
+    modes = payload.get("modes", [])
+
+    candidate = ""
+    if isinstance(display, list):
+        for item in display:
+            candidate = str(item or "")
+            if candidate:
+                break
+    if not candidate and isinstance(pool, list):
+        for item in pool:
+            candidate = str(item or "")
+            if candidate:
+                break
+
+    mode = ""
+    if isinstance(modes, list):
+        for item in modes:
+            mode = str(item or "").strip().lower()
+            if mode:
+                break
+
+    if mode == "suffix_append":
+        preview = f"{buffer}{candidate}"
+    else:
+        preview = candidate
+
+    return _decode_common_escapes(preview).strip()
 
 @app.command()
 def _setup_pause(message: str = "Press Enter to continue") -> Any:
@@ -2769,7 +2809,11 @@ def _run_first_install_onboarding() -> bool:
         if enable_boot:
             _enable_startup_impl(start_now=False)
 
-        start()
+        _start_impl(
+            pending_status_message="[yellow]Enabling for the first time, this can take about 1 minute...[/yellow]"
+            if enable_boot
+            else None
+        )
         console.print("[bold green]Open a new terminal window and start using agensic[/bold green]")
         return True
 
@@ -2781,9 +2825,7 @@ def first_run():
     if not completed:
         raise typer.Exit(code=1)
 
-@app.command()
-def start():
-    """Start the background AI daemon manually."""
+def _start_impl(pending_status_message: str | None = None) -> None:
     ensure_config_dir()
     _clear_uninstall_sentinel()
     _rotate_auth_token_or_exit("start")
@@ -2797,7 +2839,7 @@ def start():
             console.print(f"[green]✔ Command index ready[/green]")
             return
         console.print("[yellow]Daemon already running; waiting for readiness...[/yellow]")
-        ready, indexed, error = _wait_for_bootstrap_ready()
+        ready, indexed, error = _wait_for_bootstrap_ready(pending_status_message=pending_status_message)
         if ready:
             console.print(f"[green]✔ Command index ready[/green]")
             return
@@ -2824,12 +2866,21 @@ def start():
     
     console.print(f"[green]✔ Started (PID: {process.pid})[/green]")
     console.print(f"[dim]Log file: {SERVER_LOG_FILE}[/dim]")
-    ready, indexed, error = _wait_for_bootstrap_ready(started_pid=process.pid)
+    ready, indexed, error = _wait_for_bootstrap_ready(
+        started_pid=process.pid,
+        pending_status_message=pending_status_message,
+    )
     if ready:
         console.print(f"[green]✔ Command index ready[/green]")
     else:
         console.print(f"[red]✗ Startup failed before readiness:[/red] {error}")
         raise typer.Exit(code=1)
+
+
+@app.command()
+def start():
+    """Start the background AI daemon manually."""
+    _start_impl()
 
 @app.command()
 def stop():
@@ -2946,11 +2997,12 @@ def uninstall(
 ):
     """Remove Agensic startup wiring and local install state."""
     if not yes:
-        confirmed = typer.confirm(
-            "Uninstall Agensic from this machine? This removes shell wiring and startup artifacts."
-            if keep_data
-            else "Uninstall Agensic from this machine and delete local state?"
-        )
+        if keep_data:
+            prompt = "Uninstall Agensic from this machine? This removes shell wiring and startup artifacts."
+        else:
+            console.print("[red]Uninstall Agensic from this machine and delete local state?[/red]")
+            prompt = "Continue?"
+        confirmed = typer.confirm(prompt)
         if not confirmed:
             console.print("[yellow]Uninstall cancelled.[/yellow]")
             raise typer.Exit(code=1)
@@ -3075,7 +3127,10 @@ def doctor():
                         warnings.append("empty_pool")
                         console.print("[yellow]⚠ Predict probe:[/yellow] empty_pool")
                     else:
-                        suggestion_preview = str(pool[0] or "")
+                        suggestion_preview = _doctor_suggestion_preview(
+                            sample_payload["command_buffer"],
+                            parsed,
+                        )
                         console.print("[green]✓ Predict probe:[/green] returned suggestions")
         except subprocess.TimeoutExpired:
             issues.append("predict_timeout")
@@ -3109,7 +3164,7 @@ def doctor():
         console.print(f"[dim]Plugin log: {plugin_log}[/dim]")
 
     if suggestion_preview:
-        console.print(f"[dim]Suggestion preview: {suggestion_preview}[/dim]")
+        console.print(f"Suggestion preview: {suggestion_preview}", style="dim", markup=False, highlight=False)
 
     unique_issues = list(dict.fromkeys(issues))
     unique_warnings = list(dict.fromkeys(warnings))

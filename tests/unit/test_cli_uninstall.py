@@ -66,6 +66,15 @@ class CliUninstallTests(unittest.TestCase):
         self.assertEqual(result.exit_code, 0)
         self.assertEqual(remove_tree_mock.call_count, 2)
 
+    def test_uninstall_prompt_does_not_render_none(self):
+        with patch.object(cli_app, "stop") as stop_mock:
+            result = self.runner.invoke(app, ["uninstall"], input="n\n")
+
+        self.assertEqual(result.exit_code, 1)
+        self.assertIn("Uninstall Agensic from this machine and delete local state?", result.stdout)
+        self.assertNotIn("None [y/N]", result.stdout)
+        stop_mock.assert_not_called()
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -20,7 +20,7 @@ class CliFirstRunTests(unittest.TestCase):
         ) as confirm_mock, patch.object(
             cli_app, "_enable_startup_impl"
         ) as enable_startup_mock, patch.object(
-            cli_app, "start"
+            cli_app, "_start_impl"
         ) as start_mock, patch.object(
             cli_app.console, "print"
         ):
@@ -34,7 +34,9 @@ class CliFirstRunTests(unittest.TestCase):
         )
         confirm_mock.assert_called_once_with("Enable start on boot (Recommended)?")
         enable_startup_mock.assert_called_once_with(start_now=False)
-        start_mock.assert_called_once()
+        start_mock.assert_called_once_with(
+            pending_status_message="[yellow]Enabling for the first time, this can take about 1 minute...[/yellow]"
+        )
 
     def test_first_run_starts_once_without_boot_enable(self):
         with patch.object(cli_app, "ensure_config_dir"), patch.object(
@@ -50,7 +52,7 @@ class CliFirstRunTests(unittest.TestCase):
         ), patch.object(
             cli_app, "_enable_startup_impl"
         ) as enable_startup_mock, patch.object(
-            cli_app, "start"
+            cli_app, "_start_impl"
         ) as start_mock, patch.object(
             cli_app.console, "print"
         ):
@@ -63,7 +65,7 @@ class CliFirstRunTests(unittest.TestCase):
             banner_title="Agensic Setup",
         )
         enable_startup_mock.assert_not_called()
-        start_mock.assert_called_once()
+        start_mock.assert_called_once_with(pending_status_message=None)
 
 
 if __name__ == "__main__":
