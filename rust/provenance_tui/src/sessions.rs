@@ -2043,26 +2043,43 @@ fn build_changes(detail: &DetailState) -> Paragraph<'static> {
         .aggregate
         .get("push_attempts")
         .or_else(|| detail.session.aggregate.get("push_attempt_count"));
-    let event_metric = detail
-        .session
-        .aggregate
-        .get("structured_event_count")
-        .or_else(|| detail.session.aggregate.get("event_count"));
-    let commit_metric = detail
+    let commit_count = detail
         .session
         .aggregate
         .get("commits_created")
-        .or_else(|| detail.session.aggregate.get("commit_count"));
+        .and_then(Value::as_u64)
+        .map(|value| value as usize)
+        .or_else(|| {
+            detail
+                .session
+                .aggregate
+                .get("commit_count")
+                .and_then(Value::as_u64)
+                .map(|value| value as usize)
+        })
+        .or_else(|| {
+            detail
+                .session
+                .changes
+                .get("commits_created")
+                .and_then(Value::as_array)
+                .map(|items| items.len())
+        });
+    let commit_metric = detail
+        .session
+        .changes
+        .get("commits_created");
     let mut lines = vec![Line::from(format!(
-        "commands {}    subprocesses {}    pushes {}    transcript events {}",
+        "commands {}    subprocesses {}    pushes {}",
         metric(detail.session.aggregate.get("command_count")),
         metric(detail.session.aggregate.get("subprocess_count")),
         metric(push_metric),
-        metric(event_metric),
     ))];
     lines.push(Line::from(format!(
         "commits {}    violations {}",
-        metric(commit_metric),
+        commit_count
+            .map(|value| value.to_string())
+            .unwrap_or_else(|| metric(commit_metric)),
         if detail.session.violation_code.trim().is_empty() {
             "-".to_string()
         } else {
@@ -2101,33 +2118,7 @@ fn build_changes(detail: &DetailState) -> Paragraph<'static> {
         .map(sanitize_multiline_text)
         .filter(|value| value != "-")
         .unwrap_or_default();
-    let commits: Vec<String> = detail
-        .session
-        .changes
-        .get("commits_created")
-        .and_then(Value::as_array)
-        .map(|items| {
-            items
-                .iter()
-                .take(6)
-                .map(|commit| {
-                    let sha = commit.get("sha").and_then(Value::as_str).unwrap_or("-");
-                    let summary = commit.get("summary").and_then(Value::as_str).unwrap_or("-");
-                    format!(
-                        "{} {}",
-                        sanitize_inline_text(sha),
-                        sanitize_inline_text(summary)
-                    )
-                })
-                .collect()
-        })
-        .unwrap_or_default();
-
-    if files.is_empty()
-        && committed_diff.is_empty()
-        && worktree_diff.is_empty()
-        && commits.is_empty()
-    {
+    if files.is_empty() && committed_diff.is_empty() && worktree_diff.is_empty() {
         lines.push(Line::from(""));
         lines.push(Line::from("No repo changes recorded."));
     } else {
@@ -2162,18 +2153,6 @@ fn build_changes(detail: &DetailState) -> Paragraph<'static> {
                     .add_modifier(Modifier::BOLD),
             )));
             push_diff_stat_block(&mut lines, &worktree_diff);
-        }
-        if !commits.is_empty() {
-            lines.push(Line::from(""));
-            lines.push(Line::from(Span::styled(
-                "Commits created",
-                Style::default()
-                    .fg(Color::Cyan)
-                    .add_modifier(Modifier::BOLD),
-            )));
-            for commit in commits {
-                lines.push(Line::from(commit));
-            }
         }
     }
     Paragraph::new(lines)
