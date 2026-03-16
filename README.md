@@ -70,6 +70,64 @@ agensic run inspect <session_id>
 - `agensic run <agent>` remains the manual tracked-session command and is still the path to use for Ollama.
 - `agensic doctor`, `agensic fix --safe`, and `agensic fix --recover` help keep long-running local state healthy.
 
+### Time Travel note
+
+`Time Travel` restores the Git repo state captured at a session checkpoint. It is session-triggered, but repo-level, not a per-agent sandbox.
+
+If you are running multiple agents in the same repo, i.e. agent A and agent B are running in the same repo, and agent B commits to that same repo before the selected checkpoint is captured, agent B's commit can be part of the state restored by Time Travel in agent A's session. For strict isolation, use separate branches or worktrees per agent.
+
+Example:
+
+```text
+Agent A is working in the repo
+  -> Agent A makes commit 1, then makes commit 2 in the same session
+
+Agent B is also working in the same repo
+  -> Agent B makes commit x, temporarily between commit 1 and 2
+
+Later, you open Agent A's session:
+  -> You pick a checkpoint after Agent B's commit happened, after commit 1 and before commit 2
+  -> You use Time Travel
+
+Result:
+  The restored repo state will include Agent B's commit too,
+  because the checkpoint reflects the repo state at that time, hence commmit 1 + commit x.
+```
+
+Visual representation:
+
+```text
+TIME LINE
+  (Earlier)                                                   (Later)
+  ----|------------------|---------------------------|----------->
+     [T1]               [T2]                        [T3]
+
+
+  AGENT ACTIONS
+      │                  │                           │
+   Agent A            Agent B                     Agent A
+  Commit 1           Commit X                    Commit 2
+      │                  │                           │
+      ▼                  ▼                           ▼
+  ┌──────────┐       ┌──────────┐                ┌──────────────┐
+  │ Repo @T1 │       │ Repo @T2 │                │   Repo @T3   │
+  │          │       │          │                │              │
+  │ Commit 1 │       │ Commit 1 │                │   Commit 1   │
+  │          │       │ Commit X │                │   Commit X   │
+  └──────────┘       └──────────┘                │   Commit 2   │
+                         ▲                       └──────────────┘
+                         │
+               ┌─────────┴──────────┐
+               │  YOU RESTORE HERE  │
+               │  (Time Travel)     │
+               └────────────────────┘
+
+  RESULTING STATE:
+  The repository is restored to the exact state it was in at [T2].
+  • Included: [Commit 1] and [Commit X]
+  • Excluded: [Commit 2] (It hadn't happened yet)
+```
+
 ## Autocomplete
 
 Agensic starts with your real command history, indexes it semantically, keeps suggestions local and fast, learns from your usage patterns (what commands you run most often and where) and only reaches for an LLM when history cannot help. It is built to feel immediate in the shell.
