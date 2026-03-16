@@ -968,6 +968,77 @@ class CliTrackTests(unittest.TestCase):
         self.assertIn("recorded_runs=", result.stdout)
         self.assertIn("command=", result.stdout)
 
+    def test_time_travel_preview_and_fork_restore_git_checkpoint(self):
+        with self._temp_app_paths() as (_, temp_paths), tempfile.TemporaryDirectory() as repo_dir:
+            subprocess.run(["git", "init"], cwd=repo_dir, check=True, capture_output=True, text=True)
+            subprocess.run(["git", "config", "user.email", "test@example.com"], cwd=repo_dir, check=True)
+            subprocess.run(["git", "config", "user.name", "Test User"], cwd=repo_dir, check=True)
+            tracked = Path(repo_dir) / "tracked.txt"
+            tracked.write_text("base\n", encoding="utf-8")
+            subprocess.run(["git", "add", "tracked.txt"], cwd=repo_dir, check=True)
+            subprocess.run(["git", "commit", "-m", "base"], cwd=repo_dir, check=True, capture_output=True, text=True)
+
+            store = SQLiteStateStore(temp_paths.state_sqlite_path, journal=None)
+            store.upsert_tracked_session(
+                session_id="sess-tt",
+                status="exited",
+                launch_mode="registry_alias",
+                agent="codex",
+                model="test-model",
+                agent_name="Codex",
+                working_directory=repo_dir,
+                root_command="codex",
+            )
+            store.upsert_session_summary(
+                session_id="sess-tt",
+                repo_root=repo_dir,
+                branch_start="main",
+                branch_end="main",
+                head_start=subprocess.run(
+                    ["git", "rev-parse", "HEAD"],
+                    cwd=repo_dir,
+                    check=True,
+                    capture_output=True,
+                    text=True,
+                ).stdout.strip(),
+                head_end=subprocess.run(
+                    ["git", "rev-parse", "HEAD"],
+                    cwd=repo_dir,
+                    check=True,
+                    capture_output=True,
+                    text=True,
+                ).stdout.strip(),
+            )
+
+            tracked.write_text("changed\n", encoding="utf-8")
+            Path(repo_dir, "extra.txt").write_text("new file\n", encoding="utf-8")
+            payload = track_module._build_git_checkpoint_payload(repo_dir, seq=5, reason="test")
+            self.assertIsNotNone(payload)
+            Path(track_module._track_git_checkpoint_path("sess-tt")).parent.mkdir(parents=True, exist_ok=True)
+            with open(track_module._track_git_checkpoint_path("sess-tt"), "a", encoding="utf-8") as handle:
+                handle.write(json.dumps(payload) + "\n")
+
+            subprocess.run(["git", "reset", "--hard", "HEAD"], cwd=repo_dir, check=True, capture_output=True, text=True)
+            subprocess.run(["git", "clean", "-fd"], cwd=repo_dir, check=True, capture_output=True, text=True)
+
+            preview = track_module.preview_time_travel("sess-tt", 5)
+            self.assertEqual(preview["status"], "ok")
+            self.assertTrue(preview["can_fork"])
+            self.assertTrue(preview["exact_match"])
+
+            forked = track_module.fork_time_travel("sess-tt", 5)
+            self.assertEqual(forked["status"], "ok")
+            current_branch = subprocess.run(
+                ["git", "branch", "--show-current"],
+                cwd=repo_dir,
+                check=True,
+                capture_output=True,
+                text=True,
+            ).stdout.strip()
+            self.assertEqual(current_branch, forked["branch_name"])
+            self.assertEqual(tracked.read_text(encoding="utf-8"), "changed\n")
+            self.assertEqual(Path(repo_dir, "extra.txt").read_text(encoding="utf-8"), "new file\n")
+
 
 if __name__ == "__main__":
     unittest.main()

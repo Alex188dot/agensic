@@ -325,6 +325,54 @@ class SessionRenamePayload(BaseModel):
     session_name: str = ""
 
 
+class SessionTimeTravelPreviewPayload(BaseModel):
+    target_seq: int = 0
+
+
+class SessionTimeTravelForkPayload(BaseModel):
+    target_seq: int = 0
+    branch_name: str = ""
+
+
+class SessionLaunchPayload(BaseModel):
+    source_session_id: str = ""
+    working_directory: str = ""
+    session_name: str = ""
+    replay_metadata: dict[str, Any] = Field(default_factory=dict)
+
+
+class SessionTimeTravelPreviewResponse(BaseModel):
+    status: str = "ok"
+    reason: str = ""
+    session_id: str = ""
+    target_seq: int = 0
+    resolved_checkpoint: dict[str, Any] = Field(default_factory=dict)
+    exact_match: bool = False
+    current_repo_state: dict[str, Any] = Field(default_factory=dict)
+    can_fork: bool = False
+    blocking_reason: str = ""
+    suggested_branch: str = ""
+    action: str = ""
+    repo_root: str = ""
+
+
+class SessionTimeTravelForkResponse(BaseModel):
+    status: str = "ok"
+    reason: str = ""
+    branch_name: str = ""
+    working_directory: str = ""
+    launch_payload: dict[str, Any] = Field(default_factory=dict)
+    preview: dict[str, Any] = Field(default_factory=dict)
+
+
+class SessionLaunchResponse(BaseModel):
+    status: str = "ok"
+    reason: str = ""
+    session_id: str = ""
+    working_directory: str = ""
+    root_command: str = ""
+
+
 class ProvenanceRegistrySummaryResponse(BaseModel):
     status: str = "ok"
     summary: dict[str, Any] = Field(default_factory=dict)

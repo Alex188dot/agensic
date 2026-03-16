@@ -116,6 +116,77 @@ struct SessionRenamePayload {
     session_name: String,
 }
 
+#[derive(Debug, Default, Serialize)]
+struct TimeTravelPreviewPayload {
+    target_seq: i64,
+}
+
+#[derive(Debug, Default, Serialize)]
+struct TimeTravelForkPayload {
+    target_seq: i64,
+    branch_name: String,
+}
+
+#[derive(Debug, Default, Serialize)]
+struct SessionLaunchPayload {
+    source_session_id: String,
+    working_directory: String,
+    session_name: String,
+    replay_metadata: Value,
+}
+
+#[allow(dead_code)]
+#[derive(Clone, Debug, Default, Deserialize)]
+struct TimeTravelPreviewResponse {
+    status: String,
+    #[serde(default)]
+    reason: String,
+    #[serde(default)]
+    session_id: String,
+    #[serde(default)]
+    target_seq: i64,
+    #[serde(default)]
+    resolved_checkpoint: Value,
+    #[serde(default)]
+    exact_match: bool,
+    #[serde(default)]
+    current_repo_state: Value,
+    #[serde(default)]
+    can_fork: bool,
+    #[serde(default)]
+    blocking_reason: String,
+    #[serde(default)]
+    suggested_branch: String,
+    #[serde(default)]
+    action: String,
+    #[serde(default)]
+    repo_root: String,
+}
+
+#[allow(dead_code)]
+#[derive(Clone, Debug, Default, Deserialize)]
+struct TimeTravelForkResponse {
+    status: String,
+    #[serde(default)]
+    reason: String,
+    #[serde(default)]
+    branch_name: String,
+    #[serde(default)]
+    working_directory: String,
+    #[serde(default)]
+    launch_payload: Value,
+}
+
+#[allow(dead_code)]
+#[derive(Clone, Debug, Default, Deserialize)]
+struct SessionLaunchResponse {
+    status: String,
+    #[serde(default)]
+    reason: String,
+    #[serde(default)]
+    session_id: String,
+}
+
 #[allow(dead_code)]
 #[derive(Clone, Debug, Default, Deserialize)]
 struct SessionEvent {
@@ -692,6 +763,7 @@ struct App {
     copy_feedback: Option<CopyFeedback>,
     rename_modal: Option<RenameModalState>,
     delete_modal: Option<DeleteModalState>,
+    time_travel_modal: Option<TimeTravelModalState>,
 }
 
 #[derive(Clone, Debug, Default)]
@@ -750,6 +822,15 @@ struct DeleteModalState {
     session_name: String,
 }
 
+#[derive(Clone, Debug, Default)]
+struct TimeTravelModalState {
+    session_id: String,
+    target_seq: i64,
+    event_summary: String,
+    preview: Option<TimeTravelPreviewResponse>,
+    error: String,
+}
+
 impl CopyFeedback {
     fn active_target(&self) -> Option<CopyFeedbackTarget> {
         (Instant::now() <= self.expires_at).then_some(self.target)
@@ -777,6 +858,7 @@ impl App {
             copy_feedback: None,
             rename_modal: None,
             delete_modal: None,
+            time_travel_modal: None,
         };
         app.refresh_sessions()?;
         if !args.session_id.trim().is_empty() {
@@ -885,6 +967,7 @@ impl App {
         self.copy_feedback = None;
         self.rename_modal = None;
         self.delete_modal = None;
+        self.time_travel_modal = None;
         self.needs_terminal_clear = true;
         Ok(())
     }
@@ -961,6 +1044,7 @@ impl App {
             input: current_name,
         });
         self.delete_modal = None;
+        self.time_travel_modal = None;
         self.event_modal_open = false;
         self.event_modal_scroll = 0;
     }
@@ -988,6 +1072,7 @@ impl App {
         self.rename_modal = None;
         self.event_modal_open = false;
         self.event_modal_scroll = 0;
+        self.time_travel_modal = None;
     }
 
     fn start_delete_selected(&mut self) {
@@ -1003,6 +1088,123 @@ impl App {
                 detail.session.session_name.clone(),
             );
         }
+    }
+
+    fn open_time_travel_modal(&mut self) {
+        let Some(detail) = self.detail.as_ref() else {
+            return;
+        };
+        let Some(entry) = detail.selected_timeline_entry() else {
+            self.set_flash("No timeline event selected");
+            return;
+        };
+        let target_seq = entry.seq_end.max(entry.seq_start);
+        let preview = self
+            .request_with_method(
+                Method::POST,
+                &format!("/sessions/{}/time-travel/preview", detail.session.session_id),
+            )
+            .json(&TimeTravelPreviewPayload { target_seq })
+            .send();
+        let mut modal = TimeTravelModalState {
+            session_id: detail.session.session_id.clone(),
+            target_seq,
+            event_summary: entry.summary.clone(),
+            preview: None,
+            error: String::new(),
+        };
+        match preview {
+            Ok(response) if response.status().as_u16() == 200 => {
+                match response.json::<TimeTravelPreviewResponse>() {
+                    Ok(body) => modal.preview = Some(body),
+                    Err(err) => modal.error = format!("invalid preview payload: {}", err),
+                }
+            }
+            Ok(response) => modal.error = format!("preview failed: {}", response.status()),
+            Err(err) => modal.error = format!("preview request failed: {}", err),
+        }
+        self.rename_modal = None;
+        self.delete_modal = None;
+        self.event_modal_open = false;
+        self.event_modal_scroll = 0;
+        self.time_travel_modal = Some(modal);
+    }
+
+    fn submit_time_travel(&mut self) -> Result<String, String> {
+        let modal = self
+            .time_travel_modal
+            .clone()
+            .ok_or_else(|| "Time Travel modal is not open".to_string())?;
+        if !modal.error.trim().is_empty() {
+            return Err(modal.error.clone());
+        }
+        let preview = modal
+            .preview
+            .clone()
+            .ok_or_else(|| "Time Travel preview unavailable".to_string())?;
+        if !preview.can_fork {
+            return Err(if preview.blocking_reason.trim().is_empty() {
+                "Time Travel is blocked for this repo state".to_string()
+            } else {
+                format!("Time Travel blocked: {}", preview.blocking_reason)
+            });
+        }
+        let fork = self
+            .request_with_method(
+                Method::POST,
+                &format!("/sessions/{}/time-travel/fork", modal.session_id),
+            )
+            .json(&TimeTravelForkPayload {
+                target_seq: modal.target_seq,
+                branch_name: String::new(),
+            })
+            .send()
+            .map_err(|err| format!("fork request failed: {}", err))?;
+        if fork.status().as_u16() != 200 {
+            return Err(format!("fork failed: {}", fork.status()));
+        }
+        let fork_payload: TimeTravelForkResponse = fork
+            .json()
+            .map_err(|err| format!("invalid fork payload: {}", err))?;
+        let launch_payload = fork_payload.launch_payload.clone();
+        let working_directory = launch_payload
+            .get("working_directory")
+            .and_then(Value::as_str)
+            .unwrap_or(&fork_payload.working_directory)
+            .to_string();
+        let replay_metadata = serde_json::json!({
+            "source_session_id": modal.session_id,
+            "source_target_seq": modal.target_seq,
+            "resolved_checkpoint_seq": preview
+                .resolved_checkpoint
+                .get("seq")
+                .and_then(Value::as_i64)
+                .unwrap_or(modal.target_seq),
+            "fork_branch": fork_payload.branch_name,
+            "exact_match": preview.exact_match,
+        });
+        let launch = self
+            .request_with_method(Method::POST, "/sessions/launch")
+            .json(&SessionLaunchPayload {
+                source_session_id: modal.session_id.clone(),
+                working_directory,
+                session_name: format!("Time Travel {}", fork_payload.branch_name),
+                replay_metadata,
+            })
+            .send()
+            .map_err(|err| format!("launch request failed: {}", err))?;
+        if launch.status().as_u16() != 200 {
+            return Err(format!("launch failed: {}", launch.status()));
+        }
+        let launched: SessionLaunchResponse = launch
+            .json()
+            .map_err(|err| format!("invalid launch payload: {}", err))?;
+        if launched.session_id.trim().is_empty() {
+            return Err("launch response missing session_id".to_string());
+        }
+        self.time_travel_modal = None;
+        self.open_session(launched.session_id.trim(), false)?;
+        Ok(launched.session_id)
     }
 
     fn submit_rename(&mut self) -> Result<(), String> {
@@ -1184,6 +1386,20 @@ fn handle_key(app: &mut App, key: KeyEvent) -> Result<bool, String> {
         }
         return Ok(false);
     }
+    if app.time_travel_modal.is_some() {
+        match key.code {
+            KeyCode::Esc => {
+                app.time_travel_modal = None;
+                app.status = "Time Travel cancelled".to_string();
+            }
+            KeyCode::Enter => match app.submit_time_travel() {
+                Ok(session_id) => app.status = format!("Opened replay session {}", session_id),
+                Err(err) => app.set_flash(err),
+            },
+            _ => {}
+        }
+        return Ok(false);
+    }
     if app.rename_modal.is_some() {
         match key.code {
             KeyCode::Esc => {
@@ -1322,6 +1538,7 @@ fn handle_key(app: &mut App, key: KeyEvent) -> Result<bool, String> {
                     }
                     KeyCode::Char('R') => app.start_rename_detail(),
                     KeyCode::Char('D') => app.start_delete_detail(),
+                    KeyCode::Char('T') => app.open_time_travel_modal(),
                     KeyCode::Char('E') => export_timeline_csv = true,
                     KeyCode::Left if detail.focus == FocusPane::Replay => {
                         detail.scroll_replay_horizontal(-4)
@@ -1392,6 +1609,9 @@ fn draw_ui(frame: &mut ratatui::Frame<'_>, app: &App) {
     }
     if let Some(modal) = app.delete_modal.as_ref() {
         draw_delete_modal(frame, modal);
+    }
+    if let Some(modal) = app.time_travel_modal.as_ref() {
+        draw_time_travel_modal(frame, modal);
     }
 }
 
@@ -1526,7 +1746,7 @@ fn draw_detail(frame: &mut ratatui::Frame<'_>, app: &App, detail: &DetailState) 
     frame.render_widget(build_replay(app, detail, layout.replay), layout.replay);
     let mut footer_lines = vec![
         Line::from(Span::styled(
-            "Space: Play/Pause   ↑↓: Move  ←/→: Horizontal scroll  Tab/Shift+Tab: Jump 500  c: Copy  R: Rename  D: Delete  E: Export(csv)  f: Toggle fullscreen  s: Switch pane  Enter: Details  Esc: Back",
+            "Space: Play/Pause   ↑↓: Move  ←/→: Horizontal scroll  Tab/Shift+Tab: Jump 500  c: Copy  R: Rename  D: Delete  T: Time Travel  E: Export(csv)  f: Toggle fullscreen  s: Switch pane  Enter: Details  Esc: Back",
             Style::default().fg(Color::Yellow),
         )),
         Line::from(app.status_text().to_string()),
@@ -2164,6 +2384,112 @@ fn draw_delete_modal(frame: &mut ratatui::Frame<'_>, modal: &DeleteModalState) {
                     .borders(Borders::ALL)
                     .title(Line::from(Span::styled(
                         "Delete Session",
+                        crate::agensic_title_style(),
+                    ))),
+            )
+            .wrap(Wrap { trim: true }),
+        popup,
+    );
+}
+
+fn draw_time_travel_modal(frame: &mut ratatui::Frame<'_>, modal: &TimeTravelModalState) {
+    let popup = centered_rect(72, 48, frame.area());
+    frame.render_widget(Clear, popup);
+    let mut content = vec![
+        Line::from("Time Travel"),
+        Line::from(""),
+        Line::from(format!("session: {}", modal.session_id)),
+        Line::from(format!("target seq: {}", modal.target_seq)),
+        Line::from(format!(
+            "selected event: {}",
+            sanitize_inline_text(&modal.event_summary)
+        )),
+    ];
+    if !modal.error.trim().is_empty() {
+        content.push(Line::from(""));
+        content.push(Line::from(Span::styled(
+            sanitize_inline_text(&modal.error),
+            Style::default().fg(Color::LightRed),
+        )));
+    } else if let Some(preview) = modal.preview.as_ref() {
+        let resolved_seq = preview
+            .resolved_checkpoint
+            .get("seq")
+            .and_then(Value::as_i64)
+            .unwrap_or(0);
+        let branch = preview
+            .resolved_checkpoint
+            .get("branch")
+            .and_then(Value::as_str)
+            .unwrap_or("-");
+        let head = preview
+            .resolved_checkpoint
+            .get("head")
+            .and_then(Value::as_str)
+            .unwrap_or("-");
+        let current_branch = preview
+            .current_repo_state
+            .get("branch")
+            .and_then(Value::as_str)
+            .unwrap_or("-");
+        let current_head = preview
+            .current_repo_state
+            .get("head")
+            .and_then(Value::as_str)
+            .unwrap_or("-");
+        let diff_stat = preview
+            .resolved_checkpoint
+            .get("worktree_diff_stat")
+            .and_then(Value::as_str)
+            .unwrap_or("-");
+        let untracked_count = preview
+            .resolved_checkpoint
+            .get("untracked_paths")
+            .and_then(Value::as_array)
+            .map(|items| items.len())
+            .unwrap_or(0);
+        content.push(Line::from(""));
+        content.push(Line::from(format!(
+            "resolved checkpoint: {} ({})",
+            resolved_seq,
+            if preview.exact_match { "exact" } else { "nearest prior" }
+        )));
+        content.push(Line::from(format!("repo: {}", sanitize_inline_text(&preview.repo_root))));
+        content.push(Line::from(format!("recorded branch/head: {} / {}", branch, truncate(head, 14))));
+        content.push(Line::from(format!(
+            "live branch/head: {} / {}",
+            current_branch,
+            truncate(current_head, 14)
+        )));
+        content.push(Line::from(format!(
+            "suggested fork branch: {}",
+            sanitize_inline_text(&preview.suggested_branch)
+        )));
+        content.push(Line::from(format!("tracked diff: {}", sanitize_inline_text(diff_stat))));
+        content.push(Line::from(format!("untracked files: {}", untracked_count)));
+        content.push(Line::from(format!(
+            "action: fork branch and restore checkpoint{}",
+            if preview.can_fork { "" } else { " (blocked)" }
+        )));
+        if !preview.blocking_reason.trim().is_empty() {
+            content.push(Line::from(Span::styled(
+                format!("blocking reason: {}", sanitize_inline_text(&preview.blocking_reason)),
+                Style::default().fg(Color::LightRed),
+            )));
+        }
+    }
+    content.push(Line::from(""));
+    content.push(Line::from(Span::styled(
+        "Enter: fork + launch replay  Esc: cancel",
+        Style::default().fg(Color::Yellow),
+    )));
+    frame.render_widget(
+        Paragraph::new(content)
+            .block(
+                Block::default()
+                    .borders(Borders::ALL)
+                    .title(Line::from(Span::styled(
+                        "Time Travel",
                         crate::agensic_title_style(),
                     ))),
             )
@@ -3969,6 +4295,7 @@ mod tests {
             copy_feedback: None,
             rename_modal: None,
             delete_modal: None,
+            time_travel_modal: None,
         }
     }
 
@@ -4539,6 +4866,59 @@ mod tests {
         let modal = app.delete_modal.expect("delete modal should open");
         assert_eq!(modal.session_id, "sess-1");
         assert_eq!(modal.session_name, "Release prep");
+    }
+
+    #[test]
+    fn uppercase_t_opens_time_travel_modal_for_selected_timeline_entry() {
+        let listener = TcpListener::bind("127.0.0.1:0").expect("bind test listener");
+        let base_url = format!("http://{}", listener.local_addr().expect("listener addr"));
+        let server = thread::spawn(move || {
+            let (mut stream, _) = listener.accept().expect("accept request");
+            let mut buffer = [0_u8; 4096];
+            let read = stream.read(&mut buffer).expect("read request");
+            let request = String::from_utf8_lossy(&buffer[..read]);
+            assert!(request.starts_with("POST /sessions/sess-1/time-travel/preview"));
+            let body = r#"{"status":"ok","session_id":"sess-1","target_seq":2,"resolved_checkpoint":{"seq":2,"branch":"main","head":"abc123","worktree_diff_stat":" tracked.txt | 1 +"},"exact_match":true,"current_repo_state":{"branch":"main","head":"def456","dirty":false},"can_fork":true,"blocking_reason":"","suggested_branch":"agensic/time-travel/sess-1-2","action":"fork_branch_restore","repo_root":"/tmp/project"}"#;
+            let response = format!(
+                "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+                body.len(),
+                body
+            );
+            stream
+                .write_all(response.as_bytes())
+                .expect("write response");
+        });
+        let mut app = sample_app(&base_url, vec![sample_session("sess-1", "Release prep")]);
+        app.detail = Some(DetailState::new(
+            sample_session("sess-1", "Release prep"),
+            vec![SessionEvent {
+                seq: 2,
+                event_type: "command.recorded".to_string(),
+                payload: json!({"command":"git status"}),
+                ..SessionEvent::default()
+            }],
+            false,
+        ));
+
+        handle_key(
+            &mut app,
+            KeyEvent::new(KeyCode::Char('T'), KeyModifiers::SHIFT),
+        )
+        .expect("handle key succeeds");
+
+        let modal = app.time_travel_modal.expect("time travel modal should open");
+        assert_eq!(modal.session_id, "sess-1");
+        assert!(modal.error.is_empty());
+        assert_eq!(modal.target_seq, 2);
+        assert_eq!(
+            modal
+                .preview
+                .as_ref()
+                .expect("preview loaded")
+                .suggested_branch,
+            "agensic/time-travel/sess-1-2"
+        );
+        server.join().expect("server thread");
     }
 
     #[test]

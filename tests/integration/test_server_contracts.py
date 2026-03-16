@@ -323,6 +323,72 @@ class ServerContractTests(unittest.TestCase):
             self.assertEqual(delete_response.status_code, 200)
             self.assertEqual(delete_response.json()["status"], "ok")
 
+    def test_session_time_travel_contracts(self):
+        preview_payload = {
+            "status": "ok",
+            "session_id": "sess-1",
+            "target_seq": 12,
+            "resolved_checkpoint": {"seq": 10, "branch": "main", "head": "abc123"},
+            "exact_match": False,
+            "current_repo_state": {"branch": "main", "head": "def456", "dirty": False},
+            "can_fork": True,
+            "blocking_reason": "",
+            "suggested_branch": "agensic/time-travel/sess-1-10",
+            "action": "fork_branch_restore",
+            "repo_root": "/tmp/project",
+        }
+        fork_payload = {
+            "status": "ok",
+            "branch_name": "agensic/time-travel/sess-1-10",
+            "working_directory": "/tmp/project",
+            "launch_payload": {"source_session_id": "sess-1", "working_directory": "/tmp/project"},
+        }
+        launch_payload = {
+            "status": "ok",
+            "session_id": "sess-2",
+            "working_directory": "/tmp/project",
+            "root_command": "codex",
+        }
+        with patch(
+            "agensic.server.routes_sessions.track_runtime.preview_time_travel",
+            return_value=preview_payload,
+        ) as preview_time_travel, patch(
+            "agensic.server.routes_sessions.track_runtime.fork_time_travel",
+            return_value=fork_payload,
+        ) as fork_time_travel, patch(
+            "agensic.server.routes_sessions.track_runtime.build_launch_from_session",
+            return_value=object(),
+        ) as build_launch, patch(
+            "agensic.server.routes_sessions.track_runtime.launch_tracked_command_async",
+            return_value=launch_payload,
+        ) as launch_async:
+            preview_response = self.client.post("/sessions/sess-1/time-travel/preview", json={"target_seq": 12})
+            self.assertEqual(preview_response.status_code, 200)
+            self.assertEqual(preview_response.json()["suggested_branch"], "agensic/time-travel/sess-1-10")
+            preview_time_travel.assert_called_once_with("sess-1", 12)
+
+            fork_response = self.client.post(
+                "/sessions/sess-1/time-travel/fork",
+                json={"target_seq": 12, "branch_name": ""},
+            )
+            self.assertEqual(fork_response.status_code, 200)
+            self.assertEqual(fork_response.json()["branch_name"], "agensic/time-travel/sess-1-10")
+            fork_time_travel.assert_called_once_with("sess-1", 12, branch_name="")
+
+            launch_response = self.client.post(
+                "/sessions/launch",
+                json={
+                    "source_session_id": "sess-1",
+                    "working_directory": "/tmp/project",
+                    "session_name": "Time Travel agensic/time-travel/sess-1-10",
+                    "replay_metadata": {"source_session_id": "sess-1"},
+                },
+            )
+            self.assertEqual(launch_response.status_code, 200)
+            self.assertEqual(launch_response.json()["session_id"], "sess-2")
+            build_launch.assert_called_once_with("sess-1", working_directory="/tmp/project")
+            self.assertTrue(launch_async.called)
+
     def test_intent_history_only_returns_refusal_without_llm(self):
         with patch.object(deps, "load_config", return_value={"provider": "history_only"}), patch.object(
             deps,

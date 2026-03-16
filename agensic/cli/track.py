@@ -2,6 +2,7 @@ import base64
 import errno
 import fcntl
 import gzip
+import hashlib
 import json
 import os
 import re
@@ -360,12 +361,15 @@ def delete_track_session_artifacts(session_id: str, *, state: dict[str, object] 
         str(session.get("transcript_path", "") or "").strip(),
         str(session.get("event_stream_path", "") or "").strip(),
         _track_checkpoint_path(clean_session_id),
+        _track_git_checkpoint_path(clean_session_id),
     }
     transcript_path = str(session.get("transcript_path", "") or "").strip()
     if transcript_path.endswith(".transcript.jsonl"):
         candidate_paths.add(transcript_path[: -len(".transcript.jsonl")] + ".checkpoints.jsonl")
+        candidate_paths.add(transcript_path[: -len(".transcript.jsonl")] + ".git-checkpoints.jsonl")
     elif transcript_path.endswith(".transcript.jsonl.gz"):
         candidate_paths.add(transcript_path[: -len(".transcript.jsonl.gz")] + ".checkpoints.jsonl.gz")
+        candidate_paths.add(transcript_path[: -len(".transcript.jsonl.gz")] + ".git-checkpoints.jsonl.gz")
 
     deleted = store.delete_tracked_session(clean_session_id)
     if not deleted:
@@ -419,6 +423,11 @@ def _track_checkpoint_path(session_id: str) -> str:
     return os.path.join(_track_transcripts_dir(), f"{clean_session_id}.checkpoints.jsonl")
 
 
+def _track_git_checkpoint_path(session_id: str) -> str:
+    clean_session_id = str(session_id or "").strip() or uuid.uuid4().hex[:16]
+    return os.path.join(_track_transcripts_dir(), f"{clean_session_id}.git-checkpoints.jsonl")
+
+
 def _track_artifact_cleanup_paths(path: str) -> set[Path]:
     clean_path = str(path or "").strip()
     if not clean_path:
@@ -466,6 +475,29 @@ def _read_track_artifact_text(path: str) -> str | None:
         return target.read_text(encoding="utf-8")
     except Exception:
         return None
+
+
+def _write_jsonl_record(handle: Any, payload: dict[str, Any]) -> None:
+    handle.write(json.dumps(payload, separators=(",", ":")) + "\n")
+    handle.flush()
+
+
+def _load_jsonl_artifact(path: str) -> list[dict[str, Any]]:
+    contents = _read_track_artifact_text(path)
+    if contents is None:
+        return []
+    rows: list[dict[str, Any]] = []
+    for line in contents.splitlines():
+        clean = str(line or "").strip()
+        if not clean:
+            continue
+        try:
+            payload = json.loads(clean)
+        except Exception:
+            continue
+        if isinstance(payload, dict):
+            rows.append(payload)
+    return rows
 
 
 def _compress_track_artifact(path: str) -> str:
@@ -1489,12 +1521,159 @@ def _run_git_capture(working_directory: str, args: list[str], *, timeout_seconds
     return (int(run.returncode), str(run.stdout or ""), str(run.stderr or ""))
 
 
+def _run_git_capture_bytes(
+    working_directory: str,
+    args: list[str],
+    *,
+    stdin_bytes: bytes | None = None,
+    timeout_seconds: float = 3.0,
+) -> tuple[int, bytes, bytes]:
+    cwd = str(working_directory or "").strip() or None
+    try:
+        run = subprocess.run(
+            ["git", *args],
+            cwd=cwd,
+            input=stdin_bytes,
+            capture_output=True,
+            check=False,
+            timeout=timeout_seconds,
+        )
+    except Exception as exc:
+        return (1, b"", str(exc).encode("utf-8", errors="replace"))
+    return (int(run.returncode), bytes(run.stdout or b""), bytes(run.stderr or b""))
+
+
+def _git_head_exists(repo_root: str) -> bool:
+    code, _, _ = _run_git_capture(repo_root, ["rev-parse", "--verify", "HEAD"], timeout_seconds=1.0)
+    return code == 0
+
+
+def _git_status_porcelain(repo_root: str) -> str:
+    code, stdout, _ = _run_git_capture(repo_root, ["status", "--porcelain", "--untracked-files=all"], timeout_seconds=2.0)
+    return str(stdout or "") if code == 0 else ""
+
+
+def _git_status_fingerprint(repo_root: str) -> str:
+    head = ""
+    code, stdout, _ = _run_git_capture(repo_root, ["rev-parse", "HEAD"], timeout_seconds=1.0)
+    if code == 0:
+        head = str(stdout or "").strip()
+    payload = f"{head}\n{_git_status_porcelain(repo_root)}"
+    return hashlib.sha256(payload.encode("utf-8", errors="replace")).hexdigest()
+
+
+def _git_binary_diff_against_head(repo_root: str) -> bytes:
+    args = ["diff", "--binary", "HEAD"] if _git_head_exists(repo_root) else [
+        "diff",
+        "--binary",
+        "4b825dc642cb6eb9a060e54bf8d69288fbee4904",
+    ]
+    code, stdout, _ = _run_git_capture_bytes(repo_root, args, timeout_seconds=4.0)
+    if code != 0 and stdout == b"":
+        return b""
+    return stdout
+
+
+def _git_list_untracked_files(repo_root: str) -> list[str]:
+    code, stdout, _ = _run_git_capture(
+        repo_root,
+        ["ls-files", "--others", "--exclude-standard"],
+        timeout_seconds=2.0,
+    )
+    if code != 0:
+        return []
+    return [line.strip() for line in stdout.splitlines() if line.strip()]
+
+
+def _encode_bytes(value: bytes) -> str:
+    return base64.b64encode(bytes(value)).decode("ascii") if value else ""
+
+
+def _decode_bytes(value: object) -> bytes:
+    clean = str(value or "").strip()
+    if not clean:
+        return b""
+    try:
+        return base64.b64decode(clean.encode("ascii"), validate=False)
+    except Exception:
+        return b""
+
+
+def _read_repo_file_bytes(repo_root: str, rel_path: str) -> bytes:
+    target = Path(repo_root).joinpath(rel_path).resolve()
+    repo_path = Path(repo_root).resolve()
+    try:
+        target.relative_to(repo_path)
+    except Exception:
+        return b""
+    try:
+        return target.read_bytes()
+    except Exception:
+        return b""
+
+
+def _capture_untracked_snapshots(repo_root: str) -> list[dict[str, str]]:
+    snapshots: list[dict[str, str]] = []
+    for rel_path in _git_list_untracked_files(repo_root):
+        data = _read_repo_file_bytes(repo_root, rel_path)
+        snapshots.append(
+            {
+                "path": rel_path,
+                "data_b64": _encode_bytes(data),
+                "sha256": hashlib.sha256(data).hexdigest() if data else "",
+            }
+        )
+    return snapshots
+
+
+def _remove_repo_paths(repo_root: str, paths: list[str]) -> None:
+    base = Path(repo_root).resolve()
+    for rel_path in paths:
+        try:
+            target = base.joinpath(rel_path).resolve()
+            target.relative_to(base)
+        except Exception:
+            continue
+        try:
+            if target.is_dir():
+                shutil.rmtree(target, ignore_errors=True)
+            else:
+                target.unlink(missing_ok=True)
+        except Exception:
+            continue
+
+
+def _write_repo_file_bytes(repo_root: str, rel_path: str, data: bytes) -> None:
+    base = Path(repo_root).resolve()
+    target = base.joinpath(rel_path).resolve()
+    target.relative_to(base)
+    target.parent.mkdir(parents=True, exist_ok=True)
+    target.write_bytes(data)
+
+
+def _default_time_travel_branch_name(session_id: str, checkpoint_seq: int) -> str:
+    return f"agensic/time-travel/{str(session_id or '').strip()[:12]}-{int(checkpoint_seq or 0)}"
+
+
+def _next_available_branch_name(repo_root: str, preferred: str) -> str:
+    base = re.sub(r"[^A-Za-z0-9._/-]+", "-", str(preferred or "").strip()).strip("-/") or "agensic/time-travel"
+    candidate = base
+    suffix = 2
+    while True:
+        code, _, _ = _run_git_capture(repo_root, ["rev-parse", "--verify", "--quiet", candidate], timeout_seconds=1.0)
+        if code != 0:
+            return candidate
+        candidate = f"{base}-{suffix}"
+        suffix += 1
+
+
 def _capture_repo_snapshot(working_directory: str) -> dict[str, Any]:
     repo_root = ""
     branch_name = ""
     head_commit = ""
     status_output = ""
     dirty = False
+    untracked_files: list[str] = []
 
     code, stdout, _ = _run_git_capture(working_directory, ["rev-parse", "--show-toplevel"])
     if code == 0:
@@ -1521,6 +1700,7 @@ def _capture_repo_snapshot(working_directory: str) -> dict[str, Any]:
         code, stdout, _ = _run_git_capture(repo_cwd, ["diff", "--stat", "HEAD"])
         if code == 0:
             diff_stat = str(stdout or "").strip()
+        untracked_files = _git_list_untracked_files(repo_cwd)
 
     return {
         "timestamp": int(time.time()),
@@ -1530,6 +1710,7 @@ def _capture_repo_snapshot(working_directory: str) -> dict[str, Any]:
         "dirty": dirty,
         "status_porcelain": status_output,
         "changed_files": changed_files,
+        "untracked_files": untracked_files,
         "diff_stat": diff_stat,
     }
 
@@ -1564,6 +1745,265 @@ def _git_commits_between(repo_root: str, start_head: str, end_head: str) -> list
         sha, _, summary = clean.partition(" ")
         commits.append({"sha": sha, "summary": summary.strip()})
     return commits
+
+
+def _build_git_checkpoint_payload(repo_root: str, *, seq: int, reason: str = "") -> dict[str, Any] | None:
+    clean_repo_root = str(repo_root or "").strip()
+    if not clean_repo_root:
+        return None
+    snapshot = _capture_repo_snapshot(clean_repo_root)
+    if not str(snapshot.get("repo_root", "") or "").strip():
+        return None
+    tracked_patch = _git_binary_diff_against_head(clean_repo_root)
+    untracked = _capture_untracked_snapshots(clean_repo_root)
+    status_porcelain = str(snapshot.get("status_porcelain", "") or "")
+    payload = {
+        "seq": int(seq or 0),
+        "timestamp": int(time.time()),
+        "reason": str(reason or "").strip(),
+        "repo_root": clean_repo_root,
+        "branch": str(snapshot.get("branch", "") or ""),
+        "head": str(snapshot.get("head", "") or ""),
+        "status_porcelain": status_porcelain,
+        "status_fingerprint": hashlib.sha256(status_porcelain.encode("utf-8", errors="replace")).hexdigest()
+        if status_porcelain
+        else "",
+        "tracked_patch_b64": _encode_bytes(tracked_patch),
+        "tracked_patch_sha256": hashlib.sha256(tracked_patch).hexdigest() if tracked_patch else "",
+        "worktree_diff_stat": str(snapshot.get("diff_stat", "") or ""),
+        "changed_files": [str(item) for item in snapshot.get("changed_files", []) if str(item)],
+        "untracked_files": [dict(item) for item in untracked],
+        "untracked_paths": [str(item.get("path", "") or "") for item in untracked if str(item.get("path", "") or "")],
+    }
+    payload["fingerprint"] = hashlib.sha256(
+        json.dumps(
+            {
+                "head": payload["head"],
+                "status": payload["status_porcelain"],
+                "tracked_patch_sha256": payload["tracked_patch_sha256"],
+                "untracked_paths": payload["untracked_paths"],
+            },
+            sort_keys=True,
+        ).encode("utf-8", errors="replace")
+    ).hexdigest()
+    return payload
+
+
+def _load_git_checkpoint_records(path: str) -> list[dict[str, Any]]:
+    rows = _load_jsonl_artifact(path)
+    records: list[dict[str, Any]] = []
+    for row in rows:
+        records.append(
+            {
+                "seq": int(row.get("seq", 0) or 0),
+                "timestamp": int(row.get("timestamp", 0) or 0),
+                "reason": str(row.get("reason", "") or ""),
+                "repo_root": str(row.get("repo_root", "") or ""),
+                "branch": str(row.get("branch", "") or ""),
+                "head": str(row.get("head", "") or ""),
+                "status_porcelain": str(row.get("status_porcelain", "") or ""),
+                "status_fingerprint": str(row.get("status_fingerprint", "") or ""),
+                "tracked_patch_b64": str(row.get("tracked_patch_b64", "") or ""),
+                "tracked_patch_sha256": str(row.get("tracked_patch_sha256", "") or ""),
+                "worktree_diff_stat": str(row.get("worktree_diff_stat", "") or ""),
+                "changed_files": [str(item) for item in row.get("changed_files", []) if str(item)],
+                "untracked_files": [
+                    {
+                        "path": str(item.get("path", "") or ""),
+                        "data_b64": str(item.get("data_b64", "") or ""),
+                        "sha256": str(item.get("sha256", "") or ""),
+                    }
+                    for item in row.get("untracked_files", [])
+                    if isinstance(item, dict) and str(item.get("path", "") or "")
+                ],
+                "untracked_paths": [str(item) for item in row.get("untracked_paths", []) if str(item)],
+                "fingerprint": str(row.get("fingerprint", "") or ""),
+            }
+        )
+    return sorted(records, key=lambda item: (int(item.get("seq", 0) or 0), int(item.get("timestamp", 0) or 0)))
+
+
+def _resolve_git_checkpoint(records: list[dict[str, Any]], target_seq: int) -> tuple[dict[str, Any] | None, bool]:
+    clean_target = int(target_seq or 0)
+    candidate: dict[str, Any] | None = None
+    exact = False
+    for record in records:
+        seq = int(record.get("seq", 0) or 0)
+        if seq == clean_target:
+            return (record, True)
+        if seq <= clean_target:
+            candidate = record
+        elif seq > clean_target:
+            break
+    return (candidate, exact)
+
+
+def _post_session_event(session_id: str, event_type: str, payload: dict[str, Any] | None = None) -> int | None:
+    session = _state_store().get_session_summary(str(session_id or "").strip())
+    if not session:
+        return None
+    event_stream_path = str(session.get("event_stream_path", "") or "").strip()
+    if not event_stream_path:
+        return None
+    target = _resolve_track_artifact_path(event_stream_path)
+    if target is None:
+        return None
+    events = _load_session_events(str(target))
+    next_seq = max([int(event.get("seq", 0) or 0) for event in events], default=0) + 1
+    if target.name.endswith(TRACK_ARTIFACT_COMPRESSION_SUFFIX):
+        existing = _read_track_artifact_text(str(target)) or ""
+        temp_path = Path(str(target) + ".tmp")
+        with gzip.open(temp_path, "wt", encoding="utf-8") as handle:
+            if existing:
+                handle.write(existing)
+                if not existing.endswith("\n"):
+                    handle.write("\n")
+            _write_session_event(
+                handle,
+                session_id=str(session_id or "").strip(),
+                seq=next_seq,
+                started_monotonic=time.monotonic(),
+                event_type=event_type,
+                payload=payload,
+            )
+        temp_path.replace(target)
+    else:
+        with target.open("a", encoding="utf-8") as handle:
+            _write_session_event(
+                handle,
+                session_id=str(session_id or "").strip(),
+                seq=next_seq,
+                started_monotonic=time.monotonic(),
+                event_type=event_type,
+                payload=payload,
+            )
+    return next_seq
+
+
+def load_git_checkpoints_for_session(session_id: str) -> list[dict[str, Any]]:
+    return _load_git_checkpoint_records(_track_git_checkpoint_path(session_id))
+
+
+def preview_time_travel(session_id: str, target_seq: int) -> dict[str, Any]:
+    clean_session_id = str(session_id or "").strip()
+    if not clean_session_id:
+        return {"status": "error", "reason": "session_id_missing"}
+    session = _state_store().get_session_summary(clean_session_id)
+    if session is None:
+        return {"status": "error", "reason": "session_not_found"}
+    repo_root = str(session.get("repo_root", "") or "")
+    if not repo_root:
+        return {"status": "error", "reason": "session_repo_missing"}
+    checkpoints = load_git_checkpoints_for_session(clean_session_id)
+    if not checkpoints:
+        return {"status": "error", "reason": "git_checkpoints_missing"}
+    resolved, exact = _resolve_git_checkpoint(checkpoints, int(target_seq or 0))
+    if resolved is None:
+        return {"status": "error", "reason": "git_checkpoint_not_found"}
+    current_snapshot = _capture_repo_snapshot(repo_root)
+    clean_live = not bool(current_snapshot.get("dirty")) and not bool(current_snapshot.get("untracked_files"))
+    suggested_branch = _next_available_branch_name(
+        repo_root,
+        _default_time_travel_branch_name(clean_session_id, int(resolved.get("seq", 0) or 0)),
+    )
+    preview = {
+        "status": "ok",
+        "session_id": clean_session_id,
+        "target_seq": int(target_seq or 0),
+        "resolved_checkpoint": dict(resolved),
+        "exact_match": bool(exact),
+        "current_repo_state": {
+            "repo_root": repo_root,
+            "branch": str(current_snapshot.get("branch", "") or ""),
+            "head": str(current_snapshot.get("head", "") or ""),
+            "dirty": bool(current_snapshot.get("dirty")),
+            "changed_files": [str(item) for item in current_snapshot.get("changed_files", []) if str(item)],
+            "untracked_files": [str(item) for item in current_snapshot.get("untracked_files", []) if str(item)],
+            "diff_stat": str(current_snapshot.get("diff_stat", "") or ""),
+        },
+        "can_fork": bool(clean_live),
+        "blocking_reason": "" if clean_live else "live_repo_dirty",
+        "suggested_branch": suggested_branch,
+        "action": "fork_branch_restore",
+        "repo_root": repo_root,
+    }
+    _post_session_event(
+        clean_session_id,
+        "git.time_travel.previewed",
+        {
+            "target_seq": int(target_seq or 0),
+            "resolved_checkpoint_seq": int(resolved.get("seq", 0) or 0),
+            "exact_match": bool(exact),
+            "can_fork": bool(clean_live),
+        },
+    )
+    return preview
+
+
+def fork_time_travel(session_id: str, target_seq: int, branch_name: str = "") -> dict[str, Any]:
+    preview = preview_time_travel(session_id, target_seq)
+    if str(preview.get("status", "") or "") != "ok":
+        return preview
+    if not bool(preview.get("can_fork")):
+        return {"status": "error", "reason": str(preview.get("blocking_reason", "") or "fork_blocked"), "preview": preview}
+    checkpoint = dict(preview.get("resolved_checkpoint", {}) or {})
+    repo_root = str(preview.get("repo_root", "") or "")
+    target_branch = _next_available_branch_name(repo_root, str(branch_name or "").strip() or str(preview.get("suggested_branch", "") or ""))
+    checkpoint_head = str(checkpoint.get("head", "") or "").strip()
+    base_ref = checkpoint_head or "HEAD"
+    code, _, stderr = _run_git_capture(repo_root, ["checkout", "-b", target_branch, base_ref], timeout_seconds=5.0)
+    if code != 0:
+        return {"status": "error", "reason": "branch_create_failed", "detail": stderr.strip() or ""}
+    # Remove any pre-existing untracked files, then restore the selected checkpoint's state.
+    _remove_repo_paths(repo_root, _git_list_untracked_files(repo_root))
+    tracked_patch = _decode_bytes(checkpoint.get("tracked_patch_b64"))
+    if tracked_patch:
+        code_bytes, _, stderr_bytes = _run_git_capture_bytes(
+            repo_root,
+            ["apply", "--binary", "--whitespace=nowarn", "-"],
+            stdin_bytes=tracked_patch,
+            timeout_seconds=5.0,
+        )
+        if code_bytes != 0:
+            return {
+                "status": "error",
+                "reason": "tracked_patch_apply_failed",
+                "detail": stderr_bytes.decode("utf-8", errors="replace").strip(),
+            }
+    for item in checkpoint.get("untracked_files", []):
+        if not isinstance(item, dict):
+            continue
+        rel_path = str(item.get("path", "") or "").strip()
+        if not rel_path:
+            continue
+        _write_repo_file_bytes(repo_root, rel_path, _decode_bytes(item.get("data_b64")))
+    launch_payload = {
+        "agent": str((_state_store().get_session_summary(str(session_id or "").strip()) or {}).get("agent", "") or ""),
+        "model": str((_state_store().get_session_summary(str(session_id or "").strip()) or {}).get("model", "") or ""),
+        "agent_name": str((_state_store().get_session_summary(str(session_id or "").strip()) or {}).get("agent_name", "") or ""),
+        "working_directory": repo_root,
+        "source_session_id": str(session_id or "").strip(),
+        "source_target_seq": int(target_seq or 0),
+        "resolved_checkpoint_seq": int(checkpoint.get("seq", 0) or 0),
+        "branch_name": target_branch,
+    }
+    _post_session_event(
+        str(session_id or "").strip(),
+        "git.time_travel.forked",
+        {
+            "target_seq": int(target_seq or 0),
+            "resolved_checkpoint_seq": int(checkpoint.get("seq", 0) or 0),
+            "fork_branch": target_branch,
+            "exact_match": bool(preview.get("exact_match")),
+        },
+    )
+    return {
+        "status": "ok",
+        "branch_name": target_branch,
+        "working_directory": repo_root,
+        "launch_payload": launch_payload,
+        "preview": preview,
+    }
 
 
 def _load_session_events(path: str) -> list[dict[str, Any]]:
@@ -2211,6 +2651,7 @@ class TrackRuntime:
         root_pid: int,
         transcript_path: str,
         event_stream_path: str,
+        git_checkpoint_path: str,
         state_store: SQLiteStateStore,
         start_snapshot: dict[str, Any] | None = None,
     ):
@@ -2222,6 +2663,7 @@ class TrackRuntime:
         self.controller_pid = int(os.getpid())
         self.transcript_path = transcript_path
         self.event_stream_path = event_stream_path
+        self.git_checkpoint_path = git_checkpoint_path
         self.state_store = state_store
         self.stop_event = threading.Event()
         self._lock = threading.Lock()
@@ -2230,6 +2672,7 @@ class TrackRuntime:
         self.started_monotonic = time.monotonic()
         self._event_seq = 0
         self._event_handle: Any | None = None
+        self._git_checkpoint_handle: Any | None = None
         self.transcript_event_count = 0
         self.session_capability = secrets.token_urlsafe(24)
         self.capability_issued_at = int(time.time())
@@ -2237,6 +2680,7 @@ class TrackRuntime:
         self.public_key_path = _track_public_key_path()
         self.start_snapshot = dict(start_snapshot or {})
         self.end_snapshot: dict[str, Any] = {}
+        self.last_git_checkpoint_fingerprint = ""
         self.processes: dict[int, ObservedProcess] = {
             self.root_pid: ObservedProcess(
                 pid=self.root_pid,
@@ -2251,6 +2695,9 @@ class TrackRuntime:
 
     def set_event_handle(self, handle: Any) -> None:
         self._event_handle = handle
+
+    def set_git_checkpoint_handle(self, handle: Any) -> None:
+        self._git_checkpoint_handle = handle
 
     def emit_event(self, event_type: str, payload: dict[str, Any] | None = None) -> int | None:
         handle = self._event_handle
@@ -2271,6 +2718,21 @@ class TrackRuntime:
         except ValueError:
             return None
         return seq
+
+    def capture_git_checkpoint(self, seq: int | None = None, *, reason: str = "") -> dict[str, Any] | None:
+        handle = self._git_checkpoint_handle
+        repo_root = str(self.end_snapshot.get("repo_root", "") or self.start_snapshot.get("repo_root", "") or self.launch.working_directory)
+        if handle is None or bool(getattr(handle, "closed", False)):
+            return None
+        payload = _build_git_checkpoint_payload(repo_root, seq=int(seq or self._event_seq or 0), reason=reason)
+        if payload is None:
+            return None
+        fingerprint = str(payload.get("fingerprint", "") or "")
+        if fingerprint and fingerprint == self.last_git_checkpoint_fingerprint:
+            return None
+        _write_jsonl_record(handle, payload)
+        self.last_git_checkpoint_fingerprint = fingerprint
+        return payload
 
     def persist_summary(
         self,
@@ -2533,6 +2995,7 @@ class TrackRuntime:
                 "session_escape": bool(proc.session_escape),
             },
         )
+        self.capture_git_checkpoint(reason=f"process_exit:{int(proc.pid)}")
 
 
 def _watch_tracked_process_tree(runtime: TrackRuntime) -> None:
@@ -2683,14 +3146,21 @@ def _emit_terminal_reset(stdout_fd: int | None) -> None:
         return
 
 
-def run_tracked_command(launch: TrackLaunch) -> int:
+def run_tracked_command(
+    launch: TrackLaunch,
+    *,
+    session_id_override: str = "",
+    session_name: str = "",
+    replay_metadata: dict[str, Any] | None = None,
+) -> int:
     ensure_track_supported()
     _ensure_track_layout()
     _prune_tracked_transcripts()
 
-    session_id = uuid.uuid4().hex[:16]
+    session_id = str(session_id_override or "").strip() or uuid.uuid4().hex[:16]
     transcript_path = _track_transcript_path(session_id)
     checkpoint_path = _track_checkpoint_path(session_id)
+    git_checkpoint_path = _track_git_checkpoint_path(session_id)
     event_stream_path = _track_event_stream_path(session_id)
     state_store = _state_store()
     start_snapshot = _capture_repo_snapshot(launch.working_directory)
@@ -2743,6 +3213,7 @@ def run_tracked_command(launch: TrackLaunch) -> int:
         root_pid=pid,
         transcript_path=transcript_path,
         event_stream_path=event_stream_path,
+        git_checkpoint_path=git_checkpoint_path,
         state_store=state_store,
         start_snapshot=start_snapshot,
     )
@@ -2780,9 +3251,10 @@ def run_tracked_command(launch: TrackLaunch) -> int:
             event_stream_path,
             "a",
             encoding="utf-8",
-        ) as event_stream:
+        ) as event_stream, open(git_checkpoint_path, "a", encoding="utf-8") as git_checkpoint_stream:
             checkpoint_recorder = _start_checkpoint_recorder(checkpoint_path)
             runtime.set_event_handle(event_stream)
+            runtime.set_git_checkpoint_handle(git_checkpoint_stream)
             runtime.emit_event(
                 "marker.session.started",
                 {
@@ -2793,6 +3265,9 @@ def run_tracked_command(launch: TrackLaunch) -> int:
                 },
             )
             runtime.emit_event("git.snapshot.start", dict(runtime.start_snapshot))
+            runtime.capture_git_checkpoint(reason="session_start")
+            if replay_metadata:
+                runtime.emit_event("session.replayed_from_checkpoint", dict(replay_metadata))
             if pending_initial_winsize is not None:
                 rows, cols = pending_initial_winsize
                 seq = runtime.emit_event(
@@ -2915,12 +3390,14 @@ def run_tracked_command(launch: TrackLaunch) -> int:
                 watcher_started = False
             runtime.end_snapshot = _capture_repo_snapshot(runtime.launch.working_directory)
             runtime.emit_event("git.snapshot.end", dict(runtime.end_snapshot))
+            runtime.capture_git_checkpoint(reason="session_end")
             for commit in _git_commits_between(
                 str(runtime.end_snapshot.get("repo_root", "") or runtime.start_snapshot.get("repo_root", "") or ""),
                 str(runtime.start_snapshot.get("head", "") or ""),
                 str(runtime.end_snapshot.get("head", "") or ""),
             ):
                 runtime.emit_event("git.commit.created", commit)
+                runtime.capture_git_checkpoint(reason=f"commit_created:{str(commit.get('sha', '') or '')}")
             runtime.emit_event(
                 "marker.session.finished",
                 {
@@ -2955,15 +3432,82 @@ def run_tracked_command(launch: TrackLaunch) -> int:
     transcript_path = _compress_track_artifact(transcript_path)
     event_stream_path = _compress_track_artifact(event_stream_path)
     checkpoint_path = _compress_track_artifact(checkpoint_path)
+    git_checkpoint_path = _compress_track_artifact(git_checkpoint_path)
     runtime.transcript_path = transcript_path
     runtime.event_stream_path = event_stream_path
 
     final_state = state_store.get_tracked_session(session_id) or _load_track_state()
     final_status = "stopped" if str(final_state.get("status", "") or "").strip().lower() == "stopping" else "exited"
     runtime.persist_state(final_status, exit_code=runtime.root_exit_code if runtime.root_exit_code is not None else 1)
+    if session_name:
+        state_store.rename_tracked_session(session_id, session_name)
     state_store.clear_tracked_session_capability(session_id)
     aggregate, changes = runtime.build_session_summary()
+    if replay_metadata:
+        aggregate = dict(aggregate or {})
+        aggregate["replay_metadata"] = dict(replay_metadata)
     runtime.persist_summary(aggregate=aggregate, changes=changes)
-    _prune_tracked_transcripts(exclude_paths={transcript_path, event_stream_path, checkpoint_path})
+    _prune_tracked_transcripts(exclude_paths={transcript_path, event_stream_path, checkpoint_path, git_checkpoint_path})
     _refresh_track_state_cache()
     return int(runtime.root_exit_code if runtime.root_exit_code is not None else 1)
+
+
+def build_launch_from_session(
+    session_id: str,
+    *,
+    working_directory: str = "",
+) -> TrackLaunch:
+    session = _state_store().get_session_summary(str(session_id or "").strip())
+    if session is None:
+        raise ValueError("session_not_found")
+    root_command = str(session.get("root_command", "") or "").strip()
+    if not root_command:
+        raise ValueError("session_root_command_missing")
+    launch = prepare_track_launch(
+        shlex.split(root_command),
+        model_override=str(session.get("model", "") or ""),
+        agent_name_override=str(session.get("agent_name", "") or ""),
+    )
+    if str(working_directory or "").strip():
+        launch.working_directory = str(working_directory or "").strip()
+    return launch
+
+
+def launch_tracked_command_async(
+    launch: TrackLaunch,
+    *,
+    session_name: str = "",
+    replay_metadata: dict[str, Any] | None = None,
+) -> dict[str, Any]:
+    session_id = uuid.uuid4().hex[:16]
+
+    def _runner() -> None:
+        try:
+            run_tracked_command(
+                launch,
+                session_id_override=session_id,
+                session_name=session_name,
+                replay_metadata=replay_metadata,
+            )
+        except Exception:
+            return
+
+    thread = threading.Thread(target=_runner, daemon=True)
+    thread.start()
+    deadline = time.time() + 5.0
+    store = _state_store()
+    while time.time() < deadline:
+        active = store.get_tracked_session(session_id)
+        if active is not None:
+            return {
+                "status": "ok",
+                "session_id": session_id,
+                "working_directory": str(active.get("working_directory", "") or launch.working_directory),
+                "root_command": str(active.get("root_command", "") or launch.root_command),
+            }
+        time.sleep(0.02)
+    return {
+        "status": "error",
+        "reason": "launch_start_timeout",
+        "session_id": session_id,
+    }
