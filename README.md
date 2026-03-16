@@ -70,6 +70,66 @@ agensic run inspect <session_id>
 - `agensic run <agent>` remains the manual tracked-session command and is still the path to use for Ollama.
 - `agensic doctor`, `agensic fix --safe`, and `agensic fix --recover` help keep long-running local state healthy.
 
+### Time Travel
+
+`Time Travel` lets you go to a point in a tracked session, preview what repo state would be restored there, fork that state into a new branch, and continue from it in a new tracked session.
+
+This is designed to answer questions like:
+
+- "What did the repo look like at this point in the agent session?"
+- "Can I safely continue from here without destroying my current branch?"
+- "What existed before the later commits and edits happened?"
+
+#### What gets restored
+
+`Time Travel` restores the Git repo state captured at a checkpoint, not just commits.
+
+A checkpoint can include:
+
+- committed history that already existed at that moment
+- tracked but uncommitted file changes
+- untracked files that existed at that moment
+
+That means restore is not "commit-only." If a checkpoint was captured while the repo had dirty changes, those dirty changes can be part of the restored state too.
+
+#### When Git checkpoints are captured
+
+Agensic keeps terminal replay checkpoints and Git checkpoints separately.
+
+For Git state, checkpoints are currently captured:
+
+- at session start
+- after process exits during the tracked session when Git state changed
+- when a `git.commit.created` event is observed
+- at session end
+
+If you choose a replay point that does not have an exact Git checkpoint, Agensic restores to the nearest prior Git checkpoint.
+
+So the important divider is the checkpoint, not strictly the commit.
+
+#### How restore works
+
+In Session Detail:
+
+- move through the timeline/replay
+- press `T` for `Time Travel`
+- review the preview modal
+- confirm to restore into a new branch
+
+The default behavior is non-destructive:
+
+- Agensic creates a new branch
+- restores the selected checkpoint state there
+- starts a new tracked session with your agent from that restored state
+
+This avoids destructive in-place resets.
+
+#### Current safety rule
+
+For now, `Time Travel` only proceeds when the live repo is clean at restore time.
+
+If the current repo has uncommitted or untracked changes when you try to restore, Agensic blocks the action instead of risking a destructive merge of states.
+
 ### Time Travel note
 
 `Time Travel` restores the Git repo state captured at a session checkpoint. It is session-triggered, but repo-level, not a per-agent sandbox.
