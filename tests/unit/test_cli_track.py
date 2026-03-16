@@ -1039,6 +1039,77 @@ class CliTrackTests(unittest.TestCase):
             self.assertEqual(tracked.read_text(encoding="utf-8"), "changed\n")
             self.assertEqual(Path(repo_dir, "extra.txt").read_text(encoding="utf-8"), "new file\n")
 
+    def test_time_travel_preview_uses_session_artifact_paths_and_snapshot_repo_root(self):
+        with self._temp_app_paths() as (_, temp_paths), tempfile.TemporaryDirectory() as repo_dir, tempfile.TemporaryDirectory() as legacy_dir:
+            subprocess.run(["git", "init"], cwd=repo_dir, check=True, capture_output=True, text=True)
+            subprocess.run(["git", "config", "user.email", "test@example.com"], cwd=repo_dir, check=True)
+            subprocess.run(["git", "config", "user.name", "Test User"], cwd=repo_dir, check=True)
+            tracked = Path(repo_dir) / "tracked.txt"
+            tracked.write_text("base\n", encoding="utf-8")
+            subprocess.run(["git", "add", "tracked.txt"], cwd=repo_dir, check=True)
+            subprocess.run(["git", "commit", "-m", "base"], cwd=repo_dir, check=True, capture_output=True, text=True)
+
+            head = subprocess.run(
+                ["git", "rev-parse", "HEAD"],
+                cwd=repo_dir,
+                check=True,
+                capture_output=True,
+                text=True,
+            ).stdout.strip()
+            branch = subprocess.run(
+                ["git", "branch", "--show-current"],
+                cwd=repo_dir,
+                check=True,
+                capture_output=True,
+                text=True,
+            ).stdout.strip()
+
+            store = SQLiteStateStore(temp_paths.state_sqlite_path, journal=None)
+            transcript_path = Path(legacy_dir) / "sess-legacy.transcript.jsonl.gz"
+            event_stream_path = Path(legacy_dir) / "sess-legacy.events.jsonl.gz"
+            git_checkpoint_path = Path(legacy_dir) / "sess-legacy.git-checkpoints.jsonl.gz"
+
+            store.upsert_tracked_session(
+                session_id="sess-legacy",
+                status="exited",
+                launch_mode="registry_alias",
+                agent="codex",
+                model="test-model",
+                agent_name="Codex",
+                working_directory=repo_dir,
+                root_command="codex",
+                transcript_path=str(transcript_path),
+            )
+            snapshot = {
+                "timestamp": int(time.time()),
+                "repo_root": repo_dir,
+                "branch": branch,
+                "head": head,
+            }
+            store.upsert_session_summary(
+                session_id="sess-legacy",
+                repo_root="",
+                branch_start=branch,
+                branch_end=branch,
+                head_start=head,
+                head_end=head,
+                start_snapshot=snapshot,
+                end_snapshot=snapshot,
+                event_stream_path=str(event_stream_path),
+            )
+
+            payload = track_module._build_git_checkpoint_payload(repo_dir, seq=3, reason="legacy")
+            self.assertIsNotNone(payload)
+            with gzip.open(git_checkpoint_path, "wt", encoding="utf-8") as handle:
+                handle.write(json.dumps(payload) + "\n")
+
+            preview = track_module.preview_time_travel("sess-legacy", 3)
+
+            self.assertEqual(preview["status"], "ok")
+            self.assertEqual(preview["repo_root"], repo_dir)
+            self.assertEqual(preview["resolved_checkpoint"]["seq"], 3)
+            self.assertTrue(preview["exact_match"])
+
 
 if __name__ == "__main__":
     unittest.main()

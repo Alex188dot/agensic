@@ -177,6 +177,12 @@ struct TimeTravelForkResponse {
     launch_payload: Value,
 }
 
+#[derive(Debug, Default, Deserialize)]
+struct ErrorDetailResponse {
+    #[serde(default)]
+    detail: String,
+}
+
 #[allow(dead_code)]
 #[derive(Clone, Debug, Default, Deserialize)]
 struct SessionLaunchResponse {
@@ -838,6 +844,19 @@ impl CopyFeedback {
 }
 
 impl App {
+    fn format_http_error(response: reqwest::blocking::Response, context: &str) -> String {
+        let status = response.status();
+        let detail = response
+            .json::<ErrorDetailResponse>()
+            .ok()
+            .map(|body| body.detail.trim().to_string())
+            .filter(|body| !body.is_empty());
+        match detail {
+            Some(detail) => format!("{context}: {status} ({detail})"),
+            None => format!("{context}: {status}"),
+        }
+    }
+
     fn new(client: Client, args: SessionsArgs) -> Result<Self, String> {
         let mut app = Self {
             client,
@@ -1120,7 +1139,7 @@ impl App {
                     Err(err) => modal.error = format!("invalid preview payload: {}", err),
                 }
             }
-            Ok(response) => modal.error = format!("preview failed: {}", response.status()),
+            Ok(response) => modal.error = Self::format_http_error(response, "preview failed"),
             Err(err) => modal.error = format!("preview request failed: {}", err),
         }
         self.rename_modal = None;
@@ -2018,16 +2037,31 @@ fn format_timeline_ordinal(value: usize) -> String {
 }
 
 fn build_changes(detail: &DetailState) -> Paragraph<'static> {
+    let push_metric = detail
+        .session
+        .aggregate
+        .get("push_attempts")
+        .or_else(|| detail.session.aggregate.get("push_attempt_count"));
+    let event_metric = detail
+        .session
+        .aggregate
+        .get("structured_event_count")
+        .or_else(|| detail.session.aggregate.get("event_count"));
+    let commit_metric = detail
+        .session
+        .aggregate
+        .get("commits_created")
+        .or_else(|| detail.session.aggregate.get("commit_count"));
     let mut lines = vec![Line::from(format!(
         "commands {}    subprocesses {}    pushes {}    transcript events {}",
         metric(detail.session.aggregate.get("command_count")),
         metric(detail.session.aggregate.get("subprocess_count")),
-        metric(detail.session.aggregate.get("push_attempt_count")),
-        metric(detail.session.aggregate.get("event_count")),
+        metric(push_metric),
+        metric(event_metric),
     ))];
     lines.push(Line::from(format!(
         "commits {}    violations {}",
-        metric(detail.session.aggregate.get("commit_count")),
+        metric(commit_metric),
         if detail.session.violation_code.trim().is_empty() {
             "-".to_string()
         } else {
@@ -4917,6 +4951,52 @@ mod tests {
                 .expect("preview loaded")
                 .suggested_branch,
             "agensic/time-travel/sess-1-2"
+        );
+        server.join().expect("server thread");
+    }
+
+    #[test]
+    fn time_travel_modal_shows_error_detail_for_failed_preview() {
+        let listener = TcpListener::bind("127.0.0.1:0").expect("bind test listener");
+        let base_url = format!("http://{}", listener.local_addr().expect("listener addr"));
+        let server = thread::spawn(move || {
+            let (mut stream, _) = listener.accept().expect("accept request");
+            let mut buffer = [0_u8; 4096];
+            let read = stream.read(&mut buffer).expect("read request");
+            let request = String::from_utf8_lossy(&buffer[..read]);
+            assert!(request.starts_with("POST /sessions/sess-1/time-travel/preview"));
+            let body = r#"{"detail":"session_repo_missing"}"#;
+            let response = format!(
+                "HTTP/1.1 404 Not Found\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+                body.len(),
+                body
+            );
+            stream
+                .write_all(response.as_bytes())
+                .expect("write response");
+        });
+        let mut app = sample_app(&base_url, vec![sample_session("sess-1", "Release prep")]);
+        app.detail = Some(DetailState::new(
+            sample_session("sess-1", "Release prep"),
+            vec![SessionEvent {
+                seq: 2,
+                event_type: "command.recorded".to_string(),
+                payload: json!({"command":"git status"}),
+                ..SessionEvent::default()
+            }],
+            false,
+        ));
+
+        handle_key(
+            &mut app,
+            KeyEvent::new(KeyCode::Char('T'), KeyModifiers::SHIFT),
+        )
+        .expect("handle key succeeds");
+
+        let modal = app.time_travel_modal.expect("time travel modal should open");
+        assert_eq!(
+            modal.error,
+            "preview failed: 404 Not Found (session_repo_missing). Please launch your agent from within the git repo to enable Time Travel"
         );
         server.join().expect("server thread");
     }

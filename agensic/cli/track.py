@@ -428,6 +428,19 @@ def _track_git_checkpoint_path(session_id: str) -> str:
     return os.path.join(_track_transcripts_dir(), f"{clean_session_id}.git-checkpoints.jsonl")
 
 
+def _derive_sibling_track_artifact_path(path: str, source_suffix: str, target_suffix: str) -> str:
+    clean_path = str(path or "").strip()
+    if not clean_path:
+        return ""
+    if clean_path.endswith(source_suffix):
+        return clean_path[: -len(source_suffix)] + target_suffix
+    compressed_source = source_suffix + TRACK_ARTIFACT_COMPRESSION_SUFFIX
+    compressed_target = target_suffix + TRACK_ARTIFACT_COMPRESSION_SUFFIX
+    if clean_path.endswith(compressed_source):
+        return clean_path[: -len(compressed_source)] + compressed_target
+    return ""
+
+
 def _track_artifact_cleanup_paths(path: str) -> set[Path]:
     clean_path = str(path or "").strip()
     if not clean_path:
@@ -1880,8 +1893,30 @@ def _post_session_event(session_id: str, event_type: str, payload: dict[str, Any
     return next_seq
 
 
-def load_git_checkpoints_for_session(session_id: str) -> list[dict[str, Any]]:
-    return _load_git_checkpoint_records(_track_git_checkpoint_path(session_id))
+def _git_checkpoint_candidate_paths(session_id: str, session: dict[str, Any] | None = None) -> list[str]:
+    clean_session_id = str(session_id or "").strip()
+    candidates: list[str] = []
+
+    def _add(path: str) -> None:
+        clean_path = str(path or "").strip()
+        if clean_path and clean_path not in candidates:
+            candidates.append(clean_path)
+
+    _add(_track_git_checkpoint_path(clean_session_id))
+    state = dict(session or {})
+    transcript_path = str(state.get("transcript_path", "") or "")
+    event_stream_path = str(state.get("event_stream_path", "") or "")
+    _add(_derive_sibling_track_artifact_path(transcript_path, ".transcript.jsonl", ".git-checkpoints.jsonl"))
+    _add(_derive_sibling_track_artifact_path(event_stream_path, ".events.jsonl", ".git-checkpoints.jsonl"))
+    return candidates
+
+
+def load_git_checkpoints_for_session(session_id: str, session: dict[str, Any] | None = None) -> list[dict[str, Any]]:
+    for candidate in _git_checkpoint_candidate_paths(session_id, session):
+        records = _load_git_checkpoint_records(candidate)
+        if records:
+            return records
+    return []
 
 
 def preview_time_travel(session_id: str, target_seq: int) -> dict[str, Any]:
@@ -1891,10 +1926,18 @@ def preview_time_travel(session_id: str, target_seq: int) -> dict[str, Any]:
     session = _state_store().get_session_summary(clean_session_id)
     if session is None:
         return {"status": "error", "reason": "session_not_found"}
-    repo_root = str(session.get("repo_root", "") or "")
+    start_snapshot = dict(session.get("start_snapshot", {}) or {})
+    end_snapshot = dict(session.get("end_snapshot", {}) or {})
+    repo_root = str(
+        session.get("repo_root", "")
+        or end_snapshot.get("repo_root", "")
+        or start_snapshot.get("repo_root", "")
+        or session.get("working_directory", "")
+        or ""
+    )
     if not repo_root:
         return {"status": "error", "reason": "session_repo_missing"}
-    checkpoints = load_git_checkpoints_for_session(clean_session_id)
+    checkpoints = load_git_checkpoints_for_session(clean_session_id, session=session)
     if not checkpoints:
         return {"status": "error", "reason": "git_checkpoints_missing"}
     resolved, exact = _resolve_git_checkpoint(checkpoints, int(target_seq or 0))
