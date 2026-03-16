@@ -1981,6 +1981,7 @@ fn timeline_kind_style(event_type: &str) -> Style {
         "git.snapshot.start" => Color::Rgb(232, 110, 255),
         "git.snapshot.end" => Color::Rgb(198, 124, 255),
         "git.commit.created" => Color::Rgb(255, 126, 216),
+        "git.commit.sess_sync" => Color::Rgb(232, 96, 186),
         "git.push.attempted" => Color::Rgb(224, 90, 188),
         "marker.session.started" => Color::Rgb(255, 106, 214),
         "marker.session.finished" => Color::Rgb(234, 90, 174),
@@ -2738,7 +2739,7 @@ fn event_summary(event: &SessionEvent) -> String {
             .and_then(Value::as_str)
             .map(sanitize_inline_text)
             .unwrap_or_else(|| "-".to_string()),
-        "git.commit.created" => format!(
+        "git.commit.created" | "git.commit.sess_sync" => format!(
             "{} {}",
             sanitize_inline_text(
                 event
@@ -4476,6 +4477,10 @@ mod tests {
         );
         assert_eq!(
             TimelineCategory::from_event_type("git.commit.created"),
+            TimelineCategory::Git
+        );
+        assert_eq!(
+            TimelineCategory::from_event_type("git.commit.sess_sync"),
             TimelineCategory::Git
         );
         assert_eq!(

@@ -2724,6 +2724,8 @@ class TrackRuntime:
         self.start_snapshot = dict(start_snapshot or {})
         self.end_snapshot: dict[str, Any] = {}
         self.last_git_checkpoint_fingerprint = ""
+        self.last_observed_head = str(self.start_snapshot.get("head", "") or "")
+        self.emitted_commit_shas: set[str] = set()
         self.processes: dict[int, ObservedProcess] = {
             self.root_pid: ObservedProcess(
                 pid=self.root_pid,
@@ -3038,7 +3040,33 @@ class TrackRuntime:
                 "session_escape": bool(proc.session_escape),
             },
         )
+        self._emit_runtime_git_commits(proc, exit_code=exit_code)
         self.capture_git_checkpoint(reason=f"process_exit:{int(proc.pid)}")
+
+    def _emit_runtime_git_commits(self, proc: ObservedProcess, *, exit_code: int | None = None) -> None:
+        if int(exit_code or 0) != 0:
+            return
+        command_text = str(proc.command or "").strip().lower()
+        if "git commit" not in command_text:
+            return
+        repo_root = str(
+            self.end_snapshot.get("repo_root", "")
+            or self.start_snapshot.get("repo_root", "")
+            or self.launch.working_directory
+        )
+        snapshot = _capture_repo_snapshot(repo_root)
+        current_head = str(snapshot.get("head", "") or "").strip()
+        previous_head = str(self.last_observed_head or "").strip()
+        if not current_head or current_head == previous_head:
+            return
+        for commit in _git_commits_between(repo_root, previous_head, current_head):
+            sha = str(commit.get("sha", "") or "").strip()
+            if not sha or sha in self.emitted_commit_shas:
+                continue
+            self.emit_event("git.commit.created", commit)
+            self.capture_git_checkpoint(reason=f"commit_created:{sha}")
+            self.emitted_commit_shas.add(sha)
+        self.last_observed_head = current_head
 
 
 def _watch_tracked_process_tree(runtime: TrackRuntime) -> None:
@@ -3439,8 +3467,13 @@ def run_tracked_command(
                 str(runtime.start_snapshot.get("head", "") or ""),
                 str(runtime.end_snapshot.get("head", "") or ""),
             ):
-                runtime.emit_event("git.commit.created", commit)
-                runtime.capture_git_checkpoint(reason=f"commit_created:{str(commit.get('sha', '') or '')}")
+                sha = str(commit.get("sha", "") or "").strip()
+                if not sha or sha in runtime.emitted_commit_shas:
+                    continue
+                runtime.emit_event("git.commit.sess_sync", commit)
+                runtime.capture_git_checkpoint(reason=f"commit_created:{sha}")
+                runtime.emitted_commit_shas.add(sha)
+            runtime.last_observed_head = str(runtime.end_snapshot.get("head", "") or runtime.last_observed_head or "")
             runtime.emit_event(
                 "marker.session.finished",
                 {

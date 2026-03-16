@@ -6,6 +6,7 @@ import os
 import shlex
 import subprocess
 import tempfile
+import threading
 import time
 import unittest
 from contextlib import contextmanager
@@ -802,6 +803,79 @@ class CliTrackTests(unittest.TestCase):
                 event_payload = handle.read()
             self.assertIn('"type":"git.snapshot.start"', event_payload)
             self.assertIn('"type":"command.recorded"', event_payload)
+
+    def test_run_tracked_command_emits_git_commit_created_before_session_end(self):
+        with self._temp_app_paths() as (_, temp_paths), self._mock_track_daemon(temp_paths), tempfile.TemporaryDirectory() as repo_dir:
+            subprocess.run(["git", "init"], cwd=repo_dir, check=True, capture_output=True, text=True)
+            subprocess.run(["git", "config", "user.email", "test@example.com"], cwd=repo_dir, check=True)
+            subprocess.run(["git", "config", "user.name", "Test User"], cwd=repo_dir, check=True)
+            Path(repo_dir, "README.md").write_text("hello\n", encoding="utf-8")
+            subprocess.run(["git", "add", "README.md"], cwd=repo_dir, check=True)
+            subprocess.run(["git", "commit", "-m", "init"], cwd=repo_dir, check=True, capture_output=True, text=True)
+
+            with patch("os.getcwd", return_value=repo_dir):
+                launch = _make_test_launch(
+                    ["zsh", "-lc", "echo changed > README.md; git add README.md; git commit -m 'update readme'"],
+                )
+            code = track_module.run_tracked_command(launch)
+
+            self.assertEqual(code, 0)
+            store = SQLiteStateStore(temp_paths.state_sqlite_path, journal=None)
+            session = store.get_latest_tracked_session()
+            self.assertIsNotNone(session)
+            summary = store.get_session_summary(str(session["session_id"]))
+            self.assertIsNotNone(summary)
+            event_stream_path = Path(str(summary.get("event_stream_path", "") or ""))
+            self.assertTrue(event_stream_path.is_file())
+
+            with gzip.open(event_stream_path, "rt", encoding="utf-8") as handle:
+                events = [json.loads(line) for line in handle if line.strip()]
+
+            event_types = [str(event.get("type", "") or "") for event in events]
+            commit_indices = [idx for idx, event_type in enumerate(event_types) if event_type == "git.commit.created"]
+            self.assertEqual(len(commit_indices), 1)
+            snapshot_end_index = event_types.index("git.snapshot.end")
+            self.assertLess(commit_indices[0], snapshot_end_index)
+
+    def test_run_tracked_command_marks_external_commits_as_session_sync(self):
+        with self._temp_app_paths() as (_, temp_paths), self._mock_track_daemon(temp_paths), tempfile.TemporaryDirectory() as repo_dir:
+            subprocess.run(["git", "init"], cwd=repo_dir, check=True, capture_output=True, text=True)
+            subprocess.run(["git", "config", "user.email", "test@example.com"], cwd=repo_dir, check=True)
+            subprocess.run(["git", "config", "user.name", "Test User"], cwd=repo_dir, check=True)
+            Path(repo_dir, "README.md").write_text("hello\n", encoding="utf-8")
+            subprocess.run(["git", "add", "README.md"], cwd=repo_dir, check=True)
+            subprocess.run(["git", "commit", "-m", "init"], cwd=repo_dir, check=True, capture_output=True, text=True)
+
+            def _external_commit() -> None:
+                time.sleep(0.2)
+                Path(repo_dir, "README.md").write_text("external\n", encoding="utf-8")
+                subprocess.run(["git", "add", "README.md"], cwd=repo_dir, check=True, capture_output=True, text=True)
+                subprocess.run(["git", "commit", "-m", "external commit"], cwd=repo_dir, check=True, capture_output=True, text=True)
+
+            worker = threading.Thread(target=_external_commit)
+            worker.start()
+            try:
+                with patch("os.getcwd", return_value=repo_dir):
+                    launch = _make_test_launch(["zsh", "-lc", "sleep 1"])
+                code = track_module.run_tracked_command(launch)
+                self.assertEqual(code, 0)
+            finally:
+                worker.join(timeout=5)
+
+            store = SQLiteStateStore(temp_paths.state_sqlite_path, journal=None)
+            session = store.get_latest_tracked_session()
+            self.assertIsNotNone(session)
+            summary = store.get_session_summary(str(session["session_id"]))
+            self.assertIsNotNone(summary)
+            event_stream_path = Path(str(summary.get("event_stream_path", "") or ""))
+            self.assertTrue(event_stream_path.is_file())
+
+            with gzip.open(event_stream_path, "rt", encoding="utf-8") as handle:
+                events = [json.loads(line) for line in handle if line.strip()]
+
+            event_types = [str(event.get("type", "") or "") for event in events]
+            self.assertIn("git.commit.sess_sync", event_types)
+            self.assertNotIn("git.commit.created", event_types)
 
     def test_loaders_read_compressed_track_artifacts(self):
         with self._temp_app_paths() as (_, temp_paths):
