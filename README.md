@@ -91,7 +91,7 @@ Later, you open Agent A's session:
 
 Result:
   The restored repo state will include Agent B's commit too,
-  because the checkpoint reflects the repo state at that time, hence commmit 1 + commit x.
+  because the checkpoint reflects the repo state at that time, hence commit 1 + commit x.
 ```
 
 Visual representation:
