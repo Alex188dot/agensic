@@ -17,9 +17,13 @@ class AgentRegistryTests(unittest.TestCase):
         self.assertIn("claude_code", agents)
         self.assertIn("opencode", agents)
         self.assertIn("openclaw", agents)
+        self.assertIn("pi_dev", agents)
         self.assertIn("kiro", agents)
         self.assertIn("gemini_cli", agents)
+        self.assertIn("cline_cli", agents)
         self.assertIn("nanoclaw", agents)
+        self.assertIn("droid", agents)
+        self.assertIn("hermes_agent", agents)
         self.assertIn("ollama", agents)
 
     def test_provider_model_inference(self):

@@ -227,7 +227,7 @@ fn draw_ui(frame: &mut ratatui::Frame<'_>, app: &App) {
         .unwrap_or("Responsive agent browser. Resize freely; the layout reflows instead of dropping the view.");
     let header = Paragraph::new(Text::from(vec![
         Line::from(vec![
-            Span::styled("Show All Agents", crate::agensic_title_style()),
+            Span::styled("Show All Supported Agents", crate::agensic_title_style()),
             Span::raw(format!(
                 "  {} known mappings",
                 crate::format_compact_count(app.agents.len())

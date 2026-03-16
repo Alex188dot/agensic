@@ -389,6 +389,19 @@ class CliTrackTests(unittest.TestCase):
         self.assertEqual(launch.agent, "kiro")
         self.assertEqual(launch.command[0], "kiro-cli")
 
+    def test_run_accepts_droid_alias_and_uses_droid_executable(self):
+        with patch.object(cli_app, "_run_storage_preflight_if_enabled"), patch.object(
+            track_module,
+            "run_tracked_command",
+            return_value=0,
+        ) as run_mock:
+            result = self.runner.invoke(app, ["run", "droid"])
+
+        self.assertEqual(result.exit_code, 0)
+        launch = run_mock.call_args.args[0]
+        self.assertEqual(launch.agent, "droid")
+        self.assertEqual(launch.command[0], "droid")
+
     def test_run_rejects_agent_override_option(self):
         with patch.object(cli_app, "_run_storage_preflight_if_enabled"):
             result = self.runner.invoke(app, ["run", "--agent", "foo", "codex"])
@@ -629,6 +642,20 @@ class CliTrackTests(unittest.TestCase):
         self.assertEqual(result.exit_code, 0)
         launch = run_mock.call_args.args[0]
         self.assertEqual(launch.model, "qwen-portal/coder-model")
+
+    def test_track_alias_launch_prefers_droid_exec_model_flag(self):
+        with patch.object(cli_app, "_run_storage_preflight_if_enabled"), patch.object(
+            track_module,
+            "run_tracked_command",
+            return_value=0,
+        ) as run_mock:
+            result = self.runner.invoke(app, ["run", "droid", "exec", "-m", "sonnet"])
+
+        self.assertEqual(result.exit_code, 0)
+        launch = run_mock.call_args.args[0]
+        self.assertEqual(launch.agent, "droid")
+        self.assertEqual(launch.command[0], "droid")
+        self.assertEqual(launch.model, "sonnet")
 
     def test_track_run_rejects_raw_mode(self):
         with patch.object(cli_app, "_run_storage_preflight_if_enabled"), patch.object(

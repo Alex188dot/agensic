@@ -220,6 +220,18 @@ class AgensicSessionShellTests(unittest.TestCase):
         self.assertEqual(result.returncode, 0, msg=result.stderr)
         self.assertIn("agensic:run claude --resume 123", result.stdout)
 
+    def test_droid_wrapper_invokes_tracked_run_without_buffer_rewrite(self):
+        result = self._run_zsh(
+            """
+            agensic() {
+              print -r -- "agensic:$*"
+            }
+            droid
+            """
+        )
+        self.assertEqual(result.returncode, 0, msg=result.stderr)
+        self.assertIn("agensic:run droid", result.stdout)
+
     def test_wrapper_bypasses_tracking_when_setting_is_off(self):
         result = self._run_zsh(
             """

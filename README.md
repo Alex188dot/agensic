@@ -66,7 +66,7 @@ agensic run inspect <session_id>
 
 - `agensic provenance --tui` opens the provenance interface and can export the current filtered dataset.
 - `agensic sessions` opens the tracked sessions browser.
-- Supported exact agent entrypoints such as `codex`, `claude`, `gemini`, and `agent` are auto-tracked on macOS by default and emit `AI_EXECUTED`.
+- Supported exact agent entrypoints `agent`, `codex`, `qwen`, `mini-agent`, `kimi`, `claude`, `opencode`, `kilo`, `copilot`, `openclaw`, `pi`, `kiro-cli`, `gemini`, `aider`, `cline`, `nanoclaw`, `droid`, and `hermes` are auto-tracked on macOS by default and emit `AI_EXECUTED`.
 - `agensic run <agent>` remains the manual tracked-session command and is still the path to use for Ollama.
 - `agensic doctor`, `agensic fix --safe`, and `agensic fix --recover` help keep long-running local state healthy.
 

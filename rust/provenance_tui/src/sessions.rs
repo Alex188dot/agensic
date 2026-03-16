@@ -162,6 +162,40 @@ struct TimelineEntry {
     copy_command: Option<String>,
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum TimelineCategory {
+    Command,
+    Process,
+    Terminal,
+    Git,
+    Marker,
+    Violation,
+    Session,
+    Other,
+}
+
+impl TimelineCategory {
+    fn from_event_type(event_type: &str) -> Self {
+        if event_type.starts_with("terminal.") {
+            Self::Terminal
+        } else if event_type.starts_with("command.") {
+            Self::Command
+        } else if event_type.starts_with("process.") {
+            Self::Process
+        } else if event_type.starts_with("git.") {
+            Self::Git
+        } else if event_type.starts_with("marker.") {
+            Self::Marker
+        } else if event_type.starts_with("violation.") {
+            Self::Violation
+        } else if event_type.starts_with("session.") {
+            Self::Session
+        } else {
+            Self::Other
+        }
+    }
+}
+
 #[derive(Clone, Debug, Default, Deserialize)]
 struct TranscriptRecord {
     #[serde(default)]
@@ -1637,6 +1671,7 @@ fn build_timeline(app: &App, detail: &DetailState, area: Rect) -> Table<'static>
             let copied = app.timeline_copy_copied(row_index);
             let hovered = app.timeline_copy_hovered(row_index);
             let selected_row = row_index == selected;
+            let kind_style = timeline_kind_style(&entry.event_type);
             let button = if entry.copy_command.is_some() {
                 copy_button_label(copied)
             } else {
@@ -1644,9 +1679,12 @@ fn build_timeline(app: &App, detail: &DetailState, area: Rect) -> Table<'static>
             };
             Row::new(vec![
                 Cell::from(format_timeline_ordinal(row_index + 1)),
-                Cell::from(truncate_display_width(
-                    &sanitize_inline_text(&entry.event_type),
-                    layout.kind_width as usize,
+                Cell::from(Span::styled(
+                    truncate_display_width(
+                        &sanitize_inline_text(&entry.event_type),
+                        layout.kind_width as usize,
+                    ),
+                    kind_style.add_modifier(Modifier::BOLD),
                 )),
                 Cell::from(truncate_display_width(&entry.summary, preview_width)),
                 Cell::from(Span::styled(
@@ -1691,6 +1729,39 @@ fn build_timeline(app: &App, detail: &DetailState, area: Rect) -> Table<'static>
             .bg(Color::LightGreen)
             .add_modifier(Modifier::BOLD),
     )
+}
+
+fn timeline_kind_style(event_type: &str) -> Style {
+    let color = match event_type {
+        "command.recorded" => Color::Rgb(214, 188, 52),
+        "process.spawned" => Color::Rgb(94, 244, 126),
+        "process.exited" => Color::Rgb(64, 214, 112),
+        "terminal.input" => Color::Rgb(56, 198, 255),
+        "terminal.output" => Color::Rgb(84, 232, 255),
+        "terminal.resize" => Color::Rgb(120, 170, 255),
+        "git.snapshot.start" => Color::Rgb(232, 110, 255),
+        "git.snapshot.end" => Color::Rgb(198, 124, 255),
+        "git.commit.created" => Color::Rgb(255, 126, 216),
+        "git.push.attempted" => Color::Rgb(224, 90, 188),
+        "marker.session.started" => Color::Rgb(255, 106, 214),
+        "marker.session.finished" => Color::Rgb(234, 90, 174),
+        "violation.noted" => Color::Rgb(255, 116, 116),
+        _ => timeline_category_color(TimelineCategory::from_event_type(event_type)),
+    };
+    Style::default().fg(color)
+}
+
+fn timeline_category_color(category: TimelineCategory) -> Color {
+    match category {
+        TimelineCategory::Command => Color::Rgb(196, 174, 78),
+        TimelineCategory::Process => Color::Rgb(80, 226, 118),
+        TimelineCategory::Terminal => Color::Rgb(88, 214, 255),
+        TimelineCategory::Git => Color::Rgb(210, 112, 245),
+        TimelineCategory::Marker => Color::Rgb(244, 102, 194),
+        TimelineCategory::Violation => Color::Rgb(255, 126, 126),
+        TimelineCategory::Session => Color::Rgb(118, 164, 255),
+        TimelineCategory::Other => Color::White,
+    }
 }
 
 fn timeline_table_layout(area_width: u16) -> TimelineTableLayout {
@@ -3840,9 +3911,10 @@ mod tests {
         format_timeline_ordinal, handle_key, load_transcript_chunks, rendered_text_height,
         replay_max_scroll, repo_display_name, sanitize_inline_text, sanitize_terminal_output,
         session_detail_layout_in_area, strip_inline_progress_noise, terminal_replay_end_padding,
-        terminal_replay_max_scroll_x, terminal_replay_scroll, vt100_color_to_ratatui, App,
-        DeleteModalState, DetailState, FocusPane, ReplayMode, SessionEvent, SessionSummary,
-        SessionsArgs, TerminalReplayFrame, TimelineEntry, TranscriptChunk, TEXT_REPLAY_TICK_MS,
+        terminal_replay_max_scroll_x, terminal_replay_scroll, timeline_category_color,
+        timeline_kind_style, TimelineCategory, vt100_color_to_ratatui, App, DeleteModalState,
+        DetailState, FocusPane, ReplayMode, SessionEvent, SessionSummary, SessionsArgs,
+        TerminalReplayFrame, TimelineEntry, TranscriptChunk, TEXT_REPLAY_TICK_MS,
     };
     use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
     use flate2::write::GzEncoder;
@@ -4025,6 +4097,87 @@ mod tests {
             vec!["• Ran git status --short --branch\nThe repo is clean.\n\n".to_string()]
         );
         assert_eq!(replay_timeline_indices, vec![1]);
+    }
+
+    #[test]
+    fn timeline_kind_styles_vary_within_categories() {
+        assert_eq!(
+            TimelineCategory::from_event_type("command.recorded"),
+            TimelineCategory::Command
+        );
+        assert_eq!(
+            TimelineCategory::from_event_type("process.exited"),
+            TimelineCategory::Process
+        );
+        assert_eq!(
+            TimelineCategory::from_event_type("terminal.output"),
+            TimelineCategory::Terminal
+        );
+        assert_eq!(
+            TimelineCategory::from_event_type("git.commit.created"),
+            TimelineCategory::Git
+        );
+        assert_eq!(
+            TimelineCategory::from_event_type("marker.session.started"),
+            TimelineCategory::Marker
+        );
+        assert_eq!(
+            TimelineCategory::from_event_type("violation.noted"),
+            TimelineCategory::Violation
+        );
+        assert_eq!(
+            TimelineCategory::from_event_type("session.started"),
+            TimelineCategory::Session
+        );
+        assert_eq!(
+            TimelineCategory::from_event_type("custom.event"),
+            TimelineCategory::Other
+        );
+
+        assert_eq!(
+            timeline_kind_style("process.spawned").fg,
+            Some(Color::Rgb(94, 244, 126))
+        );
+        assert_eq!(
+            timeline_kind_style("process.exited").fg,
+            Some(Color::Rgb(64, 214, 112))
+        );
+        assert_eq!(
+            timeline_kind_style("terminal.output").fg,
+            Some(Color::Rgb(84, 232, 255))
+        );
+        assert_eq!(
+            timeline_kind_style("terminal.resize").fg,
+            Some(Color::Rgb(120, 170, 255))
+        );
+        assert_eq!(
+            timeline_kind_style("marker.session.started").fg,
+            Some(Color::Rgb(255, 106, 214))
+        );
+        assert_eq!(
+            timeline_kind_style("marker.session.finished").fg,
+            Some(Color::Rgb(234, 90, 174))
+        );
+        assert_eq!(
+            timeline_kind_style("command.custom").fg,
+            Some(timeline_category_color(TimelineCategory::Command))
+        );
+        assert_eq!(
+            timeline_kind_style("custom.event").fg,
+            Some(Color::White)
+        );
+        assert_ne!(
+            timeline_kind_style("process.spawned").fg,
+            timeline_kind_style("process.exited").fg
+        );
+        assert_ne!(
+            timeline_kind_style("terminal.output").fg,
+            timeline_kind_style("terminal.resize").fg
+        );
+        assert_ne!(
+            timeline_kind_style("marker.session.started").fg,
+            timeline_kind_style("marker.session.finished").fg
+        );
     }
 
     #[test]

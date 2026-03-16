@@ -1357,6 +1357,7 @@ def _infer_inline_track_model(command: list[str]) -> str:
         "codex",
         "gemini",
         "claude",
+        "droid",
         "opencode",
         "kilo",
         "kilocode",

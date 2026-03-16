@@ -1,5 +1,5 @@
 {
-  "version": "builtin-2026-03-15",
+  "version": "builtin-2026-03-16",
   "agents": [
     {
       "agent_id": "cursor",
@@ -134,6 +134,16 @@
       "status": "community"
     },
     {
+      "agent_id": "pi_dev",
+      "display_name": "Pi.dev",
+      "aliases": ["pi.dev", "pi-dev", "pidev"],
+      "executables": ["pi"],
+      "process_tokens": ["pi.dev", "pi-dev", "pidev"],
+      "window_tokens": ["pi", "pi.dev"],
+      "provider_hints": ["pi", "pi.dev"],
+      "status": "community"
+    },
+    {
       "agent_id": "kiro",
       "display_name": "Kiro",
       "aliases": ["kiro", "kiro-ai"],
@@ -186,6 +196,16 @@
       "status": "community"
     },
     {
+      "agent_id": "cline_cli",
+      "display_name": "Cline CLI",
+      "aliases": ["cline", "cline-cli"],
+      "executables": ["cline"],
+      "process_tokens": ["cline cli", "cline"],
+      "window_tokens": ["cline"],
+      "provider_hints": ["cline"],
+      "status": "community"
+    },
+    {
       "agent_id": "nanoclaw",
       "display_name": "NanoClaw",
       "aliases": ["nano-claw"],
@@ -196,6 +216,26 @@
         {"pattern": "(?:^|/)(claude[\\w.-]+|gpt-[\\w.-]+)$", "normalized": "llm-generic"}
       ],
       "provider_hints": ["nanoclaw"],
+      "status": "community"
+    },
+    {
+      "agent_id": "droid",
+      "display_name": "Factory Droid",
+      "aliases": [],
+      "executables": ["droid"],
+      "process_tokens": ["factory droid", "droid"],
+      "window_tokens": ["droid"],
+      "provider_hints": ["factory"],
+      "status": "verified"
+    },
+    {
+      "agent_id": "hermes_agent",
+      "display_name": "Hermes Agent",
+      "aliases": ["hermes", "hermes-agent"],
+      "executables": ["hermes"],
+      "process_tokens": ["hermes agent", "hermes"],
+      "window_tokens": ["hermes"],
+      "provider_hints": ["hermes"],
       "status": "community"
     },
     {

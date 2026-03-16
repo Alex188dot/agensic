@@ -2751,7 +2751,7 @@ def _setup_show_all_agents() -> None:
 
     agents = track_runtime.list_known_agents()
     if not agents:
-        _reset_setup_screen(section_title="Show All Agents")
+        _reset_setup_screen(section_title="Show All Supported Agents")
         console.print("[yellow]No agents found.[/yellow]")
         _setup_pause()
         return
@@ -2762,7 +2762,7 @@ def _setup_show_all_agents() -> None:
     except Exception:
         pass
 
-    _reset_setup_screen(section_title="Show All Agents")
+    _reset_setup_screen(section_title="Show All Supported Agents")
     _render_setup_agents_table(agents)
     _setup_pause()
 
@@ -2840,7 +2840,7 @@ def _setup_sessions_menu() -> None:
         action = _setup_select(
             "Choose one:",
             choices=[
-                "Show All Agents",
+                "Show All Supported Agents",
                 "Add custom Agent",
                 "Remove custom Agent",
                 "Rename session",
@@ -2862,7 +2862,7 @@ def _setup_sessions_menu() -> None:
             if enabled:
                 _print_automatic_agensic_sessions_disabled_note()
             continue
-        if action == "Show All Agents":
+        if action == "Show All Supported Agents":
             _setup_show_all_agents()
             continue
         if action == "Add custom Agent":
