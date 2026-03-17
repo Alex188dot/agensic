@@ -2634,7 +2634,6 @@ def _doctor_suggestion_preview(buffer: str, payload: dict[str, Any]) -> str:
 
     return _decode_common_escapes(preview).strip()
 
-@app.command()
 def _setup_pause(message: str = "Press Enter to continue") -> Any:
     return _setup_text(message, default="")
 
@@ -2891,6 +2890,7 @@ def _setup_sessions_menu() -> None:
 
 @app.command()
 def setup():
+    """Configure Agensic sessions and autocomplete."""
     ensure_config_dir()
     _clear_uninstall_sentinel()
     _rotate_auth_token_or_exit("setup")

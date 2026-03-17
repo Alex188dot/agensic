@@ -98,7 +98,7 @@
       "agent_id": "kilocode",
       "display_name": "Kilo Code",
       "aliases": ["kilo"],
-      "executables": ["kilo", "kilocode"],
+      "executables": ["kilo"],
       "process_tokens": ["kilo code", "kilocode"],
       "window_tokens": ["kilo", "kilocode"],
       "model_patterns": [
@@ -186,7 +186,7 @@
       "agent_id": "continue",
       "display_name": "Continue",
       "aliases": ["continue-dev"],
-      "executables": ["continue"],
+      "executables": ["cn"],
       "process_tokens": ["continue", "continuedev"],
       "window_tokens": ["continue"],
       "model_patterns": [

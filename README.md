@@ -1,330 +1,236 @@
-# Agensic
-
 <p align="center">
   <img src="./assets/agensic-logo.png" alt="Agensic logo" width="100%" />
 </p>
 
-<p align="center">
-  Know what ran. Know who suggested it. Prove what the agent actually executed.
-</p>
+<h2 align="center">Know what ran, where, when and who executed it</h2>
+
+<h3 align="center">The missing observability layer for AI-powered terminal workflows</h3>
 
 <p align="center">
-  Agensic upgrades your existing terminal with two things: trustworthy observability and genuinely useful autocomplete
+  <code>Signed Provenance</code>
+  <code>Tracked Sessions</code>
+  <code>Git Time Travel</code>
+  <code>Replayable Sessions</code>
+  <code>IDE style Tab Autocomplete</code>
+  <code>Local-first Privacy</code>
 </p>
 
-<p align="center">
-  <code>signed provenance</code>
-  <code>tracked sessions</code>
-  <code>semantic search</code>
-  <code>vector-first suggestions</code>
-  <code>AI fallback</code>
-  <code>local-first privacy</code>
-</p>
+---
 
-Agensic is a local daemon, shell integration, and CLI for teams that want AI in the terminal without losing attribution, replayability, or control. It keeps your shell intact, adds smart command completion on top, and records enough forensic evidence to answer the uncomfortable question later: "what happened here, and was it the human or the agent?"
+Agensic upgrades your existing terminal workflow for the AI era. It is built for developers who want the productivity boost of AI agents right in their shell, but refuse to compromise on **auditability, control and privacy**. 
 
-It works in your existing Zsh environment on macOS and Linux, with macOS-specific tracking and startup integrations where supported.
+As AI agents increasingly take over the command line and execute tasks autonomously, visibility and control become critical.
+Agensic treats **terminal commands as first-class citizens** and provides a robust framework for tracking, inspecting, and managing them.
 
-## Observability
+Instead of flattening all terminal activity into a single ambiguous "shell history", Agensic acts as a forensic observer and a smart co-pilot. It seamlessly tracks interactive AI coding sessions, cryptographically signs agent-executed commands and provides blazing-fast, history-backed IDE-style Tab autocomplete.
 
-Agensic records command provenance, signs agent-executed runs from observed sessions, tracks interactive agent sessions, and gives you fast ways to inspect, filter, replay, and export what happened. The result is a terminal workflow you can trust after the fact, not just during the suggestion.
+---
 
-### What you get
+## 📋 Table of Contents
 
-- Signed `AI_EXECUTED` proof metadata for observed tracked agent sessions, using local Ed25519 signing with key and host fingerprints attached to the run record.
-- Provenance classification for executed commands, including labels such as `AI_EXECUTED`, `AI_SUGGESTED_HUMAN_RAN`, `AG_SUGGESTED_HUMAN_RAN`, `HUMAN_TYPED`, `INVALID_PROOF`, and `UNKNOWN`.
-- Agent inference from proof payloads, provider/model metadata, and process lineage when explicit proof is absent.
-- A provenance registry for known agents, with registry listing and agent-detail inspection from the CLI.
-- Full provenance history search from the CLI and a full-screen Rust TUI with filters, sorting, semantic search, and one-shot JSON/CSV export.
-- Tracked session capture for interactive agent CLIs, including session metadata, event timelines, transcript inspection, and replay.
-- Session replay fallbacks when full terminal transcripts have been pruned, so inspection still degrades gracefully.
-- Local auth on every localhost API route, with automatic token rotation on daemon startup and setup flows.
-- SQLite state, append-only journal events, snapshots, recovery tooling, and repair commands designed for long-lived local use.
-- Privacy guardrails before LLM egress, including redaction of secrets, tokens, dotenv content, URL credentials, and other high-entropy values.
+1. [Platform Support](#-platform-support)
+2. [Installation](#-installation)
+3. [Quick Start](#-quick-start)
+4. [Agensic Sessions](#-agensic-sessions)
+   - [Features](#-features-sessions)
+   - [Supported Agents](#-supported-agents)
+5. [Agensic Autocomplete](#-agensic-autocomplete)
+   - [Features](#-features-autocomplete)
+   - [Supported Providers](#-supported-providers)
+6. [Safety & Privacy](#-safety--privacy)
+7. [Project Creator](#-project-creator)
+8. [License](#-license)
 
-### Why it matters
+---
 
-- You can prove that an agent-executed command was really wrapped and signed by Agensic.
-- You can distinguish human typing from AI-suggested execution instead of flattening everything into "shell history."
-- You can inspect an agent session as a session, not as a pile of unrelated commands.
-- You can export evidence when you need to share, debug, review, or document an incident.
+## 💻 <a id="-platform-support"></a>Platform Support
 
-### Observability workflow
+Agensic is designed to integrate deeply with your shell environment.
+
+- macOS (Zsh) — fully supported ✅
+
+- Linux (Bash/Zsh) — coming soon 🕐
+
+- Windows (PowerShell/WSL) — planned 🚧
+
+We are actively working on expanding cross-platform support while maintaining the same level of reliability and low-level integration.
+
+---
+
+## 🚀 <a id="-installation"></a>Installation
+
+The fastest path is using the managed installer:
 
 ```bash
 bash ./install.sh
-agensic setup
+```
 
-agensic provenance --tui
-agensic sessions
+On first run, Agensic will prompt you to choose your preferred LLM provider and configure your API keys for command autocomplete.
+
+Alternatively, you can configure your LLM provider and API keys by running:
+
+```bash
+agensic setup
+```
+
+## ⚡ <a id="-quick-start"></a>Quick Start
+
+After setup, **open a new terminal** and Agensic will automatically start tracking your terminal activity and provide autocomplete suggestions as you type!
+
+### 🤖 Seamless Agent Auto-Tracking
+
+Start working, as you normally would, for example by using your favorite AI coding assistant, like Claude Code, Codex CLI, etc:
+
+```bash
+claude
+```
+
+or
+
+```bash
 codex
-agensic run ollama
-agensic run inspect <session_id>
 ```
 
-### Observability surfaces
+See the [Supported Agents](#-supported-agents) section for a list of supported agents. If your agent is not in the list, you can add it by running <code>agensic --add_agent "agent_name"</code>.
 
-- `agensic provenance --tui` opens the provenance interface and can export the current filtered dataset.
-- `agensic sessions` opens the tracked sessions browser.
-- Supported exact agent entrypoints `agent`, `codex`, `qwen`, `mini-agent`, `kimi`, `claude`, `opencode`, `kilo`, `copilot`, `openclaw`, `pi`, `kiro-cli`, `gemini`, `aider`, `cline`, `nanoclaw`, `droid`, and `hermes` are auto-tracked on macOS by default and emit `AI_EXECUTED`.
-- `agensic run <agent>` remains the manual tracked-session command and is still the path to use for Ollama.
-- `agensic doctor`, `agensic fix --safe`, and `agensic fix --recover` help keep long-running local state healthy.
-
-### Time Travel
-
-`Time Travel` lets you go to a point in a tracked session, preview what repo state would be restored there, fork that state into a new branch, and continue from it in a new tracked session.
-
-This is designed to answer questions like:
-
-- "What did the repo look like at this point in the agent session?"
-- "Can I safely continue from here without destroying my current branch?"
-- "What existed before the later commits and edits happened?"
-
-#### What gets restored
-
-`Time Travel` restores the Git repo state captured at a checkpoint, not just commits.
-
-A checkpoint can include:
-
-- committed history that already existed at that moment
-- tracked but uncommitted file changes
-- untracked files that existed at that moment
-
-That means restore is not "commit-only." If a checkpoint was captured while the repo had dirty changes, those dirty changes can be part of the restored state too.
-
-#### When Git checkpoints are captured
-
-Agensic keeps terminal replay checkpoints and Git checkpoints separately.
-
-For Git state, checkpoints are currently captured:
-
-- at session start
-- after process exits during the tracked session when Git state changed
-- when a `git.commit.created` event is observed
-- at session end
-
-If you choose a replay point that does not have an exact Git checkpoint, Agensic restores to the nearest prior Git checkpoint.
-
-So the important divider is the checkpoint, not strictly the commit.
-
-#### How restore works
-
-In Session Detail:
-
-- move through the timeline/replay
-- press `T` for `Time Travel`
-- review the preview modal
-- confirm to restore into a new branch
-
-The default behavior is non-destructive:
-
-- Agensic creates a new branch
-- restores the selected checkpoint state there
-- starts a new tracked session with your agent from that restored state
-
-This avoids destructive in-place resets.
-
-#### Current safety rule
-
-For now, `Time Travel` only proceeds when the live repo is clean at restore time.
-
-If the current repo has uncommitted or untracked changes when you try to restore, Agensic blocks the action instead of risking a destructive merge of states.
-
-### Time Travel note
-
-`Time Travel` restores the Git repo state captured at a session checkpoint. It is session-triggered, but repo-level, not a per-agent sandbox.
-
-If you are running multiple agents in the same repo, i.e. agent A and agent B are running in the same repo, and agent B commits to that same repo before the selected checkpoint is captured, agent B's commit can be part of the state restored by Time Travel in agent A's session. For strict isolation, use separate branches or worktrees per agent.
-
-Example:
-
-```text
-Agent A is working in the repo
-  -> Agent A makes commit 1, then makes commit 2 in the same session
-
-Agent B is also working in the same repo
-  -> Agent B makes commit x, temporarily between commit 1 and 2
-
-Later, you open Agent A's session:
-  -> You pick a checkpoint after Agent B's commit happened, after commit 1 and before commit 2
-  -> You use Time Travel
-
-Result:
-  The restored repo state will include Agent B's commit too,
-  because the checkpoint reflects the repo state at that time, hence commit 1 + commit x.
-```
-
-Visual representation:
-
-```text
-TIME LINE
-  (Earlier)                                                   (Later)
-  ----|------------------|---------------------------|----------->
-     [T1]               [T2]                        [T3]
-
-
-  AGENT ACTIONS
-      │                  │                           │
-   Agent A            Agent B                     Agent A
-  Commit 1           Commit X                    Commit 2
-      │                  │                           │
-      ▼                  ▼                           ▼
-  ┌──────────┐       ┌──────────┐                ┌──────────────┐
-  │ Repo @T1 │       │ Repo @T2 │                │   Repo @T3   │
-  │          │       │          │                │              │
-  │ Commit 1 │       │ Commit 1 │                │   Commit 1   │
-  │          │       │ Commit X │                │   Commit X   │
-  └──────────┘       └──────────┘                │   Commit 2   │
-                         ▲                       └──────────────┘
-                         │
-               ┌─────────┴──────────┐
-               │  YOU RESTORE HERE  │
-               │  (Time Travel)     │
-               └────────────────────┘
-
-  RESULTING STATE:
-  The repository is restored to the exact state it was in at [T2].
-  • Included: [Commit 1] and [Commit X]
-  • Excluded: [Commit 2] (It hadn't happened yet)
-```
-
-## Autocomplete
-
-Agensic starts with your real command history, indexes it semantically, keeps suggestions local and fast, learns from your usage patterns (what commands you run most often and where) and only reaches for an LLM when history cannot help. It is built to feel immediate in the shell.
-
-### What you get
-
-- Prefix suggestions that feel instant, with local in-memory filtering as you keep typing
-- Semantic recovery when the exact prefix misses but the intent is still obvious
-- Word-by-word typo recovery that turns wrong words into suggestions, for example `dokcer` into `Did you mean: docker`
-- AI fallback only when needed, with per-line budgeting and explicit manual triggering
-- `#` command mode for guardrailed natural-language-to-command generation
-- `##` assistant mode for free-text answers directly in the terminal
-- Manual command-store curation so you can add commands, remove bad ones, and clean up typo-like variants from the suggestion pool
-- Native completion stays in control for path-heavy and script/file contexts, so Agensic does not steal `Tab` where shell completion already wins
-- High-risk commands are blocked from suggestion and feedback flows instead of being "helpfully" completed
-
-### Why it feels different
-
-- Most suggestions come from your own history, so they are fast and relevant
-- AI is a fallback, not the default tax on every keystroke
-- Semantic reranking and typo recovery rescue messy real-world input instead of assuming perfect prefixes
-- The shell integration keeps the flow native: ghost text, cycling, partial accept, and explicit triggers all behave like terminal features, not chatbot overlays
-
-### Autocomplete flow
+After you're done, you can use Agensic to inspect the session history:
 
 ```bash
-$ git st
-# pause briefly
-# instant history-backed suggestions appear
-
-$ dokcer
-# first suggestion: Did you mean: docker
-
-$ docker terminate my-app
-# semantic recovery can rescue intent when wording shifts away from the exact command in history
-
-# create a command from natural language
-# list the 10 largest files in the current directory
-
-## explain why git rebase rewrites commit hashes
-```
-
-### Keyboard controls
-
-- `Tab`: accept the current suggestion
-- `Option+Right`: accept the next word only
-- `Ctrl+N` / `Ctrl+P`: cycle suggestions
-- `Ctrl+Space`: manually fetch a new suggestion
-- `Esc`: clear visible ghost text
-- `Enter`: run the command and log its provenance
-
-## Install
-
-The fastest path is the managed installer:
-
-```bash
-bash ./install.sh
-```
-
-That installer:
-
-- copies the Zsh integration and helper scripts
-- builds or downloads the provenance TUI sidecar
-- installs Agensic into an isolated virtual environment
-- writes stable launchers into `~/.local/bin`
-- wires your shell to source `agensic.zsh`
-
-Then open a new terminal and run:
-
-```bash
-agensic setup
-```
-
-If you only want the CLI without the shell wiring, you can install it with:
-
-```bash
-uv tool install .
-# or
-pipx install .
-```
-
-## Quick Start
-
-```bash
-agensic start
-agensic auth status
-agensic doctor
-
-agensic provenance --tui
 agensic sessions
-agensic shortcuts
 ```
 
-## Provider Support
+or view the forensic provenance:
 
-Agensic supports local and hosted models, including:
+```bash
+agensic provenance --tui
+```
 
-- OpenAI
-- Anthropic
-- Gemini
-- Groq
+---
+
+## 🕵️‍♂️ <a id="-agensic-sessions"></a>Agensic Sessions
+Agensic records command provenance and tracks interactive agent sessions, giving you undeniable proof of what happened and the ability to safely manipulate repo state, via the Time Travel feature.
+
+### <a id="-features-sessions"></a>✨ Features
+
+### ▶️ Replayable Sessions
+<p>
+Need to audit last night's session, to understand what happened? Run <code>agensic sessions</code> and select the session you want to replay. Our blazing-fast, full-screen TUI lets you instantly browse timelines, inspect payloads and replay the session. When you need to share evidence for an incident review, export the exact dataset to JSON or CSV in one keystroke.
+</p>
+
+
+
+### ⏪ Time Travel
+<p>
+Ever wonder, "What did my repo look like exactly before the agent made that destructive commit?" Time Travel lets you rewind your repository to the exact Git state captured at a specific session checkpoint. Agensic safely restores untracked and modified files into a brand new branch, ensuring you never accidentally destroy your live working tree while investigating.
+</p>
+
+
+
+### 🛡️ Cryptographic Command Provenance & Signing
+<p>
+Stop guessing whether a human or an AI broke the build. Agensic captures rich metadata for every command and uses local Ed25519 signing to tag agent-executed runs with an undeniable <code>AI_EXECUTED</code> label. You get a clear, auditable timeline separating human keystrokes from AI suggestions and automated executions.
+</p>
+
+
+
+### 🗄️ Resilient Local-First State
+<p>
+Your data stays yours. Agensic uses a robust SQLite state backend with an append-only event journal and automated snapshotting. This means your forensic history survives unexpected terminal crashes, system reboots, and long-lived local usage without corruption.
+</p>
+
+### <a id="-supported-agents"></a>🤖 Supported Agents
+
+Agensic provides support for a set of pre-configured built-in agents that can be tracked:
+
+- Claude Code
+- Codex CLI
+- Gemini CLI
+- OpenClaw
+- OpenCode
+- Kimi Code
+- Mini Agent
+- Qwen Code
+- GitHub Copilot CLI
+- Kiro CLI
+- Cline CLI
+- Cursor CLI
+- Nanoclaw
+- Droid
+- Hermes Agent
 - Ollama
-- LM Studio
-- DashScope
-- DeepSeek
-- MiniMax
-- Mistral
-- Moonshot
-- OpenRouter
-- Xiaomi MiMo
-- Z.AI
-- AWS SageMaker
-- Custom OpenAI-compatible endpoints
-- `history_only` mode if you want history-powered autocomplete with no AI calls at all
+- Mistral Vibe
+- Aider
+- Pi.dev
+- Kilo Code
+- Continue CLI
+- Custom Agents
 
-## Safety And Privacy
+---
 
-- All local API routes are authenticated.
-- Secrets are sanitized before LLM egress.
-- Outbound LLM calls are rate-limited and timeout-bounded.
-- Per-line LLM budgets stop autocomplete from quietly turning into a prompt spammer.
-- Destructive commands such as `rm -rf`, `dd`, `mkfs`, `history -c`, and `git reset --hard` are blocked from suggestion flows.
+## ⚡ <a id="-agensic-autocomplete"></a>Agensic Autocomplete
+Agensic reimagines terminal suggestions. Context-aware, semantic and always fast IDE-style, satisfying Tab autocomplete.
 
-## Architecture
+### <a id="-features-autocomplete"></a>✨ Features
 
-```text
-Zsh plugin -> shell client -> local FastAPI daemon -> suggestion engine
-                                              |-> provenance + session APIs
-                                              |-> SQLite state + journal + snapshots
-                                              |-> vector command index
-                                              |-> optional LLM provider
-```
+### 🚀 Blazing Fast Local History Suggestions
+<p>
+Say goodbye to input lag. As you type, Agensic queries a store of your actual command history. Suggestions appear instantly as ghost text, that you can easily accept with <code>Tab</code>. Because it learns from your patterns and relies on what you actually do, the suggestions are highly accurate and repo-aware.
+</p>
 
-## Project Creator
+
+
+### 🧠 Semantic Search & Typo Recovery
+<p>
+Humans make mistakes, Agensic fixes them. If you type <code>dokcer</code>, Agensic instantly suggests <code>Did you mean: docker</code>. Can't remember the exact syntax? Semantic reranking rescues your intent, finding the right command even if your prefix doesn't match perfectly: if you type <code>docker records</code> you will get <code>Did you mean: docker logs</code> (provided you have run <code>docker logs</code> in the past)
+</p>
+
+
+
+### 💡 On-Demand AI Fallback
+<p>
+AI is a powerful fallback, not a tax on every keystroke. Agensic enforces per-line LLM budgets to prevent prompt spam. When local history isn't enough, automatic LLM fallback will be triggered. Alternatively, you can always hit <code>Ctrl+Space</code> to manually fetch an intelligent suggestion from your preferred local or hosted LLM.
+</p>
+
+
+
+### 💬 Natural Language Command Modes
+<p>
+Forget exact syntax, just describe what you want. Type something like: <code># how can I find all files larger than 10MB in this folder?</code>. Agensic generates 3 copy-ready shell commands and inserts the most likely option directly into your next line. Need guidance instead of commands? Use the assistant mode to get step-by-step answers right in your terminal, <code>## How do I install Node on macOS?</code>. Want to understand a command before running it? Use: <code>agensic --explain "your command here"</code>
+</p>
+
+
+
+### 🛡️ Native Tab Preservation & Risk Blocking
+<p>
+Agensic respects your terminal. It leaves <code>Tab</code> alone when you are completing file paths or scripts, so native shell completion still wins where it's best. More importantly, destructive commands (like <code>rm -rf</code>, <code>mkfs</code>, or <code>dd</code>) are strictly blocked from suggestion pools so you never accidentally execute a disaster.
+</p>
+
+### <a id="-supported-providers"></a>🌐 Supported Providers
+
+Agensic fits into your stack, whether you run models locally or use hosted endpoints.
+
+*   **Local:** Ollama, LM Studio
+*   **Hosted:** OpenAI, Anthropic, Gemini, Azure, DeepSeek, Groq, Mistral, Qwen (DashScope), MiniMax, Moonshot, OpenRouter, Xiaomi MiMo, Z.AI, AWS SageMaker
+*   **Custom:** any OpenAI-compatible endpoint
+*   **History Only:** run entirely offline without AI calls, using only your local command history
+
+---
+
+## 🔒 <a id="-safety--privacy"></a>Safety & Privacy
+
+Agensic operates on the principle of least privilege and maximum privacy:
+
+*   **Local Auth:** every localhost API route is strictly authenticated with automatic token rotation
+*   **Secret Redaction:** high-entropy values, `.env` files, URL credentials, and known secret formats (like AWS keys or JWTs) are stripped and redacted **before** any data leaves your machine for an LLM call
+*   **Command Guardrails:** destructive commands are hard-blocked from both the suggestion engine and the feedback loop
+*   **Rate Limiting:** outbound LLM calls are bounded by strict timeouts and budgets to prevent API abuse
+
+---
+
+## <a id="-project-creator"></a>👤 Project Creator
 
 Alessio Leodori
 
-## License
+## 📄 <a id="-license"></a>License
 
-Apache-2.0
+Agensic is open-source and licensed under the **Apache-2.0 License**.
