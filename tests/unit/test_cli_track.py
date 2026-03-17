@@ -804,6 +804,34 @@ class CliTrackTests(unittest.TestCase):
             self.assertIn('"type":"git.snapshot.start"', event_payload)
             self.assertIn('"type":"command.recorded"', event_payload)
 
+    def test_run_tracked_command_records_time_travel_startup_banner_in_transcript(self):
+        with self._temp_app_paths() as (_, temp_paths):
+            launch = _make_test_launch(["zsh", "-lc", "echo hi"])
+            code = track_module.run_tracked_command(
+                launch,
+                replay_metadata={"fork_branch": "agensic/time-travel/sess-1-2"},
+            )
+
+            self.assertEqual(code, 0)
+            store = SQLiteStateStore(temp_paths.state_sqlite_path, journal=None)
+            session = store.get_latest_tracked_session()
+            self.assertIsNotNone(session)
+            summary = store.get_session_summary(str(session["session_id"]))
+            self.assertIsNotNone(summary)
+
+            transcript_events = track_module._load_transcript_events(str(summary.get("transcript_path", "") or ""))
+            transcript_text = "".join(
+                event["data"].decode("utf-8", errors="replace")
+                for event in transcript_events
+                if str(event.get("direction", "") or "") == "pty"
+            )
+
+            self.assertIn(
+                "Time Travel activated. A new branch called agensic/time-travel/sess-1-2",
+                transcript_text,
+            )
+            self.assertIn("agensic session id ", transcript_text)
+
     def test_run_tracked_command_emits_git_commit_created_before_session_end(self):
         with self._temp_app_paths() as (_, temp_paths), self._mock_track_daemon(temp_paths), tempfile.TemporaryDirectory() as repo_dir:
             subprocess.run(["git", "init"], cwd=repo_dir, check=True, capture_output=True, text=True)

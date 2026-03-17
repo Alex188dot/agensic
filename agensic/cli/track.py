@@ -2488,6 +2488,56 @@ def _write_transcript_resize_event(
     handle.flush()
 
 
+def _build_startup_terminal_lines(
+    session_id: str,
+    *,
+    replay_metadata: dict[str, Any] | None = None,
+) -> list[str]:
+    lines: list[str] = []
+    if replay_metadata:
+        branch_name = str(replay_metadata.get("fork_branch", "") or "").strip() or "the time-travel branch"
+        lines.append(
+            "Time Travel activated. A new branch called "
+            f"{branch_name} has been created and your session and repo have been switched to it"
+        )
+    lines.append(f"agensic session id {session_id}")
+    return lines
+
+
+def _record_startup_terminal_output(
+    runtime: "TrackRuntime",
+    transcript: Any,
+    checkpoint_recorder: subprocess.Popen[str] | None,
+    *,
+    session_id: str,
+    replay_metadata: dict[str, Any] | None = None,
+) -> subprocess.Popen[str] | None:
+    startup_lines = _build_startup_terminal_lines(
+        session_id,
+        replay_metadata=replay_metadata,
+    )
+    if not startup_lines:
+        return checkpoint_recorder
+    data = ("\r\n".join(startup_lines) + "\r\n").encode("utf-8", errors="replace")
+    seq = runtime.emit_event(
+        "terminal.stdout",
+        {
+            "stream": "stdout",
+            "data_b64": base64.b64encode(data).decode("ascii"),
+            "size": len(data),
+        },
+    )
+    _write_transcript_event(transcript, "pty", data, seq=seq)
+    checkpoint_recorder = _send_checkpoint_event(
+        checkpoint_recorder,
+        direction="pty",
+        seq=seq,
+        data=data,
+    )
+    runtime.transcript_event_count += 1
+    return checkpoint_recorder
+
+
 def _start_checkpoint_recorder(checkpoint_path: str) -> subprocess.Popen[str] | None:
     binary = _resolve_provenance_tui_binary_for_checkpoints()
     if not binary or not checkpoint_path.strip():
@@ -3353,13 +3403,8 @@ def run_tracked_command(
         if sys.stdin.isatty():
             stdin_fd = sys.stdin.fileno()
             stdout_fd = sys.stdout.fileno()
-            console.print(f"agensic session id {session_id}", highlight=False)
-            if replay_metadata:
-                branch_name = str(replay_metadata.get("fork_branch", "") or "").strip() or "the time-travel branch"
-                console.print(
-                    f"[orange3]Time Travel activated. A new branch called {branch_name} has been created and your session and repo have been switched to it[/orange3]",
-                    highlight=False,
-                )
+            for line in _build_startup_terminal_lines(session_id, replay_metadata=replay_metadata):
+                console.print(line, highlight=False)
             old_tty = termios.tcgetattr(stdin_fd)
             tty.setraw(stdin_fd)
             pending_initial_winsize = _apply_winsize(master_fd, stdin_fd)
@@ -3416,6 +3461,13 @@ def run_tracked_command(
                 )
                 runtime.transcript_event_count += 1
                 last_transcript_winsize = (rows, cols)
+            checkpoint_recorder = _record_startup_terminal_output(
+                runtime,
+                transcript,
+                checkpoint_recorder,
+                session_id=session_id,
+                replay_metadata=replay_metadata,
+            )
             watcher.start()
             watcher_started = True
             while True:
