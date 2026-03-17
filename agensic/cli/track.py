@@ -3354,6 +3354,12 @@ def run_tracked_command(
             stdin_fd = sys.stdin.fileno()
             stdout_fd = sys.stdout.fileno()
             console.print(f"agensic session id {session_id}", highlight=False)
+            if replay_metadata:
+                branch_name = str(replay_metadata.get("fork_branch", "") or "").strip() or "the time-travel branch"
+                console.print(
+                    f"[orange3]Time Travel activated. A new branch called {branch_name} has been created and your session and repo have been switched to it[/orange3]",
+                    highlight=False,
+                )
             old_tty = termios.tcgetattr(stdin_fd)
             tty.setraw(stdin_fd)
             pending_initial_winsize = _apply_winsize(master_fd, stdin_fd)
