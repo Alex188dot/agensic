@@ -25,6 +25,7 @@ class AgentRegistryTests(unittest.TestCase):
         self.assertIn("droid", agents)
         self.assertIn("hermes_agent", agents)
         self.assertIn("ollama", agents)
+        self.assertIn("mistral_vibe", agents)
 
     def test_provider_model_inference(self):
         registry = AgentRegistry()
@@ -64,6 +65,23 @@ class AgentRegistryTests(unittest.TestCase):
         self.assertIsNotNone(match)
         self.assertEqual(match.agent_id, "aider")
         self.assertEqual(match.evidence_tier, "community")
+
+    def test_lineage_exact_executable_vibe_is_detected(self):
+        registry = AgentRegistry()
+        match = registry.infer_from_lineage(
+            [
+                {
+                    "pid": 100,
+                    "ppid": 1,
+                    "comm": "vibe",
+                    "command": "vibe --model mistral-medium-latest",
+                }
+            ]
+        )
+        self.assertIsNotNone(match)
+        self.assertEqual(match.agent_id, "mistral_vibe")
+        self.assertEqual(match.evidence_tier, "verified")
+        self.assertEqual(match.model_raw, "mistral-medium-latest")
 
     def test_model_fingerprint_prefers_normalized(self):
         fp = build_model_fingerprint("codex", "gpt-5-codex", "gpt-5.3")

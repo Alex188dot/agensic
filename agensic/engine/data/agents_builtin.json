@@ -250,6 +250,19 @@
       ],
       "provider_hints": ["ollama"],
       "status": "community"
+    },
+    {
+      "agent_id": "mistral_vibe",
+      "display_name": "Mistral Vibe",
+      "aliases": ["vibe", "mistral-vibe"],
+      "executables": ["vibe"],
+      "process_tokens": ["mistral vibe", "vibe"],
+      "window_tokens": ["vibe", "mistral"],
+      "model_patterns": [
+        {"pattern": "(?:^|/)(mistral[\\w.-]*|codestral[\\w.-]*)$", "normalized": "mistral"}
+      ],
+      "provider_hints": ["mistral"],
+      "status": "community"
     }
   ]
 }
