@@ -2493,15 +2493,14 @@ def _build_startup_terminal_lines(
     *,
     replay_metadata: dict[str, Any] | None = None,
 ) -> list[str]:
-    lines: list[str] = []
+    line = f"agensic session id {session_id}"
     if replay_metadata:
         branch_name = str(replay_metadata.get("fork_branch", "") or "").strip() or "the time-travel branch"
-        lines.append(
-            "Time Travel activated. A new branch called "
+        line += (
+            " / Time Travel activated. A new branch called "
             f"{branch_name} has been created and your session and repo have been switched to it"
         )
-    lines.append(f"agensic session id {session_id}")
-    return lines
+    return [line]
 
 
 def _record_startup_terminal_output(

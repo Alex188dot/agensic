@@ -827,10 +827,13 @@ class CliTrackTests(unittest.TestCase):
             )
 
             self.assertIn(
-                "Time Travel activated. A new branch called agensic/time-travel/sess-1-2",
+                "agensic session id ",
                 transcript_text,
             )
-            self.assertIn("agensic session id ", transcript_text)
+            self.assertIn(
+                " / Time Travel activated. A new branch called agensic/time-travel/sess-1-2",
+                transcript_text,
+            )
 
     def test_run_tracked_command_emits_git_commit_created_before_session_end(self):
         with self._temp_app_paths() as (_, temp_paths), self._mock_track_daemon(temp_paths), tempfile.TemporaryDirectory() as repo_dir:
