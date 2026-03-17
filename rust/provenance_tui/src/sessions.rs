@@ -25,7 +25,7 @@ use ratatui::Terminal;
 use reqwest::blocking::Client;
 use reqwest::Method;
 use serde::{Deserialize, Serialize};
-use serde_json::Value;
+use serde_json::{json, Value};
 use std::cmp::{max, min};
 use std::collections::HashMap;
 use std::fs::{self, File};
@@ -135,6 +135,7 @@ struct TimeTravelHandoff {
     working_directory: String,
     branch_name: String,
     session_label: String,
+    replay_metadata_json: String,
 }
 
 impl TimeTravelHandoff {
@@ -1218,12 +1219,37 @@ impl App {
             .or_else(|| launch_payload.get("agent").and_then(Value::as_str))
             .unwrap_or("agent")
             .to_string();
+        let replay_metadata_json = serde_json::to_string(&json!({
+            "source_session_id": launch_payload
+                .get("source_session_id")
+                .and_then(Value::as_str)
+                .unwrap_or_default(),
+            "target_seq": launch_payload
+                .get("source_target_seq")
+                .and_then(Value::as_i64)
+                .unwrap_or_default(),
+            "resolved_checkpoint_seq": launch_payload
+                .get("resolved_checkpoint_seq")
+                .and_then(Value::as_i64)
+                .unwrap_or_default(),
+            "fork_branch": if fork_payload.branch_name.trim().is_empty() {
+                launch_payload
+                    .get("branch_name")
+                    .and_then(Value::as_str)
+                    .unwrap_or_default()
+                    .to_string()
+            } else {
+                fork_payload.branch_name.clone()
+            },
+        }))
+        .unwrap_or_default();
         self.time_travel_modal = None;
         Ok(TimeTravelHandoff {
             command,
             working_directory,
             branch_name: fork_payload.branch_name,
             session_label,
+            replay_metadata_json,
         })
     }
 
@@ -1394,6 +1420,12 @@ fn run(client: Client, args: SessionsArgs) -> Result<(), String> {
         }
         if !handoff.working_directory.trim().is_empty() {
             command.current_dir(handoff.working_directory.trim());
+        }
+        if !handoff.replay_metadata_json.trim().is_empty() {
+            command.env(
+                "AGENSIC_TIME_TRAVEL_REPLAY_METADATA",
+                handoff.replay_metadata_json.trim(),
+            );
         }
         let status = command
             .status()
@@ -4980,7 +5012,7 @@ mod tests {
             let read = stream.read(&mut buffer).expect("read request");
             let request = String::from_utf8_lossy(&buffer[..read]);
             assert!(request.starts_with("POST /sessions/sess-1/time-travel/fork"));
-            let body = r#"{"status":"ok","branch_name":"agensic/time-travel/sess-1-2","working_directory":"/tmp/project","launch_payload":{"agent":"codex","resolved_agent":"codex","working_directory":"/tmp/project","launch_command":["agensic","run","codex"]}}"#;
+            let body = r#"{"status":"ok","branch_name":"agensic/time-travel/sess-1-2","working_directory":"/tmp/project","launch_payload":{"agent":"codex","resolved_agent":"codex","working_directory":"/tmp/project","launch_command":["agensic","run","codex"],"source_session_id":"sess-1","source_target_seq":2,"resolved_checkpoint_seq":2,"branch_name":"agensic/time-travel/sess-1-2"}}"#;
             let response = format!(
                 "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
                 body.len(),
@@ -5018,6 +5050,7 @@ mod tests {
         assert_eq!(handoff.command, vec!["agensic", "run", "codex"]);
         assert_eq!(handoff.working_directory, "/tmp/project");
         assert_eq!(handoff.branch_name, "agensic/time-travel/sess-1-2");
+        assert!(handoff.replay_metadata_json.contains("\"fork_branch\":\"agensic/time-travel/sess-1-2\""));
         server.join().expect("server thread");
     }
 

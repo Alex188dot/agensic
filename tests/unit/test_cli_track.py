@@ -286,6 +286,29 @@ class CliTrackTests(unittest.TestCase):
         self.assertEqual(launch.model, "unknown-model")
         self.assertIn("Codex", launch.agent_name)
 
+    def test_run_consumes_time_travel_replay_metadata_from_env(self):
+        replay_metadata = {
+            "source_session_id": "sess-1",
+            "target_seq": 2,
+            "resolved_checkpoint_seq": 2,
+            "fork_branch": "agensic/time-travel/sess-1-2",
+        }
+        with tempfile.TemporaryDirectory() as temp_dir, patch.object(
+            cli_app, "_run_storage_preflight_if_enabled"
+        ), patch.object(
+            track_module,
+            "run_tracked_command",
+            return_value=0,
+        ) as run_mock, patch.dict(os.environ, {"CODEX_HOME": str(Path(temp_dir) / ".codex")}, clear=False):
+            result = self.runner.invoke(
+                app,
+                ["run", "codex"],
+                env={cli_app.TIME_TRAVEL_REPLAY_METADATA_ENV: json.dumps(replay_metadata)},
+            )
+
+        self.assertEqual(result.exit_code, 0)
+        self.assertEqual(run_mock.call_args.kwargs.get("replay_metadata"), replay_metadata)
+
     def test_add_custom_agent_shorthand_registers_agent(self):
         with self._temp_app_paths() as (env, temp_paths), patch.object(
             cli_app, "_run_storage_preflight_if_enabled"

@@ -178,6 +178,7 @@ DEFAULT_SIGNING_MODEL = "unknown-model"
 MAX_COMMAND_DURATION_MS = 86_400_000
 DAEMON_BASE_URL = "http://127.0.0.1:22000"
 _DAEMON_AUTH_CACHE = AuthTokenCache()
+TIME_TRAVEL_REPLAY_METADATA_ENV = "AGENSIC_TIME_TRAVEL_REPLAY_METADATA"
 SHELL_RC_BLOCK_START = "# >>> agensic >>>"
 SHELL_RC_BLOCK_END = "# <<< agensic <<<"
 LEGACY_SHELL_RC_BLOCK_START = f"# >>> {LEGACY_BRAND} >>>"
@@ -1107,6 +1108,17 @@ def _format_provenance_command_preview(command: object) -> str:
     text = str(command or "")
     text = text.replace("\r", " ").replace("\n", " ").replace("\t", " ")
     return " ".join(part for part in text.split(" ") if part)
+
+
+def _consume_time_travel_replay_metadata() -> dict[str, Any] | None:
+    raw = str(os.environ.pop(TIME_TRAVEL_REPLAY_METADATA_ENV, "") or "").strip()
+    if not raw:
+        return None
+    try:
+        payload = json.loads(raw)
+    except Exception:
+        return None
+    return dict(payload) if isinstance(payload, dict) else None
 
 
 def _rotate_auth_token_or_exit(context: str) -> None:
@@ -4117,7 +4129,8 @@ def track_command(
         console.print(f"[red]{exc}[/red]")
         raise typer.Exit(code=2)
 
-    raise typer.Exit(code=track_runtime.run_tracked_command(launch))
+    replay_metadata = _consume_time_travel_replay_metadata()
+    raise typer.Exit(code=track_runtime.run_tracked_command(launch, replay_metadata=replay_metadata))
 
 
 @app.callback(invoke_without_command=True)
