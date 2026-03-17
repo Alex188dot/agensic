@@ -327,6 +327,7 @@ class SessionRenamePayload(BaseModel):
 
 class SessionTimeTravelPreviewPayload(BaseModel):
     target_seq: int = 0
+    target_ts: int = 0
 
 
 class SessionTimeTravelForkPayload(BaseModel):

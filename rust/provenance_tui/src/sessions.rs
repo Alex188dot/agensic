@@ -31,6 +31,7 @@ use std::collections::HashMap;
 use std::fs::{self, File};
 use std::io::{self, Read, Write};
 use std::path::Path;
+use std::process::Command;
 use std::sync::mpsc::{self, Receiver, TryRecvError};
 use std::thread;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
@@ -119,6 +120,7 @@ struct SessionRenamePayload {
 #[derive(Debug, Default, Serialize)]
 struct TimeTravelPreviewPayload {
     target_seq: i64,
+    target_ts: i64,
 }
 
 #[derive(Debug, Default, Serialize)]
@@ -127,12 +129,22 @@ struct TimeTravelForkPayload {
     branch_name: String,
 }
 
-#[derive(Debug, Default, Serialize)]
-struct SessionLaunchPayload {
-    source_session_id: String,
+#[derive(Clone, Debug, Default)]
+struct TimeTravelHandoff {
+    command: Vec<String>,
     working_directory: String,
-    session_name: String,
-    replay_metadata: Value,
+    branch_name: String,
+    session_label: String,
+}
+
+impl TimeTravelHandoff {
+    fn status_message(&self) -> String {
+        if self.branch_name.trim().is_empty() {
+            format!("Launching {}", self.session_label)
+        } else {
+            format!("Launching {} on {}", self.session_label, self.branch_name)
+        }
+    }
 }
 
 #[allow(dead_code)]
@@ -181,16 +193,6 @@ struct TimeTravelForkResponse {
 struct ErrorDetailResponse {
     #[serde(default)]
     detail: String,
-}
-
-#[allow(dead_code)]
-#[derive(Clone, Debug, Default, Deserialize)]
-struct SessionLaunchResponse {
-    status: String,
-    #[serde(default)]
-    reason: String,
-    #[serde(default)]
-    session_id: String,
 }
 
 #[allow(dead_code)]
@@ -770,6 +772,7 @@ struct App {
     rename_modal: Option<RenameModalState>,
     delete_modal: Option<DeleteModalState>,
     time_travel_modal: Option<TimeTravelModalState>,
+    pending_time_travel_handoff: Option<TimeTravelHandoff>,
 }
 
 #[derive(Clone, Debug, Default)]
@@ -878,6 +881,7 @@ impl App {
             rename_modal: None,
             delete_modal: None,
             time_travel_modal: None,
+            pending_time_travel_handoff: None,
         };
         app.refresh_sessions()?;
         if !args.session_id.trim().is_empty() {
@@ -1123,7 +1127,10 @@ impl App {
                 Method::POST,
                 &format!("/sessions/{}/time-travel/preview", detail.session.session_id),
             )
-            .json(&TimeTravelPreviewPayload { target_seq })
+            .json(&TimeTravelPreviewPayload {
+                target_seq,
+                target_ts: entry.ts_wall as i64,
+            })
             .send();
         let mut modal = TimeTravelModalState {
             session_id: detail.session.session_id.clone(),
@@ -1149,7 +1156,7 @@ impl App {
         self.time_travel_modal = Some(modal);
     }
 
-    fn submit_time_travel(&mut self) -> Result<String, String> {
+    fn submit_time_travel(&mut self) -> Result<TimeTravelHandoff, String> {
         let modal = self
             .time_travel_modal
             .clone()
@@ -1191,39 +1198,33 @@ impl App {
             .and_then(Value::as_str)
             .unwrap_or(&fork_payload.working_directory)
             .to_string();
-        let replay_metadata = serde_json::json!({
-            "source_session_id": modal.session_id,
-            "source_target_seq": modal.target_seq,
-            "resolved_checkpoint_seq": preview
-                .resolved_checkpoint
-                .get("seq")
-                .and_then(Value::as_i64)
-                .unwrap_or(modal.target_seq),
-            "fork_branch": fork_payload.branch_name,
-            "exact_match": preview.exact_match,
-        });
-        let launch = self
-            .request_with_method(Method::POST, "/sessions/launch")
-            .json(&SessionLaunchPayload {
-                source_session_id: modal.session_id.clone(),
-                working_directory,
-                session_name: format!("Time Travel {}", fork_payload.branch_name),
-                replay_metadata,
+        let command = launch_payload
+            .get("launch_command")
+            .and_then(Value::as_array)
+            .map(|items| {
+                items.iter()
+                    .filter_map(Value::as_str)
+                    .map(|item| item.to_string())
+                    .collect::<Vec<_>>()
             })
-            .send()
-            .map_err(|err| format!("launch request failed: {}", err))?;
-        if launch.status().as_u16() != 200 {
-            return Err(format!("launch failed: {}", launch.status()));
+            .unwrap_or_default();
+        if command.is_empty() {
+            return Err("time travel launch command missing".to_string());
         }
-        let launched: SessionLaunchResponse = launch
-            .json()
-            .map_err(|err| format!("invalid launch payload: {}", err))?;
-        if launched.session_id.trim().is_empty() {
-            return Err("launch response missing session_id".to_string());
-        }
+        let session_label = launch_payload
+            .get("resolved_agent")
+            .and_then(Value::as_str)
+            .filter(|value| !value.trim().is_empty())
+            .or_else(|| launch_payload.get("agent").and_then(Value::as_str))
+            .unwrap_or("agent")
+            .to_string();
         self.time_travel_modal = None;
-        self.open_session(launched.session_id.trim(), false)?;
-        Ok(launched.session_id)
+        Ok(TimeTravelHandoff {
+            command,
+            working_directory,
+            branch_name: fork_payload.branch_name,
+            session_label,
+        })
     }
 
     fn submit_rename(&mut self) -> Result<(), String> {
@@ -1365,6 +1366,8 @@ fn run(client: Client, args: SessionsArgs) -> Result<(), String> {
         }
     }
 
+    let pending_handoff = app.pending_time_travel_handoff.clone();
+
     disable_raw_mode().map_err(|e| format!("disable raw mode failed: {}", e))?;
     execute!(
         terminal.backend_mut(),
@@ -1379,6 +1382,26 @@ fn run(client: Client, args: SessionsArgs) -> Result<(), String> {
         .flush()
         .map_err(|e| format!("stdout flush failed: {}", e))?;
     crate::flush_stdin_input_buffer();
+    if let Some(handoff) = pending_handoff {
+        let mut command = Command::new(
+            handoff
+                .command
+                .first()
+                .ok_or_else(|| "handoff command missing executable".to_string())?,
+        );
+        if handoff.command.len() > 1 {
+            command.args(&handoff.command[1..]);
+        }
+        if !handoff.working_directory.trim().is_empty() {
+            command.current_dir(handoff.working_directory.trim());
+        }
+        let status = command
+            .status()
+            .map_err(|e| format!("time travel handoff failed: {}", e))?;
+        if !status.success() {
+            return Err(format!("time travel handoff exited with {}", status));
+        }
+    }
     Ok(())
 }
 
@@ -1412,7 +1435,11 @@ fn handle_key(app: &mut App, key: KeyEvent) -> Result<bool, String> {
                 app.status = "Time Travel cancelled".to_string();
             }
             KeyCode::Enter => match app.submit_time_travel() {
-                Ok(session_id) => app.status = format!("Opened replay session {}", session_id),
+                Ok(handoff) => {
+                    app.status = handoff.status_message();
+                    app.pending_time_travel_handoff = Some(handoff);
+                    return Ok(true);
+                }
                 Err(err) => app.set_flash(err),
             },
             _ => {}
@@ -4254,7 +4281,8 @@ mod tests {
         terminal_replay_max_scroll_x, terminal_replay_scroll, timeline_category_color,
         timeline_kind_style, TimelineCategory, vt100_color_to_ratatui, App, DeleteModalState,
         DetailState, FocusPane, ReplayMode, SessionEvent, SessionSummary, SessionsArgs,
-        TerminalReplayFrame, TimelineEntry, TranscriptChunk, TEXT_REPLAY_TICK_MS,
+        TerminalReplayFrame, TimeTravelModalState, TimeTravelPreviewResponse, TimelineEntry,
+        TranscriptChunk, TEXT_REPLAY_TICK_MS,
     };
     use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
     use flate2::write::GzEncoder;
@@ -4310,6 +4338,7 @@ mod tests {
             rename_modal: None,
             delete_modal: None,
             time_travel_modal: None,
+            pending_time_travel_handoff: None,
         }
     }
 
@@ -4896,6 +4925,7 @@ mod tests {
             let read = stream.read(&mut buffer).expect("read request");
             let request = String::from_utf8_lossy(&buffer[..read]);
             assert!(request.starts_with("POST /sessions/sess-1/time-travel/preview"));
+            assert!(request.contains("\"target_ts\":1234"));
             let body = r#"{"status":"ok","session_id":"sess-1","target_seq":2,"resolved_checkpoint":{"seq":2,"branch":"main","head":"abc123","worktree_diff_stat":" tracked.txt | 1 +"},"exact_match":true,"current_repo_state":{"branch":"main","head":"def456","dirty":false},"can_fork":true,"blocking_reason":"","suggested_branch":"agensic/time-travel/sess-1-2","action":"fork_branch_restore","repo_root":"/tmp/project"}"#;
             let response = format!(
                 "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
@@ -4911,6 +4941,7 @@ mod tests {
             sample_session("sess-1", "Release prep"),
             vec![SessionEvent {
                 seq: 2,
+                ts_wall: 1234.0,
                 event_type: "command.recorded".to_string(),
                 payload: json!({"command":"git status"}),
                 ..SessionEvent::default()
@@ -4936,6 +4967,57 @@ mod tests {
                 .suggested_branch,
             "agensic/time-travel/sess-1-2"
         );
+        server.join().expect("server thread");
+    }
+
+    #[test]
+    fn enter_on_time_travel_modal_stores_handoff_and_exits_tui_loop() {
+        let listener = TcpListener::bind("127.0.0.1:0").expect("bind test listener");
+        let base_url = format!("http://{}", listener.local_addr().expect("listener addr"));
+        let server = thread::spawn(move || {
+            let (mut stream, _) = listener.accept().expect("accept request");
+            let mut buffer = [0_u8; 4096];
+            let read = stream.read(&mut buffer).expect("read request");
+            let request = String::from_utf8_lossy(&buffer[..read]);
+            assert!(request.starts_with("POST /sessions/sess-1/time-travel/fork"));
+            let body = r#"{"status":"ok","branch_name":"agensic/time-travel/sess-1-2","working_directory":"/tmp/project","launch_payload":{"agent":"codex","resolved_agent":"codex","working_directory":"/tmp/project","launch_command":["agensic","run","codex"]}}"#;
+            let response = format!(
+                "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+                body.len(),
+                body
+            );
+            stream
+                .write_all(response.as_bytes())
+                .expect("write response");
+        });
+        let mut app = sample_app(&base_url, vec![sample_session("sess-1", "Release prep")]);
+        app.time_travel_modal = Some(TimeTravelModalState {
+            session_id: "sess-1".to_string(),
+            target_seq: 2,
+            event_summary: "git status".to_string(),
+            preview: Some(TimeTravelPreviewResponse {
+                can_fork: true,
+                exact_match: true,
+                resolved_checkpoint: json!({"seq": 2}),
+                ..TimeTravelPreviewResponse::default()
+            }),
+            error: String::new(),
+        });
+
+        let should_exit = handle_key(
+            &mut app,
+            KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE),
+        )
+        .expect("handle key succeeds");
+
+        assert!(should_exit);
+        let handoff = app
+            .pending_time_travel_handoff
+            .as_ref()
+            .expect("handoff should be stored");
+        assert_eq!(handoff.command, vec!["agensic", "run", "codex"]);
+        assert_eq!(handoff.working_directory, "/tmp/project");
+        assert_eq!(handoff.branch_name, "agensic/time-travel/sess-1-2");
         server.join().expect("server thread");
     }
 
@@ -4980,7 +5062,7 @@ mod tests {
         let modal = app.time_travel_modal.expect("time travel modal should open");
         assert_eq!(
             modal.error,
-            "preview failed: 404 Not Found (session_repo_missing). Please launch your agent from within the git repo to enable Time Travel"
+            "preview failed: 404 Not Found (session_repo_missing)"
         );
         server.join().expect("server thread");
     }

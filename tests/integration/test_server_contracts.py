@@ -362,10 +362,13 @@ class ServerContractTests(unittest.TestCase):
             "agensic.server.routes_sessions.track_runtime.launch_tracked_command_async",
             return_value=launch_payload,
         ) as launch_async:
-            preview_response = self.client.post("/sessions/sess-1/time-travel/preview", json={"target_seq": 12})
+            preview_response = self.client.post(
+                "/sessions/sess-1/time-travel/preview",
+                json={"target_seq": 12, "target_ts": 1234567890},
+            )
             self.assertEqual(preview_response.status_code, 200)
             self.assertEqual(preview_response.json()["suggested_branch"], "agensic/time-travel/sess-1-10")
-            preview_time_travel.assert_called_once_with("sess-1", 12)
+            preview_time_travel.assert_called_once_with("sess-1", 12, target_ts=1234567890)
 
             fork_response = self.client.post(
                 "/sessions/sess-1/time-travel/fork",

@@ -162,7 +162,11 @@ def preview_time_travel(
     deps.enter_request_or_503()
     try:
         track_runtime.reconcile_tracked_sessions()
-        result = track_runtime.preview_time_travel(session_id, payload.target_seq)
+        result = track_runtime.preview_time_travel(
+            session_id,
+            payload.target_seq,
+            target_ts=payload.target_ts,
+        )
         if str(result.get("status", "") or "") != "ok":
             raise HTTPException(status_code=404, detail=str(result.get("reason", "") or "time_travel_preview_failed"))
         return result

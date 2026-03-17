@@ -1112,6 +1112,7 @@ class CliTrackTests(unittest.TestCase):
             self.assertEqual(current_branch, forked["branch_name"])
             self.assertEqual(tracked.read_text(encoding="utf-8"), "changed\n")
             self.assertEqual(Path(repo_dir, "extra.txt").read_text(encoding="utf-8"), "new file\n")
+            self.assertEqual(forked["launch_payload"]["launch_command"], ["agensic", "run", "codex"])
 
     def test_time_travel_preview_uses_session_artifact_paths_and_snapshot_repo_root(self):
         with self._temp_app_paths() as (_, temp_paths), tempfile.TemporaryDirectory() as repo_dir, tempfile.TemporaryDirectory() as legacy_dir:
@@ -1182,6 +1183,91 @@ class CliTrackTests(unittest.TestCase):
             self.assertEqual(preview["status"], "ok")
             self.assertEqual(preview["repo_root"], repo_dir)
             self.assertEqual(preview["resolved_checkpoint"]["seq"], 3)
+            self.assertTrue(preview["exact_match"])
+
+    def test_time_travel_preview_ignores_future_checkpoint_with_stale_seq_when_timestamp_is_known(self):
+        with self._temp_app_paths() as (_, temp_paths), tempfile.TemporaryDirectory() as repo_dir:
+            subprocess.run(["git", "init"], cwd=repo_dir, check=True, capture_output=True, text=True)
+            subprocess.run(["git", "config", "user.email", "test@example.com"], cwd=repo_dir, check=True)
+            subprocess.run(["git", "config", "user.name", "Test User"], cwd=repo_dir, check=True)
+            tracked = Path(repo_dir) / "tracked.txt"
+            tracked.write_text("base\n", encoding="utf-8")
+            subprocess.run(["git", "add", "tracked.txt"], cwd=repo_dir, check=True)
+            subprocess.run(["git", "commit", "-m", "base"], cwd=repo_dir, check=True, capture_output=True, text=True)
+
+            store = SQLiteStateStore(temp_paths.state_sqlite_path, journal=None)
+            store.upsert_tracked_session(
+                session_id="sess-ts",
+                status="exited",
+                launch_mode="registry_alias",
+                agent="codex",
+                model="test-model",
+                agent_name="Codex",
+                working_directory=repo_dir,
+                root_command="codex",
+            )
+            head = subprocess.run(
+                ["git", "rev-parse", "HEAD"],
+                cwd=repo_dir,
+                check=True,
+                capture_output=True,
+                text=True,
+            ).stdout.strip()
+            store.upsert_session_summary(
+                session_id="sess-ts",
+                repo_root=repo_dir,
+                branch_start="main",
+                branch_end="main",
+                head_start=head,
+                head_end=head,
+            )
+
+            checkpoint_path = Path(track_module._track_git_checkpoint_path("sess-ts"))
+            checkpoint_path.parent.mkdir(parents=True, exist_ok=True)
+            rows = [
+                {
+                    "seq": 7,
+                    "timestamp": 100,
+                    "reason": "before",
+                    "repo_root": repo_dir,
+                    "branch": "main",
+                    "head": head,
+                    "status_porcelain": "",
+                    "status_fingerprint": "",
+                    "tracked_patch_b64": "",
+                    "tracked_patch_sha256": "",
+                    "worktree_diff_stat": "",
+                    "changed_files": [],
+                    "untracked_files": [],
+                    "untracked_paths": [],
+                    "fingerprint": "old",
+                },
+                {
+                    "seq": 7,
+                    "timestamp": 200,
+                    "reason": "after",
+                    "repo_root": repo_dir,
+                    "branch": "main",
+                    "head": "later-head",
+                    "status_porcelain": "",
+                    "status_fingerprint": "",
+                    "tracked_patch_b64": "",
+                    "tracked_patch_sha256": "",
+                    "worktree_diff_stat": "",
+                    "changed_files": [],
+                    "untracked_files": [],
+                    "untracked_paths": [],
+                    "fingerprint": "new",
+                },
+            ]
+            with checkpoint_path.open("w", encoding="utf-8") as handle:
+                for row in rows:
+                    handle.write(json.dumps(row) + "\n")
+
+            preview = track_module.preview_time_travel("sess-ts", 7, target_ts=150)
+
+            self.assertEqual(preview["status"], "ok")
+            self.assertEqual(preview["resolved_checkpoint"]["head"], head)
             self.assertTrue(preview["exact_match"])
 
 

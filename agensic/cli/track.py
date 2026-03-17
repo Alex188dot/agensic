@@ -1836,12 +1836,21 @@ def _load_git_checkpoint_records(path: str) -> list[dict[str, Any]]:
     return sorted(records, key=lambda item: (int(item.get("seq", 0) or 0), int(item.get("timestamp", 0) or 0)))
 
 
-def _resolve_git_checkpoint(records: list[dict[str, Any]], target_seq: int) -> tuple[dict[str, Any] | None, bool]:
+def _resolve_git_checkpoint(
+    records: list[dict[str, Any]],
+    target_seq: int,
+    *,
+    target_ts: int = 0,
+) -> tuple[dict[str, Any] | None, bool]:
     clean_target = int(target_seq or 0)
+    clean_target_ts = int(target_ts or 0)
     candidate: dict[str, Any] | None = None
     exact = False
     for record in records:
         seq = int(record.get("seq", 0) or 0)
+        record_ts = int(record.get("timestamp", 0) or 0)
+        if clean_target_ts > 0 and record_ts > 0 and record_ts > clean_target_ts:
+            continue
         if seq == clean_target:
             return (record, True)
         if seq <= clean_target:
@@ -1849,6 +1858,34 @@ def _resolve_git_checkpoint(records: list[dict[str, Any]], target_seq: int) -> t
         elif seq > clean_target:
             break
     return (candidate, exact)
+
+
+def _resolve_time_travel_launch_agent(session: dict[str, Any] | None) -> tuple[str, str]:
+    state = dict(session or {})
+    clean_agent = str(state.get("agent", "") or "").strip().lower()
+    root_command = str(state.get("root_command", "") or "").strip()
+    descriptor = None
+    if clean_agent:
+        descriptor = _find_registry_descriptor(clean_agent)
+    if descriptor is None and root_command:
+        try:
+            descriptor = _find_command_descriptor(shlex.split(root_command))
+        except ValueError:
+            descriptor = None
+    if descriptor is not None:
+        executables = [str(item or "").strip() for item in descriptor.get("executables", []) if str(item or "").strip()]
+        agent_id = str(descriptor.get("agent_id", "") or "").strip().lower()
+        executable = executables[0] if executables else agent_id
+        return (agent_id or clean_agent, executable or clean_agent)
+    fallback_executable = clean_agent
+    if not fallback_executable and root_command:
+        try:
+            parts = shlex.split(root_command)
+        except ValueError:
+            parts = []
+        if parts:
+            fallback_executable = os.path.basename(str(parts[0] or "").strip()).lower()
+    return (clean_agent, fallback_executable)
 
 
 def _post_session_event(session_id: str, event_type: str, payload: dict[str, Any] | None = None) -> int | None:
@@ -1919,7 +1956,7 @@ def load_git_checkpoints_for_session(session_id: str, session: dict[str, Any] | 
     return []
 
 
-def preview_time_travel(session_id: str, target_seq: int) -> dict[str, Any]:
+def preview_time_travel(session_id: str, target_seq: int, *, target_ts: int = 0) -> dict[str, Any]:
     clean_session_id = str(session_id or "").strip()
     if not clean_session_id:
         return {"status": "error", "reason": "session_id_missing"}
@@ -1940,7 +1977,11 @@ def preview_time_travel(session_id: str, target_seq: int) -> dict[str, Any]:
     checkpoints = load_git_checkpoints_for_session(clean_session_id, session=session)
     if not checkpoints:
         return {"status": "error", "reason": "git_checkpoints_missing"}
-    resolved, exact = _resolve_git_checkpoint(checkpoints, int(target_seq or 0))
+    resolved, exact = _resolve_git_checkpoint(
+        checkpoints,
+        int(target_seq or 0),
+        target_ts=int(target_ts or 0),
+    )
     if resolved is None:
         return {"status": "error", "reason": "git_checkpoint_not_found"}
     current_snapshot = _capture_repo_snapshot(repo_root)
@@ -1975,6 +2016,7 @@ def preview_time_travel(session_id: str, target_seq: int) -> dict[str, Any]:
         "git.time_travel.previewed",
         {
             "target_seq": int(target_seq or 0),
+            "target_ts": int(target_ts or 0),
             "resolved_checkpoint_seq": int(resolved.get("seq", 0) or 0),
             "exact_match": bool(exact),
             "can_fork": bool(clean_live),
@@ -2020,10 +2062,15 @@ def fork_time_travel(session_id: str, target_seq: int, branch_name: str = "") ->
         if not rel_path:
             continue
         _write_repo_file_bytes(repo_root, rel_path, _decode_bytes(item.get("data_b64")))
+    session = _state_store().get_session_summary(str(session_id or "").strip()) or {}
+    resolved_agent, launch_executable = _resolve_time_travel_launch_agent(session)
     launch_payload = {
-        "agent": str((_state_store().get_session_summary(str(session_id or "").strip()) or {}).get("agent", "") or ""),
-        "model": str((_state_store().get_session_summary(str(session_id or "").strip()) or {}).get("model", "") or ""),
-        "agent_name": str((_state_store().get_session_summary(str(session_id or "").strip()) or {}).get("agent_name", "") or ""),
+        "agent": str(session.get("agent", "") or ""),
+        "model": str(session.get("model", "") or ""),
+        "agent_name": str(session.get("agent_name", "") or ""),
+        "resolved_agent": resolved_agent,
+        "launch_executable": launch_executable,
+        "launch_command": ["agensic", "run", launch_executable] if launch_executable else [],
         "working_directory": repo_root,
         "source_session_id": str(session_id or "").strip(),
         "source_target_seq": int(target_seq or 0),
