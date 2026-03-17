@@ -12,7 +12,6 @@
   <code>Git Time Travel</code>
   <code>Replayable Sessions</code>
   <code>IDE style Tab Autocomplete</code>
-  <code>Local-first Privacy</code>
 </p>
 
 ---
@@ -91,7 +90,7 @@ or
 codex
 ```
 
-See the [Supported Agents](#-supported-agents) section for a list of supported agents. If your agent is not in the list, you can add it by running <code>agensic --add_agent "agent_name"</code>.
+See the [Supported Agents](#-supported-agents) section for a complete list of all supported agents. If your agent is not in the list, you can add it by running <code>agensic --add_agent "executable"</code>.
 
 After you're done, you can use Agensic to inspect the session history:
 
