@@ -236,10 +236,26 @@ struct TimelineEntry {
     seq_start: i64,
     seq_end: i64,
     ts_wall: f64,
-    ts_monotonic_ms: i64,
     event_type: String,
     summary: String,
     copy_command: Option<String>,
+}
+
+#[derive(Debug, Serialize)]
+struct ConversationExportRow {
+    session_id: String,
+    #[serde(skip_serializing_if = "String::is_empty")]
+    session_name: String,
+    row_index: usize,
+    role: String,
+    source_event_type: String,
+    event_index_start: usize,
+    event_index_end: usize,
+    seq_start: i64,
+    seq_end: i64,
+    ts_iso: String,
+    ts_monotonic_ms: i64,
+    text: String,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -1036,6 +1052,16 @@ impl App {
         self.active_copy_feedback() == Some(CopyFeedbackTarget::SessionId)
     }
 
+    fn export_conversation_jsonl(&mut self) -> Result<(String, usize), String> {
+        let detail = self
+            .detail
+            .as_ref()
+            .ok_or_else(|| "No open session".to_string())?;
+        let out = default_conversation_export_path(&detail.session.session_id, "jsonl");
+        let count = export_conversation_jsonl(detail, &out)?;
+        Ok((out, count))
+    }
+
     fn export_timeline_csv(&mut self) -> Result<String, String> {
         let detail = self
             .detail
@@ -1079,15 +1105,6 @@ impl App {
         }
     }
 
-    fn start_rename_detail(&mut self) {
-        if let Some(detail) = self.detail.as_ref() {
-            self.open_rename_modal(
-                detail.session.session_id.clone(),
-                detail.session.session_name.clone(),
-            );
-        }
-    }
-
     fn open_delete_modal(&mut self, session_id: String, session_name: String) {
         self.delete_modal = Some(DeleteModalState {
             session_id,
@@ -1126,7 +1143,10 @@ impl App {
         let preview = self
             .request_with_method(
                 Method::POST,
-                &format!("/sessions/{}/time-travel/preview", detail.session.session_id),
+                &format!(
+                    "/sessions/{}/time-travel/preview",
+                    detail.session.session_id
+                ),
             )
             .json(&TimeTravelPreviewPayload {
                 target_seq,
@@ -1203,7 +1223,8 @@ impl App {
             .get("launch_command")
             .and_then(Value::as_array)
             .map(|items| {
-                items.iter()
+                items
+                    .iter()
                     .filter_map(Value::as_str)
                     .map(|item| item.to_string())
                     .collect::<Vec<_>>()
@@ -1445,6 +1466,31 @@ fn handle_key(app: &mut App, key: KeyEvent) -> Result<bool, String> {
         app.detail = None;
         return Ok(true);
     }
+    if app.rename_modal.is_some() {
+        match key.code {
+            KeyCode::Esc => {
+                app.rename_modal = None;
+                app.status = "Rename cancelled".to_string();
+            }
+            KeyCode::Enter => {
+                if let Err(err) = app.submit_rename() {
+                    app.set_flash(err);
+                }
+            }
+            KeyCode::Backspace | KeyCode::Delete => {
+                if let Some(modal) = app.rename_modal.as_mut() {
+                    modal.input.pop();
+                }
+            }
+            KeyCode::Char(c) => {
+                if let Some(modal) = app.rename_modal.as_mut() {
+                    modal.input.push(c);
+                }
+            }
+            _ => {}
+        }
+        return Ok(false);
+    }
     if app.delete_modal.is_some() {
         match key.code {
             KeyCode::Esc => {
@@ -1478,35 +1524,11 @@ fn handle_key(app: &mut App, key: KeyEvent) -> Result<bool, String> {
         }
         return Ok(false);
     }
-    if app.rename_modal.is_some() {
-        match key.code {
-            KeyCode::Esc => {
-                app.rename_modal = None;
-                app.status = "Rename cancelled".to_string();
-            }
-            KeyCode::Enter => {
-                if let Err(err) = app.submit_rename() {
-                    app.set_flash(err);
-                }
-            }
-            KeyCode::Backspace | KeyCode::Delete => {
-                if let Some(modal) = app.rename_modal.as_mut() {
-                    modal.input.pop();
-                }
-            }
-            KeyCode::Char(c) => {
-                if let Some(modal) = app.rename_modal.as_mut() {
-                    modal.input.push(c);
-                }
-            }
-            _ => {}
-        }
-        return Ok(false);
-    }
     if app.detail.is_some() {
         let mut flash_message: Option<String> = None;
         let mut copy_target: Option<CopyFeedbackTarget> = None;
-        let mut export_timeline_csv = false;
+        let mut export_conversation = false;
+        let mut export_timeline = false;
         let mut close_detail = false;
         {
             let detail = app.detail.as_mut().expect("detail checked above");
@@ -1614,10 +1636,10 @@ fn handle_key(app: &mut App, key: KeyEvent) -> Result<bool, String> {
                             flash_message = Some("No command to copy".to_string());
                         }
                     }
-                    KeyCode::Char('R') => app.start_rename_detail(),
                     KeyCode::Char('D') => app.start_delete_detail(),
                     KeyCode::Char('T') => app.open_time_travel_modal(),
-                    KeyCode::Char('E') => export_timeline_csv = true,
+                    KeyCode::Char('e') => export_conversation = true,
+                    KeyCode::Char('E') => export_timeline = true,
                     KeyCode::Left if detail.focus == FocusPane::Replay => {
                         detail.scroll_replay_horizontal(-4)
                     }
@@ -1639,7 +1661,15 @@ fn handle_key(app: &mut App, key: KeyEvent) -> Result<bool, String> {
             app.status = "Back to sessions".to_string();
             app.needs_terminal_clear = true;
         }
-        if export_timeline_csv {
+        if export_conversation {
+            match app.export_conversation_jsonl() {
+                Ok((out, count)) => {
+                    flash_message = Some(format!("Exported {count} conversation rows to {}", out))
+                }
+                Err(err) => flash_message = Some(err),
+            }
+        }
+        if export_timeline {
             match app.export_timeline_csv() {
                 Ok(out) => flash_message = Some(format!("Exported timeline CSV to {}", out)),
                 Err(err) => flash_message = Some(err),
@@ -1824,7 +1854,7 @@ fn draw_detail(frame: &mut ratatui::Frame<'_>, app: &App, detail: &DetailState) 
     frame.render_widget(build_replay(app, detail, layout.replay), layout.replay);
     let mut footer_lines = vec![
         Line::from(Span::styled(
-            "Space: Play/Pause   ↑↓: Move  ←/→: Horizontal scroll  Tab/Shift+Tab: Jump 500  c: Copy  R: Rename  D: Delete  T: Time Travel  E: Export(csv)  f: Toggle fullscreen  s: Switch pane  Enter: Details  Esc: Back",
+            "Space: Play/Pause   ↑↓: Move  ←/→: Horiz. Scroll  Tab/Shift+Tab: Jump 500  c: Copy  D: Delete  T: Time Travel  e: Export Conv(jsonl)  E: Export TL(csv)  f: Fullscreen  s: Switch pane  Enter: Details  Esc: Back",
             Style::default().fg(Color::Yellow),
         )),
         Line::from(app.status_text().to_string()),
@@ -2124,10 +2154,7 @@ fn build_changes(detail: &DetailState) -> Paragraph<'static> {
                 .and_then(Value::as_array)
                 .map(|items| items.len())
         });
-    let commit_metric = detail
-        .session
-        .changes
-        .get("commits_created");
+    let commit_metric = detail.session.changes.get("commits_created");
     let mut lines = vec![Line::from(format!(
         "commands {}    subprocesses {}    pushes {}",
         metric(detail.session.aggregate.get("command_count")),
@@ -2525,10 +2552,21 @@ fn draw_time_travel_modal(frame: &mut ratatui::Frame<'_>, modal: &TimeTravelModa
         content.push(Line::from(format!(
             "resolved checkpoint: {} ({})",
             resolved_seq,
-            if preview.exact_match { "exact" } else { "nearest prior" }
+            if preview.exact_match {
+                "exact"
+            } else {
+                "nearest prior"
+            }
         )));
-        content.push(Line::from(format!("repo: {}", sanitize_inline_text(&preview.repo_root))));
-        content.push(Line::from(format!("recorded branch/head: {} / {}", branch, truncate(head, 14))));
+        content.push(Line::from(format!(
+            "repo: {}",
+            sanitize_inline_text(&preview.repo_root)
+        )));
+        content.push(Line::from(format!(
+            "recorded branch/head: {} / {}",
+            branch,
+            truncate(head, 14)
+        )));
         content.push(Line::from(format!(
             "live branch/head: {} / {}",
             current_branch,
@@ -2538,7 +2576,10 @@ fn draw_time_travel_modal(frame: &mut ratatui::Frame<'_>, modal: &TimeTravelModa
             "suggested fork branch: {}",
             sanitize_inline_text(&preview.suggested_branch)
         )));
-        content.push(Line::from(format!("tracked diff: {}", sanitize_inline_text(diff_stat))));
+        content.push(Line::from(format!(
+            "tracked diff: {}",
+            sanitize_inline_text(diff_stat)
+        )));
         content.push(Line::from(format!("untracked files: {}", untracked_count)));
         content.push(Line::from(format!(
             "action: fork branch and restore checkpoint{}",
@@ -2546,7 +2587,10 @@ fn draw_time_travel_modal(frame: &mut ratatui::Frame<'_>, modal: &TimeTravelModa
         )));
         if !preview.blocking_reason.trim().is_empty() {
             content.push(Line::from(Span::styled(
-                format!("blocking reason: {}", sanitize_inline_text(&preview.blocking_reason)),
+                format!(
+                    "blocking reason: {}",
+                    sanitize_inline_text(&preview.blocking_reason)
+                ),
                 Style::default().fg(Color::LightRed),
             )));
         }
@@ -2983,7 +3027,6 @@ fn build_display_model(events: &[SessionEvent]) -> (Vec<TimelineEntry>, Vec<Stri
                         seq_start: events[start].seq,
                         seq_end: events[index.saturating_sub(1)].seq,
                         ts_wall: events[start].ts_wall,
-                        ts_monotonic_ms: events[start].ts_monotonic_ms,
                         event_type: "terminal.output".to_string(),
                         summary: block.summary,
                         copy_command: None,
@@ -3005,7 +3048,6 @@ fn build_display_model(events: &[SessionEvent]) -> (Vec<TimelineEntry>, Vec<Stri
                         seq_start: events[start].seq,
                         seq_end: events[index.saturating_sub(1)].seq,
                         ts_wall: events[start].ts_wall,
-                        ts_monotonic_ms: events[start].ts_monotonic_ms,
                         event_type: "terminal.input".to_string(),
                         summary: block.summary,
                         copy_command: None,
@@ -3020,7 +3062,6 @@ fn build_display_model(events: &[SessionEvent]) -> (Vec<TimelineEntry>, Vec<Stri
                     seq_start: event.seq,
                     seq_end: event.seq,
                     ts_wall: event.ts_wall,
-                    ts_monotonic_ms: event.ts_monotonic_ms,
                     event_type: event.event_type.clone(),
                     summary: event_summary(event),
                     copy_command: event_command(event),
@@ -3039,7 +3080,6 @@ fn build_display_model(events: &[SessionEvent]) -> (Vec<TimelineEntry>, Vec<Stri
                 seq_start: event.seq,
                 seq_end: event.seq,
                 ts_wall: event.ts_wall,
-                ts_monotonic_ms: event.ts_monotonic_ms,
                 event_type: event.event_type.clone(),
                 summary: event_summary(event),
                 copy_command: event_command(event),
@@ -3802,6 +3842,16 @@ fn export_session_slug(session_id: &str) -> String {
     }
 }
 
+fn default_conversation_export_path(session_id: &str, ext: &str) -> String {
+    format!(
+        "{}/conversation_export_{}_{}.{}",
+        default_export_dir(),
+        export_session_slug(session_id),
+        now_epoch_seconds(),
+        ext
+    )
+}
+
 fn default_timeline_export_path(session_id: &str, ext: &str) -> String {
     format!(
         "{}/timeline_export_{}_{}.{}",
@@ -3810,6 +3860,30 @@ fn default_timeline_export_path(session_id: &str, ext: &str) -> String {
         now_epoch_seconds(),
         ext
     )
+}
+
+fn export_conversation_jsonl(detail: &DetailState, out_path: &str) -> Result<usize, String> {
+    if out_path.trim().is_empty() {
+        return Err("missing output path".to_string());
+    }
+    let output = Path::new(out_path);
+    if let Some(parent) = output.parent() {
+        if !parent.as_os_str().is_empty() {
+            fs::create_dir_all(parent).map_err(|e| format!("create parent failed: {}", e))?;
+        }
+    }
+
+    let rows = build_conversation_export_rows(detail);
+    let mut file = File::create(output).map_err(|e| format!("create jsonl failed: {}", e))?;
+    for row in &rows {
+        serde_json::to_writer(&mut file, row)
+            .map_err(|e| format!("serialize jsonl row failed: {}", e))?;
+        file.write_all(b"\n")
+            .map_err(|e| format!("write jsonl newline failed: {}", e))?;
+    }
+    file.flush()
+        .map_err(|e| format!("flush jsonl failed: {}", e))?;
+    Ok(rows.len())
 }
 
 fn export_timeline_rows(detail: &DetailState, out_path: &str) -> Result<(), String> {
@@ -3836,7 +3910,6 @@ fn export_timeline_rows(detail: &DetailState, out_path: &str) -> Result<(), Stri
             "seq_start",
             "seq_end",
             "ts_iso",
-            "ts_monotonic_ms",
             "event_type",
             "summary",
             "command",
@@ -3857,7 +3930,6 @@ fn export_timeline_rows(detail: &DetailState, out_path: &str) -> Result<(), Stri
                 entry.seq_start.to_string(),
                 entry.seq_end.to_string(),
                 format_wall_ts(entry.ts_wall),
-                entry.ts_monotonic_ms.to_string(),
                 sanitize_inline_text(&entry.event_type),
                 entry.summary.clone(),
                 entry.copy_command.clone().unwrap_or_default(),
@@ -3874,6 +3946,79 @@ fn export_timeline_rows(detail: &DetailState, out_path: &str) -> Result<(), Stri
         .flush()
         .map_err(|e| format!("flush csv failed: {}", e))?;
     Ok(())
+}
+
+fn build_conversation_export_rows(detail: &DetailState) -> Vec<ConversationExportRow> {
+    let mut rows = Vec::new();
+    let mut index = 0usize;
+    let session_id = detail.session.session_id.clone();
+    let session_name = detail.session.session_name.trim().to_string();
+
+    while index < detail.events.len() {
+        let event = &detail.events[index];
+        let (role, normalized_type) = match event.event_type.as_str() {
+            "terminal.stdin" => ("user", "terminal.input"),
+            "terminal.stdout" => ("agent", "terminal.output"),
+            _ => {
+                index += 1;
+                continue;
+            }
+        };
+        let start = index;
+        while index < detail.events.len() && detail.events[index].event_type == event.event_type {
+            index += 1;
+        }
+        let group = &detail.events[start..index];
+        let Some(block) = build_terminal_display_block(group, start) else {
+            continue;
+        };
+        rows.push(ConversationExportRow {
+            session_id: session_id.clone(),
+            session_name: session_name.clone(),
+            row_index: rows.len() + 1,
+            role: role.to_string(),
+            source_event_type: normalized_type.to_string(),
+            event_index_start: start,
+            event_index_end: index.saturating_sub(1),
+            seq_start: group.first().map(|item| item.seq).unwrap_or_default(),
+            seq_end: group.last().map(|item| item.seq).unwrap_or_default(),
+            ts_iso: format_wall_ts(group.first().map(|item| item.ts_wall).unwrap_or_default()),
+            ts_monotonic_ms: group
+                .first()
+                .map(|item| item.ts_monotonic_ms)
+                .unwrap_or_default(),
+            text: block.replay_text.trim().to_string(),
+        });
+    }
+
+    if !rows.is_empty() {
+        return rows;
+    }
+
+    for (event_index, event) in detail.events.iter().enumerate() {
+        if event.event_type != "command.recorded" {
+            continue;
+        }
+        let Some(command) = event_command(event) else {
+            continue;
+        };
+        rows.push(ConversationExportRow {
+            session_id: session_id.clone(),
+            session_name: session_name.clone(),
+            row_index: rows.len() + 1,
+            role: "user".to_string(),
+            source_event_type: event.event_type.clone(),
+            event_index_start: event_index,
+            event_index_end: event_index,
+            seq_start: event.seq,
+            seq_end: event.seq,
+            ts_iso: format_wall_ts(event.ts_wall),
+            ts_monotonic_ms: event.ts_monotonic_ms,
+            text: command,
+        });
+    }
+
+    rows
 }
 
 fn sanitize_inline_text(value: &str) -> String {
@@ -4305,15 +4450,16 @@ fn rect_contains(rect: Rect, column: u16, row: u16) -> bool {
 #[cfg(test)]
 mod tests {
     use super::{
-        build_display_model, build_terminal_replay_frames, collect_terminal_lines, diff_stat_line,
-        export_timeline_rows, format_duration, format_header_outcome, format_outcome,
-        format_timeline_ordinal, handle_key, load_transcript_chunks, rendered_text_height,
-        replay_max_scroll, repo_display_name, sanitize_inline_text, sanitize_terminal_output,
+        build_conversation_export_rows, build_display_model, build_terminal_replay_frames,
+        collect_terminal_lines, diff_stat_line, export_conversation_jsonl, export_timeline_rows,
+        format_duration, format_header_outcome, format_outcome, format_timeline_ordinal,
+        handle_key, load_transcript_chunks, rendered_text_height, replay_max_scroll,
+        repo_display_name, sanitize_inline_text, sanitize_terminal_output,
         session_detail_layout_in_area, strip_inline_progress_noise, terminal_replay_end_padding,
         terminal_replay_max_scroll_x, terminal_replay_scroll, timeline_category_color,
-        timeline_kind_style, TimelineCategory, vt100_color_to_ratatui, App, DeleteModalState,
-        DetailState, FocusPane, ReplayMode, SessionEvent, SessionSummary, SessionsArgs,
-        TerminalReplayFrame, TimeTravelModalState, TimeTravelPreviewResponse, TimelineEntry,
+        timeline_kind_style, vt100_color_to_ratatui, App, DeleteModalState, DetailState, FocusPane,
+        ReplayMode, SessionEvent, SessionSummary, SessionsArgs, TerminalReplayFrame,
+        TimeTravelModalState, TimeTravelPreviewResponse, TimelineCategory, TimelineEntry,
         TranscriptChunk, TEXT_REPLAY_TICK_MS,
     };
     use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
@@ -4568,10 +4714,7 @@ mod tests {
             timeline_kind_style("command.custom").fg,
             Some(timeline_category_color(TimelineCategory::Command))
         );
-        assert_eq!(
-            timeline_kind_style("custom.event").fg,
-            Some(Color::White)
-        );
+        assert_eq!(timeline_kind_style("custom.event").fg, Some(Color::White));
         assert_ne!(
             timeline_kind_style("process.spawned").fg,
             timeline_kind_style("process.exited").fg
@@ -4834,7 +4977,6 @@ mod tests {
                     seq_start: 1,
                     seq_end: 1,
                     ts_wall: 0.0,
-                    ts_monotonic_ms: 0,
                     event_type: "command.recorded".to_string(),
                     summary: "pwd".to_string(),
                     copy_command: Some("pwd".to_string()),
@@ -4846,7 +4988,6 @@ mod tests {
                     seq_start: 2,
                     seq_end: 2,
                     ts_wall: 0.0,
-                    ts_monotonic_ms: 0,
                     event_type: "terminal.output".to_string(),
                     summary: "/tmp".to_string(),
                     copy_command: None,
@@ -4858,7 +4999,6 @@ mod tests {
                     seq_start: 3,
                     seq_end: 3,
                     ts_wall: 0.0,
-                    ts_monotonic_ms: 0,
                     event_type: "process.exited".to_string(),
                     summary: "exited".to_string(),
                     copy_command: None,
@@ -4987,7 +5127,9 @@ mod tests {
         )
         .expect("handle key succeeds");
 
-        let modal = app.time_travel_modal.expect("time travel modal should open");
+        let modal = app
+            .time_travel_modal
+            .expect("time travel modal should open");
         assert_eq!(modal.session_id, "sess-1");
         assert!(modal.error.is_empty());
         assert_eq!(modal.target_seq, 2);
@@ -5036,11 +5178,8 @@ mod tests {
             error: String::new(),
         });
 
-        let should_exit = handle_key(
-            &mut app,
-            KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE),
-        )
-        .expect("handle key succeeds");
+        let should_exit = handle_key(&mut app, KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE))
+            .expect("handle key succeeds");
 
         assert!(should_exit);
         let handoff = app
@@ -5050,7 +5189,9 @@ mod tests {
         assert_eq!(handoff.command, vec!["agensic", "run", "codex"]);
         assert_eq!(handoff.working_directory, "/tmp/project");
         assert_eq!(handoff.branch_name, "agensic/time-travel/sess-1-2");
-        assert!(handoff.replay_metadata_json.contains("\"fork_branch\":\"agensic/time-travel/sess-1-2\""));
+        assert!(handoff
+            .replay_metadata_json
+            .contains("\"fork_branch\":\"agensic/time-travel/sess-1-2\""));
         server.join().expect("server thread");
     }
 
@@ -5092,7 +5233,9 @@ mod tests {
         )
         .expect("handle key succeeds");
 
-        let modal = app.time_travel_modal.expect("time travel modal should open");
+        let modal = app
+            .time_travel_modal
+            .expect("time travel modal should open");
         assert_eq!(
             modal.error,
             "preview failed: 404 Not Found (session_repo_missing)"
@@ -5256,6 +5399,119 @@ mod tests {
     }
 
     #[test]
+    fn build_conversation_export_rows_groups_terminal_io_by_role() {
+        let detail = DetailState::new(
+            SessionSummary {
+                session_id: "sess-1".to_string(),
+                session_name: "Demo".to_string(),
+                ..SessionSummary::default()
+            },
+            vec![
+                SessionEvent {
+                    seq: 10,
+                    ts_wall: 1.0,
+                    ts_monotonic_ms: 100,
+                    event_type: "terminal.stdin".to_string(),
+                    payload: json!({"data": "hello agent\n"}),
+                    ..SessionEvent::default()
+                },
+                SessionEvent {
+                    seq: 11,
+                    ts_wall: 2.0,
+                    ts_monotonic_ms: 200,
+                    event_type: "terminal.stdout".to_string(),
+                    payload: json!({"data": "hello user\n"}),
+                    ..SessionEvent::default()
+                },
+                SessionEvent {
+                    seq: 12,
+                    ts_wall: 3.0,
+                    ts_monotonic_ms: 300,
+                    event_type: "terminal.stdout".to_string(),
+                    payload: json!({"data": "more detail\n"}),
+                    ..SessionEvent::default()
+                },
+            ],
+            false,
+        );
+
+        let rows = build_conversation_export_rows(&detail);
+
+        assert_eq!(rows.len(), 2);
+        assert_eq!(rows[0].role, "user");
+        assert_eq!(rows[0].source_event_type, "terminal.input");
+        assert_eq!(rows[0].text, "hello agent");
+        assert_eq!(rows[1].role, "agent");
+        assert_eq!(rows[1].source_event_type, "terminal.output");
+        assert_eq!(rows[1].text, "hello user\nmore detail");
+        assert_eq!(rows[1].event_index_start, 1);
+        assert_eq!(rows[1].event_index_end, 2);
+    }
+
+    #[test]
+    fn export_conversation_jsonl_writes_line_delimited_rows() {
+        let detail = DetailState::new(
+            SessionSummary {
+                session_id: "session-1234567890".to_string(),
+                session_name: "Demo".to_string(),
+                ..SessionSummary::default()
+            },
+            vec![
+                SessionEvent {
+                    seq: 10,
+                    ts_wall: 1.0,
+                    ts_monotonic_ms: 100,
+                    event_type: "terminal.stdin".to_string(),
+                    payload: json!({"data": "hello\n"}),
+                    ..SessionEvent::default()
+                },
+                SessionEvent {
+                    seq: 11,
+                    ts_wall: 2.0,
+                    ts_monotonic_ms: 200,
+                    event_type: "terminal.stdout".to_string(),
+                    payload: json!({"data": "world\n"}),
+                    ..SessionEvent::default()
+                },
+            ],
+            false,
+        );
+        let out = env::temp_dir().join(format!(
+            "agensic-session-conversation-export-{}.jsonl",
+            std::process::id()
+        ));
+
+        let count = export_conversation_jsonl(&detail, out.to_str().expect("valid temp path"))
+            .expect("jsonl export");
+        let text = fs::read_to_string(&out).expect("read jsonl export");
+        let rows = text
+            .lines()
+            .map(|line| serde_json::from_str::<serde_json::Value>(line).expect("parse jsonl row"))
+            .collect::<Vec<_>>();
+
+        assert_eq!(count, 2);
+        assert_eq!(rows.len(), 2);
+        assert_eq!(
+            rows[0].get("role").and_then(|value| value.as_str()),
+            Some("user")
+        );
+        assert_eq!(
+            rows[0].get("text").and_then(|value| value.as_str()),
+            Some("hello")
+        );
+        assert_eq!(
+            rows[1].get("role").and_then(|value| value.as_str()),
+            Some("agent")
+        );
+        assert_eq!(
+            rows[1].get("text").and_then(|value| value.as_str()),
+            Some("world")
+        );
+
+        let _ = fs::remove_file(out);
+    }
+
+    #[test]
     fn export_timeline_rows_writes_raw_event_ranges() {
         let events = vec![
             SessionEvent {
@@ -5309,9 +5565,27 @@ mod tests {
         assert_eq!(rows[1].get(5), Some("2"));
         assert_eq!(rows[1].get(7), Some("11"));
         assert_eq!(rows[1].get(8), Some("12"));
-        assert_eq!(rows[1].get(14), Some("2"));
+        assert_eq!(rows[1].get(13), Some("2"));
 
         let _ = fs::remove_file(out);
+    }
+
+    #[test]
+    fn uppercase_r_opens_rename_modal_for_selected_session() {
+        let mut app = sample_app(
+            "http://127.0.0.1:9",
+            vec![sample_session("sess-1", "Release prep")],
+        );
+
+        handle_key(
+            &mut app,
+            KeyEvent::new(KeyCode::Char('R'), KeyModifiers::SHIFT),
+        )
+        .expect("handle key succeeds");
+
+        let modal = app.rename_modal.expect("rename modal should open");
+        assert_eq!(modal.session_id, "sess-1");
+        assert_eq!(modal.input, "Release prep");
     }
 
     #[test]
@@ -5461,7 +5735,6 @@ mod tests {
                     seq_start: 1,
                     seq_end: 1,
                     ts_wall: 0.0,
-                    ts_monotonic_ms: 0,
                     event_type: "command.recorded".to_string(),
                     summary: "pwd".to_string(),
                     copy_command: Some("pwd".to_string()),
@@ -5473,7 +5746,6 @@ mod tests {
                     seq_start: 2,
                     seq_end: 2,
                     ts_wall: 0.0,
-                    ts_monotonic_ms: 0,
                     event_type: "terminal.output".to_string(),
                     summary: "/tmp".to_string(),
                     copy_command: None,
@@ -5485,7 +5757,6 @@ mod tests {
                     seq_start: 3,
                     seq_end: 3,
                     ts_wall: 0.0,
-                    ts_monotonic_ms: 0,
                     event_type: "process.exited".to_string(),
                     summary: "exited".to_string(),
                     copy_command: None,
