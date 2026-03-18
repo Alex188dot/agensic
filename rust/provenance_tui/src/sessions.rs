@@ -33,13 +33,14 @@ use std::io::{self, Read, Write};
 use std::path::Path;
 use std::process::Command;
 use std::sync::mpsc::{self, Receiver, TryRecvError};
+use std::sync::Arc;
 use std::thread;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
 use vt100::Parser as VtParser;
 
 const TIMELINE_PAGE_STEP: usize = 500;
-const TEXT_REPLAY_TICK_MS: u64 = 60;
+const TEXT_REPLAY_TICK_MS: u64 = 120;
 const TERMINAL_REPLAY_TICK_MS: u64 = TEXT_REPLAY_TICK_MS / 3;
 const TERMINAL_REPLAY_END_PADDING_ROWS: u16 = 20;
 const MAX_SESSION_DURATION_SECONDS: i64 = 24 * 60 * 60;
@@ -51,6 +52,8 @@ const REPLAY_LOADING_FRAMES: [&str; 4] = ["[-]", "[\\]", "[|]", "[/]"];
 const TIMELINE_ORDINAL_WIDTH: u16 = 6;
 const TIMELINE_EVENT_TYPE_WIDTH: usize = 18;
 const TIMELINE_COLUMN_SPACING: u16 = 1;
+const IDLE_POLL_MS: u64 = 1_000;
+const REPLAY_LOADING_POLL_MS: u64 = 120;
 
 #[derive(Debug, Parser, Clone)]
 #[command(name = "agensic-provenance-tui sessions")]
@@ -379,14 +382,16 @@ struct DetailState {
     replay_fullscreen: bool,
     timeline_index: usize,
     text_replay_chunks: Vec<String>,
+    text_replay_cached_step: Option<usize>,
+    text_replay_cached_value: String,
     replay_timeline_indices: Vec<usize>,
     transcript_chunks: Vec<TranscriptChunk>,
     checkpoint_records: Vec<CheckpointRecord>,
-    terminal_replay_frames: Vec<TerminalReplayFrame>,
-    terminal_replay_cache: HashMap<TerminalReplayCacheKey, Vec<TerminalReplayFrame>>,
+    terminal_replay_frames: Arc<Vec<TerminalReplayFrame>>,
+    terminal_replay_cache: HashMap<TerminalReplayCacheKey, Arc<Vec<TerminalReplayFrame>>>,
     terminal_cache_key: Option<TerminalReplayCacheKey>,
     pending_replay_cache_key: Option<TerminalReplayCacheKey>,
-    replay_cache_rx: Option<Receiver<(TerminalReplayCacheKey, Vec<TerminalReplayFrame>)>>,
+    replay_cache_rx: Option<Receiver<(TerminalReplayCacheKey, Arc<Vec<TerminalReplayFrame>>)>>,
     replay_notice: Option<String>,
     replay_loading: bool,
     replay_step: usize,
@@ -438,10 +443,12 @@ impl DetailState {
             replay_fullscreen: false,
             timeline_index: initial_timeline_index,
             text_replay_chunks,
+            text_replay_cached_step: None,
+            text_replay_cached_value: String::new(),
             replay_timeline_indices,
             transcript_chunks,
             checkpoint_records,
-            terminal_replay_frames: Vec::new(),
+            terminal_replay_frames: Arc::new(Vec::new()),
             terminal_replay_cache: HashMap::new(),
             terminal_cache_key: None,
             pending_replay_cache_key: None,
@@ -513,16 +520,16 @@ impl DetailState {
             } else {
                 build_terminal_replay_frames_from_checkpoints(&checkpoint_records)
             };
-            let _ = tx.send((cache_key, frames));
+            let _ = tx.send((cache_key, Arc::new(frames)));
         });
         self.pending_replay_cache_key = Some(cache_key);
         self.replay_cache_rx = Some(rx);
         self.replay_loading = true;
     }
 
-    fn poll_terminal_replay_cache(&mut self) {
+    fn poll_terminal_replay_cache(&mut self) -> bool {
         let Some(rx) = self.replay_cache_rx.as_ref() else {
-            return;
+            return false;
         };
         match rx.try_recv() {
             Ok((cache_key, frames)) => {
@@ -530,40 +537,57 @@ impl DetailState {
                 self.pending_replay_cache_key = None;
                 self.replay_cache_rx = None;
                 self.replay_loading = false;
+                true
             }
-            Err(TryRecvError::Empty) => {}
+            Err(TryRecvError::Empty) => false,
             Err(TryRecvError::Disconnected) => {
                 self.pending_replay_cache_key = None;
                 self.replay_cache_rx = None;
                 self.replay_loading = false;
+                true
             }
         }
     }
 
-    fn ensure_terminal_replay_cache(&mut self) {
-        self.poll_terminal_replay_cache();
+    fn ensure_terminal_replay_cache(&mut self) -> bool {
+        let mut changed = self.poll_terminal_replay_cache();
         let Some((cache_key, rows, cols)) = self.current_terminal_cache_request() else {
-            return;
+            return changed;
         };
         if let Some(cached) = self.terminal_replay_cache.get(&cache_key) {
-            self.terminal_replay_frames = cached.clone();
-            self.terminal_cache_key = Some(cache_key);
-            self.replay_loading = false;
+            if !Arc::ptr_eq(&self.terminal_replay_frames, cached) {
+                self.terminal_replay_frames = Arc::clone(cached);
+                changed = true;
+            }
+            if self.terminal_cache_key != Some(cache_key) {
+                self.terminal_cache_key = Some(cache_key);
+                changed = true;
+            }
+            if self.replay_loading {
+                self.replay_loading = false;
+                changed = true;
+            }
             if self.replay_mode == ReplayMode::Terminal && self.terminal_replay_frames.is_empty() {
                 self.replay_mode = ReplayMode::Text;
+                changed = true;
                 if self.replay_notice.is_none() {
                     self.replay_notice = Some(terminal_replay_notice(
                         &self.session.transcript_path,
                         !self.text_replay_chunks.is_empty(),
                     ));
+                    changed = true;
                 }
             }
-            return;
+            return changed;
         }
         if self.pending_replay_cache_key != Some(cache_key) {
             self.spawn_terminal_replay_cache_build(cache_key, rows, cols);
+            changed = true;
         }
-        self.terminal_cache_key = None;
+        if self.terminal_cache_key.take().is_some() {
+            changed = true;
+        }
+        changed
     }
 
     fn replay_loading_for_active_view(&self) -> bool {
@@ -573,7 +597,7 @@ impl DetailState {
     }
 
     fn clear_terminal_replay_caches(&mut self) {
-        self.terminal_replay_frames.clear();
+        self.terminal_replay_frames = Arc::new(Vec::new());
         self.terminal_replay_cache.clear();
         self.terminal_cache_key = None;
         self.pending_replay_cache_key = None;
@@ -595,8 +619,8 @@ impl DetailState {
                 .terminal_replay_frames[self.replay_step]
                 .plain_text
                 .clone(),
-            ReplayMode::Text => self.text_replay_chunks[..=self.replay_step].join(""),
-            ReplayMode::Terminal => self.text_replay_chunks[..=self.replay_step].join(""),
+            ReplayMode::Text => self.text_replay_text_for_step(self.replay_step),
+            ReplayMode::Terminal => self.text_replay_text_for_step(self.replay_step),
         };
         if self.replay_follow_end {
             self.replay_scroll = u16::MAX;
@@ -616,6 +640,29 @@ impl DetailState {
             self.replay_scroll = 0;
         }
         self.replay_scroll_x = 0;
+    }
+
+    fn text_replay_text_for_step(&mut self, step: usize) -> String {
+        if self.text_replay_chunks.is_empty() {
+            self.text_replay_cached_step = None;
+            self.text_replay_cached_value.clear();
+            return String::new();
+        }
+        let step = step.min(self.text_replay_chunks.len().saturating_sub(1));
+        if self.text_replay_cached_step == Some(step) {
+            return self.text_replay_cached_value.clone();
+        }
+        if let Some(cached_step) = self.text_replay_cached_step {
+            if step == cached_step + 1 {
+                self.text_replay_cached_value
+                    .push_str(&self.text_replay_chunks[step]);
+                self.text_replay_cached_step = Some(step);
+                return self.text_replay_cached_value.clone();
+            }
+        }
+        self.text_replay_cached_value = self.text_replay_chunks[..=step].join("");
+        self.text_replay_cached_step = Some(step);
+        self.text_replay_cached_value.clone()
     }
 
     fn text_replay_step_for_timeline(&self, timeline_index: usize) -> Option<usize> {
@@ -681,24 +728,27 @@ impl DetailState {
         }
     }
 
-    fn advance_autoplay(&mut self) {
-        self.ensure_terminal_replay_cache();
+    fn advance_autoplay(&mut self) -> bool {
+        let mut changed = false;
         if !self.autoplay || self.timeline_entries.is_empty() {
-            return;
+            return changed;
         }
         let tick_ms = match self.replay_mode {
             ReplayMode::Terminal => TERMINAL_REPLAY_TICK_MS,
             ReplayMode::Text => TEXT_REPLAY_TICK_MS,
         };
         if self.last_tick.elapsed() < Duration::from_millis(tick_ms) {
-            return;
+            return changed;
         }
         self.last_tick = Instant::now();
         if self.timeline_index + 1 < self.timeline_entries.len() {
             self.move_selection(1);
+            changed = true;
         } else {
             self.autoplay = false;
+            changed = true;
         }
+        changed
     }
 
     fn set_timeline_index(&mut self, index: usize) {
@@ -864,6 +914,55 @@ impl CopyFeedback {
 }
 
 impl App {
+    fn next_poll_timeout(&self) -> Duration {
+        let now = Instant::now();
+        let mut timeout = Duration::from_millis(IDLE_POLL_MS);
+        if let Some(detail) = self.detail.as_ref() {
+            if detail.autoplay {
+                let tick_ms = match detail.replay_mode {
+                    ReplayMode::Terminal => TERMINAL_REPLAY_TICK_MS,
+                    ReplayMode::Text => TEXT_REPLAY_TICK_MS,
+                };
+                let next_tick = detail.last_tick + Duration::from_millis(tick_ms);
+                timeout = timeout.min(
+                    next_tick
+                        .checked_duration_since(now)
+                        .unwrap_or(Duration::from_millis(0)),
+                );
+            }
+            if detail.replay_loading {
+                timeout = timeout.min(Duration::from_millis(REPLAY_LOADING_POLL_MS));
+            }
+        }
+        if let Some(remaining) = self
+            .flash_status
+            .as_ref()
+            .and_then(crate::FlashStatus::remaining_duration)
+        {
+            timeout = timeout.min(remaining);
+        }
+        if let Some(remaining) = self
+            .copy_feedback
+            .as_ref()
+            .and_then(|feedback| feedback.expires_at.checked_duration_since(now))
+        {
+            timeout = timeout.min(remaining);
+        }
+        timeout
+    }
+
+    fn has_timed_redraws(&self) -> bool {
+        self.detail
+            .as_ref()
+            .map(|detail| detail.replay_loading)
+            .unwrap_or(false)
+            || self
+                .flash_status
+                .as_ref()
+                .is_some_and(|status| status.active_message().is_some())
+            || self.active_copy_feedback().is_some()
+    }
+
     fn format_http_error(response: reqwest::blocking::Response, context: &str) -> String {
         let status = response.status();
         let detail = response
@@ -1384,32 +1483,47 @@ fn run(client: Client, args: SessionsArgs) -> Result<(), String> {
     let mut terminal =
         Terminal::new(backend).map_err(|e| format!("terminal init failed: {}", e))?;
     let mut app = App::new(client, args)?;
+    let mut needs_draw = true;
 
     loop {
+        let timeout = app.next_poll_timeout();
+        let timed_redraws_active = app.has_timed_redraws();
+        let poll_timed_out =
+            !event::poll(timeout).map_err(|e| format!("poll failed: {}", e))?;
+        let mut state_changed = false;
         if app.needs_terminal_clear {
             terminal
                 .clear()
                 .map_err(|e| format!("terminal clear failed: {}", e))?;
             app.needs_terminal_clear = false;
+            state_changed = true;
         }
         if let Some(detail) = app.detail.as_mut() {
-            detail.ensure_terminal_replay_cache();
-            detail.advance_autoplay();
+            state_changed |= detail.ensure_terminal_replay_cache();
+            state_changed |= detail.advance_autoplay();
         }
-        terminal
-            .draw(|frame| draw_ui(frame, &app))
-            .map_err(|e| format!("draw failed: {}", e))?;
-
-        if event::poll(Duration::from_millis(50)).map_err(|e| format!("poll failed: {}", e))? {
+        if !poll_timed_out {
             match event::read().map_err(|e| format!("read failed: {}", e))? {
                 Event::Key(key) if key.kind == KeyEventKind::Press => {
                     if handle_key(&mut app, key)? {
                         break;
                     }
+                    state_changed = true;
                 }
-                Event::Mouse(mouse) => handle_mouse(&mut app, mouse),
+                Event::Mouse(mouse) => {
+                    handle_mouse(&mut app, mouse);
+                    state_changed = true;
+                }
                 _ => {}
             }
+        } else if timed_redraws_active {
+            state_changed = true;
+        }
+        if needs_draw || state_changed {
+            terminal
+                .draw(|frame| draw_ui(frame, &app))
+                .map_err(|e| format!("draw failed: {}", e))?;
+            needs_draw = false;
         }
     }
 
@@ -1725,7 +1839,6 @@ fn draw_ui(frame: &mut ratatui::Frame<'_>, app: &App) {
 
 fn draw_browser(frame: &mut ratatui::Frame<'_>, app: &App) {
     let area = frame.area();
-    frame.render_widget(Clear, area);
     let chunks = Layout::default()
         .direction(Direction::Vertical)
         .constraints([
@@ -1830,7 +1943,6 @@ fn draw_browser(frame: &mut ratatui::Frame<'_>, app: &App) {
 
 fn draw_detail(frame: &mut ratatui::Frame<'_>, app: &App, detail: &DetailState) {
     let area = frame.area();
-    frame.render_widget(Clear, area);
     let Some(layout) = session_detail_layout_in_area(detail, area) else {
         return;
     };
@@ -2280,6 +2392,7 @@ fn build_replay(app: &App, detail: &DetailState, area: Rect) -> Paragraph<'stati
     ]);
     let (text, scroll_y, scroll_x) = match detail.replay_mode {
         ReplayMode::Terminal => {
+            let visible_rows = area.height.saturating_sub(2).max(1) as usize;
             let lines = if detail.replay_loading_for_active_view() {
                 vec![Line::from(Span::styled(
                     "Loading replay cache...",
@@ -2290,15 +2403,26 @@ fn build_replay(app: &App, detail: &DetailState, area: Rect) -> Paragraph<'stati
                     .terminal_replay_frames
                     .get(detail.replay_step)
                     .map(|frame| {
-                        let mut lines = frame.lines.clone();
                         let padding_rows = terminal_replay_end_padding(
                             detail.replay_step,
                             detail.terminal_replay_frames.len(),
                         );
-                        if padding_rows > 0 {
+                        let scroll = if padding_rows > 0 {
+                            terminal_replay_scroll(frame, area, padding_rows)
+                        } else {
+                            0
+                        } as usize;
+                        let total_rows = frame.lines.len().saturating_add(padding_rows as usize);
+                        let start = scroll.min(total_rows);
+                        let end = start.saturating_add(visible_rows).min(total_rows);
+                        let visible_frame_end = end.min(frame.lines.len());
+                        let mut lines = frame.lines[start.min(frame.lines.len())..visible_frame_end]
+                            .to_vec();
+                        let blank_rows = end.saturating_sub(frame.lines.len()).min(visible_rows);
+                        if blank_rows > 0 {
                             lines.extend(
                                 std::iter::repeat_with(|| Line::from(""))
-                                    .take(padding_rows as usize),
+                                    .take(blank_rows),
                             );
                         }
                         lines
@@ -2310,25 +2434,6 @@ fn build_replay(app: &App, detail: &DetailState, area: Rect) -> Paragraph<'stati
             } else {
                 vec![Line::from("")]
             };
-            let scroll = if detail.replay_visible {
-                detail
-                    .terminal_replay_frames
-                    .get(detail.replay_step)
-                    .map(|frame| {
-                        let padding_rows = terminal_replay_end_padding(
-                            detail.replay_step,
-                            detail.terminal_replay_frames.len(),
-                        );
-                        if padding_rows > 0 {
-                            terminal_replay_scroll(frame, area, padding_rows)
-                        } else {
-                            0
-                        }
-                    })
-                    .unwrap_or(0)
-            } else {
-                0
-            };
             let scroll_x = active_frame
                 .map(|frame| {
                     detail
@@ -2336,7 +2441,7 @@ fn build_replay(app: &App, detail: &DetailState, area: Rect) -> Paragraph<'stati
                         .min(terminal_replay_max_scroll_x(frame, area))
                 })
                 .unwrap_or(0);
-            (Text::from(lines), scroll, scroll_x)
+            (Text::from(lines), 0, scroll_x)
         }
         ReplayMode::Text => {
             let collapsed = if detail.replay_visible {
@@ -4477,6 +4582,7 @@ mod tests {
         env, fs,
         io::{Read, Write},
         net::TcpListener,
+        sync::Arc,
         thread,
         time::{Duration, Instant},
     };
@@ -5009,16 +5115,18 @@ mod tests {
             replay_fullscreen: false,
             timeline_index: 0,
             text_replay_chunks: Vec::new(),
+            text_replay_cached_step: None,
+            text_replay_cached_value: String::new(),
             replay_timeline_indices: vec![1],
             transcript_chunks: Vec::new(),
             checkpoint_records: Vec::new(),
-            terminal_replay_frames: vec![TerminalReplayFrame {
+            terminal_replay_frames: Arc::new(vec![TerminalReplayFrame {
                 plain_text: "/tmp".to_string(),
                 lines: vec![Line::from("/tmp")],
                 source_seq_end: Some(2),
                 rows: 1,
                 cols: 4,
-            }],
+            }]),
             terminal_replay_cache: HashMap::new(),
             terminal_cache_key: None,
             pending_replay_cache_key: None,
@@ -5767,16 +5875,18 @@ mod tests {
             replay_fullscreen: false,
             timeline_index: 2,
             text_replay_chunks: Vec::new(),
+            text_replay_cached_step: None,
+            text_replay_cached_value: String::new(),
             replay_timeline_indices: vec![1],
             transcript_chunks: Vec::new(),
             checkpoint_records: Vec::new(),
-            terminal_replay_frames: vec![TerminalReplayFrame {
+            terminal_replay_frames: Arc::new(vec![TerminalReplayFrame {
                 plain_text: "/tmp".to_string(),
                 lines: vec![Line::from("/tmp")],
                 source_seq_end: Some(2),
                 rows: 1,
                 cols: 4,
-            }],
+            }]),
             terminal_replay_cache: HashMap::new(),
             terminal_cache_key: None,
             pending_replay_cache_key: None,

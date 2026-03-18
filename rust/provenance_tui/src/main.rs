@@ -65,6 +65,10 @@ impl FlashStatus {
     pub(crate) fn active_message(&self) -> Option<&str> {
         (Instant::now() <= self.expires_at).then_some(self.message.as_str())
     }
+
+    pub(crate) fn remaining_duration(&self) -> Option<Duration> {
+        self.expires_at.checked_duration_since(Instant::now())
+    }
 }
 
 pub(crate) fn agensic_title_style() -> Style {
