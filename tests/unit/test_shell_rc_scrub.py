@@ -16,9 +16,11 @@ class ShellRcScrubTests(unittest.TestCase):
                         "export PATH=\"$HOME/.agensic/bin:$PATH\"",
                         "alias agensic='python3 /Users/test/.agensic/cli.py'",
                         "source /Users/test/.agensic/agensic.zsh",
+                        "source /Users/test/.agensic/agensic.bash",
                         cli_app.SHELL_RC_BLOCK_START,
                         "export PATH=\"/Users/test/.agensic/bin:$PATH\"",
                         "source \"/Users/test/.agensic/agensic.zsh\"",
+                        "source \"/Users/test/.agensic/agensic.bash\"",
                         cli_app.SHELL_RC_BLOCK_END,
                         "export KEEP_ME=1",
                         "",
@@ -34,6 +36,7 @@ class ShellRcScrubTests(unittest.TestCase):
         self.assertNotIn("alias agensic=", updated)
         self.assertNotIn(".agensic/bin", updated)
         self.assertNotIn("agensic.zsh", updated)
+        self.assertNotIn("agensic.bash", updated)
         self.assertIn("export KEEP_ME=1", updated)
 
 

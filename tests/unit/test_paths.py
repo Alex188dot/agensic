@@ -26,6 +26,10 @@ class AppPathsTests(unittest.TestCase):
         self.assertEqual(app_paths.shell_support_dir, "/tmp/xdg-state/agensic/install/shell")
         self.assertEqual(app_paths.shell_integration_path, "/tmp/xdg-state/agensic/install/agensic.zsh")
         self.assertEqual(
+            app_paths.shell_bash_integration_path,
+            "/tmp/xdg-state/agensic/install/agensic.bash",
+        )
+        self.assertEqual(
             app_paths.shell_shared_helpers_path,
             "/tmp/xdg-state/agensic/install/shell/agensic_shared.sh",
         )

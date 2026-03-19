@@ -27,6 +27,7 @@ mkdir -p "$USER_BIN_DIR"
 
 # 2. Copy shell integration assets
 cp agensic.zsh "$INSTALL_DIR/"
+cp agensic.bash "$INSTALL_DIR/"
 cp shell_client.py "$INSTALL_DIR/"
 mkdir -p "$INSTALL_DIR/shell"
 cp shell/agensic_shared.sh "$INSTALL_DIR/shell/"
@@ -208,6 +209,7 @@ sed -i.bak \
   -e '\|export PATH=".*\.agensic/bin:\$PATH"|d' \
   -e "\|source .*\\.${LEGACY_INSTALL_NAME}/${LEGACY_INSTALL_NAME}\\.zsh|d" \
   -e "\|source .*\\.agensic/agensic\\.zsh|d" \
+  -e "\|source .*\\.agensic/agensic\\.bash|d" \
   "$SHELL_RC"
 
 # Keep PATH management out of .zshrc; scrub legacy PATH lines there too.

@@ -47,6 +47,7 @@ class AppPaths:
     plugin_log_file: str
     shell_support_dir: str
     shell_integration_path: str
+    shell_bash_integration_path: str
     shell_shared_helpers_path: str
     shell_client_path: str
     runtime_python_path: str
@@ -111,6 +112,7 @@ def get_app_paths() -> AppPaths:
         plugin_log_file=os.path.join(state_dir, "plugin.log"),
         shell_support_dir=shell_support_dir,
         shell_integration_path=os.path.join(install_dir, "agensic.zsh"),
+        shell_bash_integration_path=os.path.join(install_dir, "agensic.bash"),
         shell_shared_helpers_path=os.path.join(shell_support_dir, "agensic_shared.sh"),
         shell_client_path=os.path.join(install_dir, "shell_client.py"),
         runtime_python_path=os.path.join(install_dir, ".venv", "bin", "python"),
@@ -161,6 +163,7 @@ def migrate_legacy_layout() -> None:
         (legacy_root / "agent_registry.local.json", Path(APP_PATHS.agent_registry_local_override_path)),
         (legacy_root / "last_indexed_line", Path(APP_PATHS.last_indexed_path)),
         (legacy_root / "agensic.zsh", Path(APP_PATHS.shell_integration_path)),
+        (legacy_root / "agensic.bash", Path(APP_PATHS.shell_bash_integration_path)),
         (legacy_root / "shell" / "agensic_shared.sh", Path(APP_PATHS.shell_shared_helpers_path)),
         (legacy_root / "shell_client.py", Path(APP_PATHS.shell_client_path)),
     )
