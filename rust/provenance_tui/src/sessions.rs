@@ -43,6 +43,7 @@ const TIMELINE_PAGE_STEP: usize = 500;
 const TEXT_REPLAY_TICK_MS: u64 = 120;
 const TERMINAL_REPLAY_TICK_MS: u64 = TEXT_REPLAY_TICK_MS / 3;
 const TERMINAL_REPLAY_END_PADDING_ROWS: u16 = 20;
+const TERMINAL_REPLAY_CURSOR_BOTTOM_PADDING_ROWS: u16 = 2;
 const MAX_SESSION_DURATION_SECONDS: i64 = 24 * 60 * 60;
 const SESSION_COPY_BUTTON: &str = "[ Copy ]";
 const SESSION_COPIED_BUTTON: &str = "[   ✓   ]";
@@ -847,6 +848,8 @@ struct TerminalReplayFrame {
     plain_text: String,
     lines: Vec<Line<'static>>,
     source_seq_end: Option<i64>,
+    cursor_row: u16,
+    last_content_row: u16,
     rows: u16,
     cols: u16,
 }
@@ -2407,11 +2410,7 @@ fn build_replay(app: &App, detail: &DetailState, area: Rect) -> Paragraph<'stati
                             detail.replay_step,
                             detail.terminal_replay_frames.len(),
                         );
-                        let scroll = if padding_rows > 0 {
-                            terminal_replay_scroll(frame, area, padding_rows)
-                        } else {
-                            0
-                        } as usize;
+                        let scroll = terminal_replay_scroll(frame, area, padding_rows) as usize;
                         let total_rows = frame.lines.len().saturating_add(padding_rows as usize);
                         let start = scroll.min(total_rows);
                         let end = start.saturating_add(visible_rows).min(total_rows);
@@ -3323,12 +3322,15 @@ fn render_terminal_frame(
     source_seq_end: Option<i64>,
 ) -> TerminalReplayFrame {
     let plain_text = screen.rows(0, cols.max(1)).collect::<Vec<_>>().join("\n");
+    let (cursor_row, _) = screen.cursor_position();
     let mut lines = Vec::with_capacity(rows as usize);
+    let mut last_content_row = 0u16;
     for row in 0..rows.max(1) {
         let mut spans: Vec<Span<'static>> = Vec::new();
         let mut current_style: Option<Style> = None;
         let mut buffer = String::new();
         let mut col = 0u16;
+        let mut row_has_content = false;
         while col < cols.max(1) {
             let cell = screen.cell(row, col);
             if cell.is_some_and(vt100::Cell::is_wide_continuation) {
@@ -3342,7 +3344,10 @@ fn render_terminal_frame(
             };
             let style = cell.map(terminal_cell_style).unwrap_or_default();
             let text = match cell {
-                Some(cell) if cell.has_contents() => cell.contents(),
+                Some(cell) if cell.has_contents() => {
+                    row_has_content = true;
+                    cell.contents()
+                }
                 _ => " ".to_string(),
             };
             if current_style == Some(style) {
@@ -3356,11 +3361,16 @@ fn render_terminal_frame(
         }
         flush_terminal_span(&mut spans, &mut buffer, current_style);
         lines.push(Line::from(spans));
+        if row_has_content {
+            last_content_row = row;
+        }
     }
     TerminalReplayFrame {
         plain_text,
         lines,
         source_seq_end,
+        cursor_row,
+        last_content_row,
         rows,
         cols,
     }
@@ -3855,9 +3865,25 @@ fn terminal_replay_end_padding(frame_index: usize, total_frames: usize) -> u16 {
 
 fn terminal_replay_scroll(frame: &TerminalReplayFrame, area: Rect, padding_rows: u16) -> u16 {
     let visible_lines = area.height.saturating_sub(2).max(1);
-    frame
-        .rows
-        .saturating_add(padding_rows)
+    let content_rows = frame
+        .lines
+        .len()
+        .max(frame.rows as usize)
+        .min(u16::MAX as usize) as u16;
+    let total_rows = content_rows.saturating_add(padding_rows);
+    let cursor_anchor = frame
+        .cursor_row
+        .min(content_rows.saturating_sub(1))
+        .saturating_add(TERMINAL_REPLAY_CURSOR_BOTTOM_PADDING_ROWS);
+    let content_anchor = frame
+        .last_content_row
+        .min(content_rows.saturating_sub(1))
+        .saturating_add(TERMINAL_REPLAY_CURSOR_BOTTOM_PADDING_ROWS)
+        .min(total_rows.saturating_sub(1));
+    let anchor_row = cursor_anchor.max(content_anchor).min(total_rows.saturating_sub(1));
+    anchor_row
+        .saturating_add(1)
+        .max(visible_lines)
         .saturating_sub(visible_lines)
 }
 
@@ -4900,12 +4926,14 @@ mod tests {
             plain_text: String::new(),
             lines: vec![Line::from(""); 30],
             source_seq_end: Some(1),
+            cursor_row: 29,
+            last_content_row: 29,
             rows: 30,
             cols: 40,
         };
 
         assert_eq!(terminal_replay_scroll(&frame, area, 0), 20);
-        assert_eq!(terminal_replay_scroll(&frame, area, 20), 40);
+        assert_eq!(terminal_replay_scroll(&frame, area, 20), 22);
     }
 
     #[test]
@@ -4915,6 +4943,8 @@ mod tests {
             plain_text: String::new(),
             lines: vec![Line::from(""); 10],
             source_seq_end: Some(1),
+            cursor_row: 9,
+            last_content_row: 9,
             rows: 10,
             cols: 60,
         };
@@ -4923,24 +4953,53 @@ mod tests {
     }
 
     #[test]
-    fn terminal_replay_non_final_frames_stay_top_aligned() {
+    fn terminal_replay_non_final_frames_follow_cursor_when_viewport_is_shorter() {
         let area = Rect::new(0, 0, 40, 12);
         let frame = TerminalReplayFrame {
             plain_text: String::new(),
             lines: vec![Line::from(""); 30],
             source_seq_end: Some(1),
+            cursor_row: 29,
+            last_content_row: 29,
             rows: 30,
             cols: 40,
         };
 
         let padding_rows = terminal_replay_end_padding(1, 3);
         assert_eq!(padding_rows, 0);
-        let scroll = if padding_rows > 0 {
-            terminal_replay_scroll(&frame, area, padding_rows)
-        } else {
-            0
+        assert_eq!(terminal_replay_scroll(&frame, area, padding_rows), 20);
+    }
+
+    #[test]
+    fn terminal_replay_keeps_top_aligned_when_cursor_is_near_top() {
+        let area = Rect::new(0, 0, 40, 12);
+        let frame = TerminalReplayFrame {
+            plain_text: String::new(),
+            lines: vec![Line::from(""); 30],
+            source_seq_end: Some(1),
+            cursor_row: 2,
+            last_content_row: 2,
+            rows: 30,
+            cols: 40,
         };
-        assert_eq!(scroll, 0);
+
+        assert_eq!(terminal_replay_scroll(&frame, area, 0), 0);
+    }
+
+    #[test]
+    fn terminal_replay_follows_lower_content_when_cursor_stays_above_it() {
+        let area = Rect::new(0, 0, 40, 12);
+        let frame = TerminalReplayFrame {
+            plain_text: String::new(),
+            lines: vec![Line::from(""); 30],
+            source_seq_end: Some(1),
+            cursor_row: 5,
+            last_content_row: 29,
+            rows: 30,
+            cols: 40,
+        };
+
+        assert_eq!(terminal_replay_scroll(&frame, area, 0), 20);
     }
 
     #[test]
@@ -5124,6 +5183,8 @@ mod tests {
                 plain_text: "/tmp".to_string(),
                 lines: vec![Line::from("/tmp")],
                 source_seq_end: Some(2),
+                cursor_row: 0,
+                last_content_row: 0,
                 rows: 1,
                 cols: 4,
             }]),
@@ -5884,6 +5945,8 @@ mod tests {
                 plain_text: "/tmp".to_string(),
                 lines: vec![Line::from("/tmp")],
                 source_seq_end: Some(2),
+                cursor_row: 0,
+                last_content_row: 0,
                 rows: 1,
                 cols: 4,
             }]),
