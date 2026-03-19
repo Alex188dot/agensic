@@ -92,6 +92,27 @@ _agensic_bash_log() {
     chmod 600 "$AGENSIC_PLUGIN_LOG" 2>/dev/null || true
 }
 
+_agensic_bash_last_history_entry() {
+    local last=""
+    last="$(builtin fc -ln -1 2>/dev/null)" || return 1
+    last="${last#"${last%%[![:space:]]*}"}"
+    last="${last%"${last##*[![:space:]]}"}"
+    if [[ -z "$last" ]]; then
+        return 1
+    fi
+    printf '%s\n' "$last"
+}
+
+_agensic_bash_should_ignore_debug_command() {
+    local command="${1:-}"
+    case "$command" in
+        _agensic_*|ble-*|ble/*|__vte_prompt_command|history*|fc*|curl*|disown*|local\ *|return\ *|'[['*|']]'*)
+            return 0
+            ;;
+    esac
+    return 1
+}
+
 _agensic_bash_get_auth_mtime() {
     if [[ ! -f "$AGENSIC_AUTH_PATH" ]]; then
         printf '%s\n' ""
@@ -833,8 +854,15 @@ _agensic_bash_preexec_trap() {
     if [[ "${AGENSIC_BASH_AT_PROMPT:-0}" != "1" ]]; then
         return 0
     fi
-    local command="${BASH_COMMAND:-}"
+    local command=""
+    command="$(_agensic_bash_last_history_entry)"
     if [[ -z "$command" ]]; then
+        command="${BASH_COMMAND:-}"
+    fi
+    if [[ -z "$command" ]]; then
+        return 0
+    fi
+    if _agensic_bash_should_ignore_debug_command "$command"; then
         return 0
     fi
     AGENSIC_BASH_AT_PROMPT=0
@@ -910,7 +938,9 @@ _agensic_source_ble_if_needed() {
     local ble_path=""
     ble_path="$(_agensic_find_ble_sh)" || return 1
     local ble_source_rc=0
-    source "$ble_path" --attach=none 2>/dev/null || ble_source_rc=$?
+    # ble.sh initialization relies on terminal I/O during source. Redirecting
+    # stderr can leave BLE_VERSION unset and force a readline fallback.
+    source "$ble_path" --attach=none || ble_source_rc=$?
     if [[ -z "${BLE_VERSION:-}" ]]; then
         return 1
     fi

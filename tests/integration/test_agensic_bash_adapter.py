@@ -246,6 +246,20 @@ class AgensicBashAdapterTests(unittest.TestCase):
         self.assertEqual(result.returncode, 0, msg=result.stderr)
         self.assertEqual(result.stdout.strip(), "atus|git status")
 
+    def test_preexec_prefers_history_entry_over_bash_command_internal(self):
+        result = self._run_bash(
+            """
+            history -s -- 'agensic start'
+            AGENSIC_BASH_AT_PROMPT=1
+            BASH_COMMAND='[[ -n "${PROMPT_COMMAND:-}" ]]'
+            _agensic_bash_preexec_trap
+            printf '%s\\n' "${AGENSIC_LAST_EXECUTED_CMD}"
+            """
+        )
+
+        self.assertEqual(result.returncode, 0, msg=result.stderr)
+        self.assertEqual(result.stdout.strip(), "agensic start")
+
     def test_after_self_insert_fetches_when_pool_is_empty(self):
         with tempfile.TemporaryDirectory() as tmpdir:
             ble_path = Path(tmpdir) / "ble.sh"
