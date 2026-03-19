@@ -3,8 +3,14 @@ import unittest
 from agensic.utils.shell import (
     command_matches_pattern,
     extract_executable_token,
+    extract_git_subcommand,
+    history_clears_state,
+    is_blocked_command,
+    is_git_destructive_subcommand,
     normalize_command_pattern,
     sanitize_patterns,
+    tokenize_command,
+    token_has_short_flag,
 )
 
 
@@ -26,6 +32,38 @@ class ShellUtilsTests(unittest.TestCase):
         self.assertTrue(command_matches_pattern("docker ps", patterns))
         self.assertTrue(command_matches_pattern("kubectl get pods", patterns))
         self.assertFalse(command_matches_pattern("python app.py", patterns))
+
+    def test_token_has_short_flag(self):
+        self.assertTrue(token_has_short_flag("-ac", "c"))
+        self.assertTrue(token_has_short_flag("-f", "f"))
+        self.assertFalse(token_has_short_flag("--force", "f"))
+
+    def test_tokenize_command(self):
+        self.assertEqual(tokenize_command("git status"), ["git", "status"])
+        self.assertEqual(tokenize_command(""), [])
+
+    def test_history_clears_state(self):
+        self.assertTrue(history_clears_state(["-ac"]))
+        self.assertTrue(history_clears_state(["--clear"]))
+        self.assertFalse(history_clears_state(["20"]))
+
+    def test_extract_git_subcommand(self):
+        self.assertEqual(
+            extract_git_subcommand(["-C", "repo", "reset", "--hard", "HEAD~1"]),
+            ("reset", ["--hard", "head~1"]),
+        )
+
+    def test_is_git_destructive_subcommand(self):
+        self.assertTrue(is_git_destructive_subcommand(["reset", "--hard", "HEAD~1"]))
+        self.assertTrue(is_git_destructive_subcommand(["clean", "-fdx"]))
+        self.assertFalse(is_git_destructive_subcommand(["clean", "-n"]))
+
+    def test_is_blocked_command(self):
+        self.assertTrue(is_blocked_command("rm -rf /tmp/demo"))
+        self.assertTrue(is_blocked_command("history -c"))
+        self.assertTrue(is_blocked_command("git clean -fdx"))
+        self.assertFalse(is_blocked_command("git reset --soft HEAD~1"))
+        self.assertFalse(is_blocked_command("echo hello"))
 
 
 if __name__ == "__main__":

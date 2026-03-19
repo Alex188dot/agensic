@@ -19,6 +19,13 @@ from rapidfuzz.distance import Levenshtein
 from sentence_transformers import SentenceTransformer
 from agensic.paths import APP_PATHS, ensure_app_layout, migrate_legacy_layout
 from agensic.utils import atomic_write_json_private, ensure_private_dir, harden_private_tree
+from agensic.utils.shell import (
+    extract_git_subcommand,
+    history_clears_state,
+    is_blocked_command as shell_is_blocked_command,
+    is_git_destructive_subcommand,
+    token_has_short_flag,
+)
 
 # Tell HuggingFace to avoid implicit network checks by default.
 os.environ["HF_HUB_OFFLINE"] = "1"
@@ -728,110 +735,23 @@ class CommandVectorDB:
 
     @staticmethod
     def _token_has_short_flag(token: str, flag: str) -> bool:
-        value = (token or "").strip().lower()
-        short = (flag or "").strip().lower()
-        if not value or not short:
-            return False
-        if value.startswith("--"):
-            return False
-        if value == f"-{short}":
-            return True
-        if value.startswith("-") and len(value) > 2:
-            return short in value[1:]
-        return False
+        return token_has_short_flag(token, flag)
 
     @classmethod
     def _history_clears_state(cls, args: List[str]) -> bool:
-        for raw in args:
-            token = (raw or "").strip().lower()
-            if not token:
-                continue
-            if token == "--clear":
-                return True
-            if cls._token_has_short_flag(token, "c"):
-                return True
-        return False
+        return history_clears_state(args)
 
     @classmethod
     def _extract_git_subcommand(cls, args: List[str]) -> Tuple[str, List[str]]:
-        i = 0
-        n = len(args)
-        while i < n:
-            token = (args[i] or "").strip()
-            if not token:
-                i += 1
-                continue
-
-            if token == "--":
-                i += 1
-                break
-
-            if token in cls.GIT_GLOBAL_OPTIONS_WITH_VALUE:
-                i += 2
-                continue
-
-            if token.startswith(("--exec-path=", "--git-dir=", "--work-tree=", "--namespace=", "--super-prefix=", "--config-env=")):
-                i += 1
-                continue
-
-            # Handles compact forms like -Cpath or -ckey=value.
-            if token.startswith("-C") and token != "-C":
-                i += 1
-                continue
-            if token.startswith("-c") and token != "-c":
-                i += 1
-                continue
-
-            if token.startswith("-"):
-                i += 1
-                continue
-
-            subcommand = token.lower()
-            remaining = []
-            for value in args[i + 1:]:
-                clean = (value or "").strip().lower()
-                if clean:
-                    remaining.append(clean)
-            return (subcommand, remaining)
-
-        return ("", [])
+        return extract_git_subcommand(args)
 
     @classmethod
     def _is_git_destructive_subcommand(cls, args: List[str]) -> bool:
-        subcommand, remaining = cls._extract_git_subcommand(args)
-        if not subcommand:
-            return False
-
-        if subcommand == "reset":
-            return "--hard" in remaining
-
-        if subcommand == "clean":
-            for token in remaining:
-                if token == "--force" or token.startswith("--force="):
-                    return True
-                if cls._token_has_short_flag(token, "f"):
-                    return True
-
-        return False
+        return is_git_destructive_subcommand(args)
 
     @staticmethod
     def is_blocked_command(command: str) -> bool:
-        tokens = CommandVectorDB.tokenize_command(command)
-        executable, executable_index = CommandVectorDB.extract_executable_with_index(tokens)
-        if not executable:
-            return False
-        executable_name = os.path.basename(executable).strip().lower()
-        if executable_name in CommandVectorDB.BLOCKED_EXECUTABLES:
-            return True
-        if any(executable_name.startswith(prefix) for prefix in CommandVectorDB.BLOCKED_EXECUTABLE_PREFIXES):
-            return True
-
-        args = tokens[executable_index + 1:] if executable_index >= 0 else []
-        if executable_name == "history" and CommandVectorDB._history_clears_state(args):
-            return True
-        if executable_name == "git" and CommandVectorDB._is_git_destructive_subcommand(args):
-            return True
-        return False
+        return shell_is_blocked_command(command)
 
     @staticmethod
     def extract_context_key(buffer_context: str) -> str:
