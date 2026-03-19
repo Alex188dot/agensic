@@ -27,7 +27,7 @@ use reqwest::Method;
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 use std::cmp::{max, min};
-use std::collections::HashMap;
+use std::collections::{BTreeSet, HashMap};
 use std::fs::{self, File};
 use std::io::{self, Read, Write};
 use std::path::Path;
@@ -823,8 +823,12 @@ impl DetailState {
 struct App {
     client: Client,
     args: SessionsArgs,
+    all_sessions: Vec<SessionSummary>,
     sessions: Vec<SessionSummary>,
     selected: usize,
+    filter_menu: bool,
+    filter_cursor: usize,
+    filters: SessionFilters,
     detail: Option<DetailState>,
     status: String,
     flash_status: Option<crate::FlashStatus>,
@@ -910,6 +914,15 @@ struct TimeTravelModalState {
     error: String,
 }
 
+#[derive(Clone, Debug, Default)]
+struct SessionFilters {
+    status: String,
+    agent: String,
+    model: String,
+    repo: String,
+    branch: String,
+}
+
 impl CopyFeedback {
     fn active_target(&self) -> Option<CopyFeedbackTarget> {
         (Instant::now() <= self.expires_at).then_some(self.target)
@@ -983,8 +996,12 @@ impl App {
         let mut app = Self {
             client,
             args: args.clone(),
+            all_sessions: Vec::new(),
             sessions: Vec::new(),
             selected: 0,
+            filter_menu: false,
+            filter_cursor: 0,
+            filters: SessionFilters::default(),
             detail: None,
             status: "Ready".to_string(),
             flash_status: None,
@@ -1041,12 +1058,133 @@ impl App {
         let payload: SessionsResponse = response
             .json()
             .map_err(|err| format!("invalid sessions payload: {}", err))?;
-        self.sessions = payload.sessions;
+        self.all_sessions = payload.sessions;
+        self.apply_session_filters();
+        self.status = format!(
+            "Loaded {} sessions (showing {})",
+            self.all_sessions.len(),
+            self.sessions.len()
+        );
+        Ok(())
+    }
+
+    fn filter_fields() -> [&'static str; 6] {
+        ["status", "agent", "model", "repo", "branch", "[Reset All]"]
+    }
+
+    fn session_actor(session: &SessionSummary) -> String {
+        if session.agent_name.trim().is_empty() {
+            session.agent.clone()
+        } else {
+            session.agent_name.clone()
+        }
+    }
+
+    fn session_repo(session: &SessionSummary) -> String {
+        repo_display_name(&session.repo_root)
+    }
+
+    fn session_branch(session: &SessionSummary) -> String {
+        if session.branch_end.trim().is_empty() {
+            session.branch_start.clone()
+        } else {
+            session.branch_end.clone()
+        }
+    }
+
+    fn field_values(&self, field: &str) -> Vec<String> {
+        match field {
+            "status" => unique_values(
+                self.all_sessions
+                    .iter()
+                    .map(|session| session.status.clone()),
+            ),
+            "agent" => unique_values(self.all_sessions.iter().map(Self::session_actor)),
+            "model" => unique_values(
+                self.all_sessions
+                    .iter()
+                    .map(|session| session.model.clone()),
+            ),
+            "repo" => unique_values(self.all_sessions.iter().map(Self::session_repo)),
+            "branch" => unique_values(self.all_sessions.iter().map(Self::session_branch)),
+            "[Reset All]" => vec!["<Press Left/Right/Enter to Reset>".to_string()],
+            _ => vec!["".to_string()],
+        }
+    }
+
+    fn field_current(&self, field: &str) -> String {
+        match field {
+            "status" => self.filters.status.clone(),
+            "agent" => self.filters.agent.clone(),
+            "model" => self.filters.model.clone(),
+            "repo" => self.filters.repo.clone(),
+            "branch" => self.filters.branch.clone(),
+            "[Reset All]" => "<Press Left/Right/Enter to Reset>".to_string(),
+            _ => String::new(),
+        }
+    }
+
+    fn session_passes_filters(&self, session: &SessionSummary) -> bool {
+        if !self.filters.status.is_empty() && session.status != self.filters.status {
+            return false;
+        }
+        if !self.filters.agent.is_empty() && Self::session_actor(session) != self.filters.agent {
+            return false;
+        }
+        if !self.filters.model.is_empty() && session.model != self.filters.model {
+            return false;
+        }
+        if !self.filters.repo.is_empty() && Self::session_repo(session) != self.filters.repo {
+            return false;
+        }
+        if !self.filters.branch.is_empty() && Self::session_branch(session) != self.filters.branch {
+            return false;
+        }
+        true
+    }
+
+    fn apply_session_filters(&mut self) {
+        self.sessions = self
+            .all_sessions
+            .iter()
+            .filter(|session| self.session_passes_filters(session))
+            .cloned()
+            .collect();
         if self.selected >= self.sessions.len() && !self.sessions.is_empty() {
             self.selected = self.sessions.len() - 1;
         }
-        self.status = format!("Loaded {} sessions", self.sessions.len());
-        Ok(())
+        if self.sessions.is_empty() {
+            self.selected = 0;
+        }
+    }
+
+    fn set_field_current(&mut self, field: &str, value: String) {
+        match field {
+            "status" => self.filters.status = value,
+            "agent" => self.filters.agent = value,
+            "model" => self.filters.model = value,
+            "repo" => self.filters.repo = value,
+            "branch" => self.filters.branch = value,
+            "[Reset All]" => self.filters = SessionFilters::default(),
+            _ => {}
+        }
+        self.apply_session_filters();
+    }
+
+    fn cycle_filter_value(&mut self, step: isize) {
+        let field = Self::filter_fields()[self.filter_cursor];
+        let values = self.field_values(field);
+        if values.is_empty() {
+            return;
+        }
+        let current = self.field_current(field);
+        let pos = values
+            .iter()
+            .position(|value| value == &current)
+            .unwrap_or(0) as isize;
+        let len = values.len() as isize;
+        let next = (pos + step).rem_euclid(len) as usize;
+        self.set_field_current(field, values[next].clone());
     }
 
     fn open_selected(&mut self) -> Result<(), String> {
@@ -1491,8 +1629,7 @@ fn run(client: Client, args: SessionsArgs) -> Result<(), String> {
     loop {
         let timeout = app.next_poll_timeout();
         let timed_redraws_active = app.has_timed_redraws();
-        let poll_timed_out =
-            !event::poll(timeout).map_err(|e| format!("poll failed: {}", e))?;
+        let poll_timed_out = !event::poll(timeout).map_err(|e| format!("poll failed: {}", e))?;
         let mut state_changed = false;
         if app.needs_terminal_clear {
             terminal
@@ -1801,6 +1938,34 @@ fn handle_key(app: &mut App, key: KeyEvent) -> Result<bool, String> {
         return Ok(false);
     }
 
+    if app.filter_menu {
+        match key.code {
+            KeyCode::Esc => {
+                app.filter_menu = false;
+            }
+            KeyCode::Enter => {
+                if App::filter_fields()[app.filter_cursor] == "[Reset All]" {
+                    app.filters = SessionFilters::default();
+                    app.apply_session_filters();
+                }
+                app.filter_menu = false;
+            }
+            KeyCode::Down => {
+                let max = App::filter_fields().len().saturating_sub(1);
+                app.filter_cursor = (app.filter_cursor + 1).min(max);
+            }
+            KeyCode::Up => {
+                if app.filter_cursor > 0 {
+                    app.filter_cursor -= 1;
+                }
+            }
+            KeyCode::Left => app.cycle_filter_value(-1),
+            KeyCode::Right => app.cycle_filter_value(1),
+            _ => {}
+        }
+        return Ok(false);
+    }
+
     match key.code {
         KeyCode::Char('c') if key.modifiers.contains(KeyModifiers::CONTROL) => return Ok(true),
         KeyCode::Esc => return Ok(true),
@@ -1815,6 +1980,7 @@ fn handle_key(app: &mut App, key: KeyEvent) -> Result<bool, String> {
             }
         }
         KeyCode::Enter => app.open_selected()?,
+        KeyCode::Char('f') => app.filter_menu = true,
         KeyCode::Char('R') => app.start_rename_selected(),
         KeyCode::Char('D') => app.start_delete_selected(),
         KeyCode::Char('r') => app.refresh_sessions()?,
@@ -1838,6 +2004,23 @@ fn draw_ui(frame: &mut ratatui::Frame<'_>, app: &App) {
     if let Some(modal) = app.time_travel_modal.as_ref() {
         draw_time_travel_modal(frame, modal);
     }
+}
+
+fn unique_values<I>(iter: I) -> Vec<String>
+where
+    I: Iterator<Item = String>,
+{
+    let mut set: BTreeSet<String> = BTreeSet::new();
+    for value in iter {
+        let clean = value.trim().to_string();
+        if clean.is_empty() {
+            continue;
+        }
+        set.insert(clean);
+    }
+    let mut out = vec!["".to_string()];
+    out.extend(set);
+    out
 }
 
 fn draw_browser(frame: &mut ratatui::Frame<'_>, app: &App) {
@@ -1931,17 +2114,53 @@ fn draw_browser(frame: &mut ratatui::Frame<'_>, app: &App) {
     frame.render_stateful_widget(table, chunks[0], &mut state);
     frame.render_widget(
         Paragraph::new(format!(
-            "↑↓ move  Enter open  R rename  D delete  r refresh  Esc quit    {}",
+            "↑↓ move  Enter open  f filters  R rename  D delete  r refresh  Esc quit    {}",
             app.status_text()
         ))
         .style(Style::default().fg(Color::White)),
         chunks[1],
     );
     frame.render_widget(
-        Paragraph::new(format!("sessions: {}", app.sessions.len()))
-            .style(Style::default().fg(Color::DarkGray)),
+        Paragraph::new(format!(
+            "sessions: {}/{}",
+            app.sessions.len(),
+            app.all_sessions.len()
+        ))
+        .style(Style::default().fg(Color::DarkGray)),
         chunks[2],
     );
+
+    if app.filter_menu {
+        let popup = crate::centered_rect(58, 42, area);
+        let fields = App::filter_fields();
+        let mut lines: Vec<Line> = Vec::new();
+        lines.push(Line::from(
+            "Filter panel (Left/Right change, Up/Down move, Enter/Esc close)",
+        ));
+        lines.push(Line::from(""));
+        for (idx, field) in fields.iter().enumerate() {
+            let value = app.field_current(field);
+            let shown = if value.is_empty() {
+                "*"
+            } else {
+                value.as_str()
+            };
+            let style = if idx == app.filter_cursor {
+                Style::default().fg(Color::Black).bg(Color::Cyan)
+            } else {
+                Style::default()
+            };
+            lines.push(Line::from(vec![Span::styled(
+                format!("{}: {}", field, shown),
+                style,
+            )]));
+        }
+        let content = Paragraph::new(lines)
+            .block(Block::default().borders(Borders::ALL).title("Filters"))
+            .wrap(Wrap { trim: true });
+        frame.render_widget(Clear, popup);
+        frame.render_widget(content, popup);
+    }
 }
 
 fn draw_detail(frame: &mut ratatui::Frame<'_>, app: &App, detail: &DetailState) {
@@ -2398,7 +2617,7 @@ fn build_replay(app: &App, detail: &DetailState, area: Rect) -> Paragraph<'stati
             let visible_rows = area.height.saturating_sub(2).max(1) as usize;
             let lines = if detail.replay_loading_for_active_view() {
                 vec![Line::from(Span::styled(
-                    "Loading replay cache...",
+                    format!("Loading replay cache {} ", loading_spinner_frame()),
                     Style::default().fg(Color::LightCyan),
                 ))]
             } else if detail.replay_visible {
@@ -2415,14 +2634,12 @@ fn build_replay(app: &App, detail: &DetailState, area: Rect) -> Paragraph<'stati
                         let start = scroll.min(total_rows);
                         let end = start.saturating_add(visible_rows).min(total_rows);
                         let visible_frame_end = end.min(frame.lines.len());
-                        let mut lines = frame.lines[start.min(frame.lines.len())..visible_frame_end]
-                            .to_vec();
+                        let mut lines =
+                            frame.lines[start.min(frame.lines.len())..visible_frame_end].to_vec();
                         let blank_rows = end.saturating_sub(frame.lines.len()).min(visible_rows);
                         if blank_rows > 0 {
-                            lines.extend(
-                                std::iter::repeat_with(|| Line::from(""))
-                                    .take(blank_rows),
-                            );
+                            lines
+                                .extend(std::iter::repeat_with(|| Line::from("")).take(blank_rows));
                         }
                         lines
                     })
@@ -3880,7 +4097,9 @@ fn terminal_replay_scroll(frame: &TerminalReplayFrame, area: Rect, padding_rows:
         .min(content_rows.saturating_sub(1))
         .saturating_add(TERMINAL_REPLAY_CURSOR_BOTTOM_PADDING_ROWS)
         .min(total_rows.saturating_sub(1));
-    let anchor_row = cursor_anchor.max(content_anchor).min(total_rows.saturating_sub(1));
+    let anchor_row = cursor_anchor
+        .max(content_anchor)
+        .min(total_rows.saturating_sub(1));
     anchor_row
         .saturating_add(1)
         .max(visible_lines)
@@ -4589,7 +4808,7 @@ mod tests {
         session_detail_layout_in_area, strip_inline_progress_noise, terminal_replay_end_padding,
         terminal_replay_max_scroll_x, terminal_replay_scroll, timeline_category_color,
         timeline_kind_style, vt100_color_to_ratatui, App, DeleteModalState, DetailState, FocusPane,
-        ReplayMode, SessionEvent, SessionSummary, SessionsArgs, TerminalReplayFrame,
+        ReplayMode, SessionEvent, SessionFilters, SessionSummary, SessionsArgs, TerminalReplayFrame,
         TimeTravelModalState, TimeTravelPreviewResponse, TimelineCategory, TimelineEntry,
         TranscriptChunk, TEXT_REPLAY_TICK_MS,
     };
@@ -4631,8 +4850,12 @@ mod tests {
                 limit: 200,
                 replay: false,
             },
+            all_sessions: sessions.clone(),
             sessions,
             selected: 0,
+            filter_menu: false,
+            filter_cursor: 0,
+            filters: SessionFilters::default(),
             detail: None,
             status: "Ready".to_string(),
             flash_status: None,
@@ -4650,6 +4873,43 @@ mod tests {
             time_travel_modal: None,
             pending_time_travel_handoff: None,
         }
+    }
+
+    #[test]
+    fn session_filters_cycle_across_all_available_agents() {
+        let mut alpha = sample_session("sess-1", "One");
+        alpha.agent = "codex".to_string();
+        alpha.agent_name = "Codex".to_string();
+
+        let mut beta = sample_session("sess-2", "Two");
+        beta.agent = "claude_code".to_string();
+        beta.agent_name = "Claude Code".to_string();
+
+        let mut gamma = sample_session("sess-3", "Three");
+        gamma.agent = "gemini_cli".to_string();
+        gamma.agent_name = "Gemini CLI".to_string();
+
+        let mut app = sample_app("http://127.0.0.1:22000", vec![alpha, beta, gamma]);
+        app.filter_cursor = 1;
+
+        assert_eq!(
+            app.field_values("agent"),
+            vec![
+                "".to_string(),
+                "Claude Code".to_string(),
+                "Codex".to_string(),
+                "Gemini CLI".to_string(),
+            ]
+        );
+
+        app.cycle_filter_value(1);
+        assert_eq!(app.filters.agent, "Claude Code");
+        app.cycle_filter_value(1);
+        assert_eq!(app.filters.agent, "Codex");
+        app.cycle_filter_value(1);
+        assert_eq!(app.filters.agent, "Gemini CLI");
+        app.cycle_filter_value(1);
+        assert!(app.filters.agent.is_empty());
     }
 
     #[test]

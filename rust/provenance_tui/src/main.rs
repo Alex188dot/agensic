@@ -722,7 +722,12 @@ impl App {
         self.apply_view();
     }
 
-    fn fetch_runs_page(&self, before_ts: i64, before_run_id: &str) -> Result<RunsPage, String> {
+    fn build_runs_query_params(
+        &self,
+        before_ts: i64,
+        before_run_id: &str,
+        include_server_side_filters: bool,
+    ) -> Vec<(String, String)> {
         let now_ts = now_epoch_seconds();
         let effective_since_ts = self.effective_since_ts(now_ts);
         let effective_before_ts = if before_ts > 0 { Some(before_ts) } else { None };
@@ -744,14 +749,16 @@ impl App {
         if !effective_before_run_id.is_empty() {
             params.push(("before_run_id".to_string(), effective_before_run_id));
         }
-        if !self.filters.label.is_empty() {
-            params.push(("label".to_string(), self.filters.label.clone()));
-        }
-        if !self.filters.tier.is_empty() {
-            params.push(("tier".to_string(), self.filters.tier.clone()));
-        }
-        if !self.filters.agent.is_empty() {
-            params.push(("agent".to_string(), self.filters.agent.clone()));
+        if include_server_side_filters {
+            if !self.filters.label.is_empty() {
+                params.push(("label".to_string(), self.filters.label.clone()));
+            }
+            if !self.filters.tier.is_empty() {
+                params.push(("tier".to_string(), self.filters.tier.clone()));
+            }
+            if !self.filters.agent.is_empty() {
+                params.push(("agent".to_string(), self.filters.agent.clone()));
+            }
         }
         if !self.args.agent_name.trim().is_empty() {
             params.push(("agent_name".to_string(), self.args.agent_name.clone()));
@@ -759,7 +766,11 @@ impl App {
         if !self.args.provider.trim().is_empty() {
             params.push(("provider".to_string(), self.args.provider.clone()));
         }
+        params
+    }
 
+    fn fetch_runs_page(&self, before_ts: i64, before_run_id: &str) -> Result<RunsPage, String> {
+        let params = self.build_runs_query_params(before_ts, before_run_id, false);
         let url = format!(
             "{}/provenance/runs",
             self.args.daemon_url.trim_end_matches('/')
@@ -2642,7 +2653,25 @@ fn flush_stdin_input_buffer() {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use reqwest::blocking::Client;
     use std::fs;
+
+    fn test_args() -> Args {
+        Args {
+            daemon_url: "http://127.0.0.1:22000".to_string(),
+            auth_token: String::new(),
+            limit: 500,
+            label: String::new(),
+            contains: String::new(),
+            since_ts: 0,
+            tier: String::new(),
+            agent: String::new(),
+            agent_name: String::new(),
+            provider: String::new(),
+            export: String::new(),
+            out: String::new(),
+        }
+    }
 
     #[test]
     fn last_7d_since_ts_is_correct() {
@@ -2795,6 +2824,32 @@ mod tests {
         assert_eq!(format_compact_count(42), "42");
         assert_eq!(format_compact_count(12_345), "12.3k");
         assert_eq!(format_compact_count(3_100_000), "3.1m");
+    }
+
+    #[test]
+    fn runs_query_params_skip_active_filter_menu_values() {
+        let client = Client::builder().build().expect("http client");
+        let mut args = test_args();
+        args.contains = "git".to_string();
+        args.agent_name = "Planner A".to_string();
+        args.provider = "openai".to_string();
+        let mut app = App::new(client, args);
+        app.search = "git".to_string();
+        app.filters.label = "AI_EXECUTED".to_string();
+        app.filters.tier = "proof".to_string();
+        app.filters.agent = "codex".to_string();
+
+        let params = app.build_runs_query_params(123, "run-9", false);
+
+        assert!(params.contains(&("limit".to_string(), "500".to_string())));
+        assert!(params.contains(&("command_contains".to_string(), "git".to_string())));
+        assert!(params.contains(&("before_ts".to_string(), "123".to_string())));
+        assert!(params.contains(&("before_run_id".to_string(), "run-9".to_string())));
+        assert!(params.contains(&("agent_name".to_string(), "Planner A".to_string())));
+        assert!(params.contains(&("provider".to_string(), "openai".to_string())));
+        assert!(!params.iter().any(|(key, _)| key == "label"));
+        assert!(!params.iter().any(|(key, _)| key == "tier"));
+        assert!(!params.iter().any(|(key, _)| key == "agent"));
     }
 
     #[test]

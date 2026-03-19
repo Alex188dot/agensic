@@ -90,7 +90,9 @@ or
 codex
 ```
 
-See the [Supported Agents](#-supported-agents) section for a complete list of all supported agents. If your agent is not in the list, you can add it by running <code>agensic --add_agent "executable"</code>.
+See the [Supported Agents](#-supported-agents) section for a complete list of all supported agents. If your agent is not in the list, you can add it by running <code>agensic --add_agent "executable"</code>, and then use it normally so that Agensic can track it. 
+
+Please note: if you are resuming a previous conversation with your agent, you will need to use the manual command line invocation, for example <code>agensic run codex resume your_convo_id</code>.
 
 After you're done, you can use Agensic to inspect the session history:
 
