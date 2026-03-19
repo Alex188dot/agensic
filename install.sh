@@ -28,6 +28,8 @@ mkdir -p "$USER_BIN_DIR"
 # 2. Copy shell integration assets
 cp agensic.zsh "$INSTALL_DIR/"
 cp shell_client.py "$INSTALL_DIR/"
+mkdir -p "$INSTALL_DIR/shell"
+cp shell/agensic_shared.sh "$INSTALL_DIR/shell/"
 
 # 2b. Build the local provenance TUI sidecar from source when cargo is available.
 TUI_MANIFEST_PATH="$PWD/rust/provenance_tui/Cargo.toml"

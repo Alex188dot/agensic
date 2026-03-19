@@ -23,7 +23,12 @@ class AppPathsTests(unittest.TestCase):
         self.assertEqual(app_paths.state_sqlite_path, "/tmp/xdg-state/agensic/state.sqlite")
         self.assertEqual(app_paths.zvec_commands_path, "/tmp/xdg-cache/agensic/zvec_commands")
         self.assertEqual(app_paths.launcher_path, "/tmp/xdg-bin/agensic")
+        self.assertEqual(app_paths.shell_support_dir, "/tmp/xdg-state/agensic/install/shell")
         self.assertEqual(app_paths.shell_integration_path, "/tmp/xdg-state/agensic/install/agensic.zsh")
+        self.assertEqual(
+            app_paths.shell_shared_helpers_path,
+            "/tmp/xdg-state/agensic/install/shell/agensic_shared.sh",
+        )
 
     def test_windows_paths_use_appdata_layout(self):
         with patch.object(paths.sys, "platform", "win32"), patch.dict(

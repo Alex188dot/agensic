@@ -116,6 +116,7 @@ typeset -g AGENSIC_SOURCE_DIR="${AGENSIC_SOURCE_PATH:A:h}"
 typeset -g AGENSIC_HOME="${AGENSIC_STATE_HOME}/agensic"
 typeset -g AGENSIC_CONFIG_PATH="${AGENSIC_CONFIG_HOME}/agensic/config.json"
 typeset -g AGENSIC_AUTH_PATH="${AGENSIC_CONFIG_HOME}/agensic/auth.json"
+typeset -g AGENSIC_SHARED_HELPERS_PATH="${AGENSIC_SOURCE_DIR}/shell/agensic_shared.sh"
 typeset -g AGENSIC_CLIENT_HELPER="${AGENSIC_SOURCE_DIR}/shell_client.py"
 typeset -g AGENSIC_RUNTIME_PYTHON="${AGENSIC_RUNTIME_PYTHON:-}"
 if [[ -z "$AGENSIC_RUNTIME_PYTHON" ]]; then
@@ -179,17 +180,9 @@ AGENSIC_TTY_SENSITIVE_EXECUTABLES=(less more man top htop watch vi vim nvim nano
 typeset -g -a AGENSIC_AUTO_SESSION_RESERVED_WORDS
 AGENSIC_AUTO_SESSION_RESERVED_WORDS=(continue)
 
-_agensic_value_in_array() {
-    local needle="$1"
-    shift
-    local item
-    for item in "$@"; do
-        if [[ "$needle" == "$item" ]]; then
-            return 0
-        fi
-    done
-    return 1
-}
+if [[ -f "$AGENSIC_SHARED_HELPERS_PATH" ]]; then
+    source "$AGENSIC_SHARED_HELPERS_PATH"
+fi
 
 _agensic_extract_executable_token() {
     local command="$1"
@@ -245,28 +238,6 @@ _agensic_extract_executable_token() {
     exe="${exe:t}"
     print -r -- "${(L)exe}"
     return 0
-}
-
-_agensic_token_has_short_flag() {
-    local token="${1:l}"
-    local flag="${2:l}"
-
-    if [[ -z "$token" || -z "$flag" ]]; then
-        return 1
-    fi
-    if [[ "$token" == --* ]]; then
-        return 1
-    fi
-    if [[ "$token" == "-$flag" ]]; then
-        return 0
-    fi
-    if [[ "$token" == -* && ${#token} -gt 2 ]]; then
-        local flags="${token#-}"
-        if [[ "$flags" == *"$flag"* ]]; then
-            return 0
-        fi
-    fi
-    return 1
 }
 
 _agensic_normalize_pattern_token() {
@@ -468,22 +439,6 @@ _agensic_matches_disabled_pattern() {
             return 0
         fi
     done
-    return 1
-}
-
-_agensic_token_looks_path_or_file() {
-    local token="$1"
-    if [[ -z "$token" ]]; then
-        return 1
-    fi
-    if [[ "$token" == "~"* || "$token" == "./"* || "$token" == "../"* || "$token" == *"/"* ]]; then
-        return 0
-    fi
-    # Treat dotted tokens as likely file names (e.g. foo.txt) without
-    # relying on regex escaping that can overmatch plain words in zsh.
-    if [[ "$token" == *.* && "$token" != "." && "$token" != ".." ]]; then
-        return 0
-    fi
     return 1
 }
 
@@ -1441,160 +1396,6 @@ _agensic_filter_pool() {
         AGENSIC_SUGGESTION_KINDS=()
         _agensic_update_display
     fi
-}
-
-_agensic_merge_suffix() {
-    local base="$1"
-    local suffix="$2"
-    if [[ -n "$base" && -n "$suffix" && "$base" == *[[:space:]] && "$suffix" == [[:space:]]* ]]; then
-        # Deduplicate separator whitespace only at join boundary.
-        local leading_ws="${suffix%%[![:space:]]*}"
-        suffix="${suffix#$leading_ws}"
-    fi
-    print -r -- "$suffix"
-}
-
-_agensic_canonicalize_buffer_spacing() {
-    local value="$1"
-    # Skip aggressive normalization when command likely needs literal spacing semantics.
-    if [[ "$value" == *"'"* || "$value" == *'"'* || "$value" == *"\\ "* ]]; then
-        print -r -- "$value"
-        return
-    fi
-
-    value="${value//$'\t'/ }"
-    while [[ "$value" == *"  "* ]]; do
-        value="${value//  / }"
-    done
-
-    # Trim edges to avoid storing accidental surrounding spaces.
-    while [[ -n "$value" && "${value:0:1}" == " " ]]; do
-        value="${value:1}"
-    done
-    while [[ -n "$value" && "${value: -1}" == " " ]]; do
-        value="${value:0:${#value}-1}"
-    done
-
-    print -r -- "$value"
-}
-
-_agensic_reset_provenance_line_state() {
-    AGENSIC_LINE_LAST_ACTION=""
-    AGENSIC_LINE_ACCEPTED_ORIGIN=""
-    AGENSIC_LINE_ACCEPTED_MODE=""
-    AGENSIC_LINE_ACCEPTED_KIND=""
-    AGENSIC_LINE_MANUAL_EDIT_AFTER_ACCEPT=0
-    AGENSIC_LINE_ACCEPTED_AI_AGENT=""
-    AGENSIC_LINE_ACCEPTED_AI_PROVIDER=""
-    AGENSIC_LINE_ACCEPTED_AI_MODEL=""
-}
-
-_agensic_clear_pending_execution() {
-    AGENSIC_PENDING_LAST_ACTION=""
-    AGENSIC_PENDING_ACCEPTED_ORIGIN=""
-    AGENSIC_PENDING_ACCEPTED_MODE=""
-    AGENSIC_PENDING_ACCEPTED_KIND=""
-    AGENSIC_PENDING_MANUAL_EDIT_AFTER_ACCEPT=0
-    AGENSIC_PENDING_AI_AGENT=""
-    AGENSIC_PENDING_AI_PROVIDER=""
-    AGENSIC_PENDING_AI_MODEL=""
-    AGENSIC_PENDING_AGENT_NAME=""
-    AGENSIC_PENDING_AGENT_HINT=""
-    AGENSIC_PENDING_MODEL_RAW=""
-    AGENSIC_PENDING_WRAPPER_ID=""
-    AGENSIC_PENDING_PROOF_LABEL=""
-    AGENSIC_PENDING_PROOF_AGENT=""
-    AGENSIC_PENDING_PROOF_MODEL=""
-    AGENSIC_PENDING_PROOF_TRACE=""
-    AGENSIC_PENDING_PROOF_TIMESTAMP=0
-    AGENSIC_PENDING_PROOF_SIGNATURE=""
-    AGENSIC_PENDING_PROOF_SIGNER_SCOPE=""
-    AGENSIC_PENDING_PROOF_KEY_FINGERPRINT=""
-    AGENSIC_PENDING_PROOF_HOST_FINGERPRINT=""
-}
-
-_agensic_mark_manual_line_edit() {
-    local action="$1"
-    if [[ -n "$AGENSIC_LINE_ACCEPTED_ORIGIN" ]]; then
-        AGENSIC_LINE_MANUAL_EDIT_AFTER_ACCEPT=1
-    fi
-    AGENSIC_LINE_LAST_ACTION="$action"
-}
-
-_agensic_set_suggestion_accept_state() {
-    local origin="$1"
-    local mode="$2"
-    local kind="$3"
-    local ai_agent="$4"
-    local ai_provider="$5"
-    local ai_model="$6"
-    AGENSIC_LINE_ACCEPTED_ORIGIN="$origin"
-    AGENSIC_LINE_ACCEPTED_MODE="$mode"
-    AGENSIC_LINE_ACCEPTED_KIND="$kind"
-    AGENSIC_LINE_ACCEPTED_AI_AGENT="$ai_agent"
-    AGENSIC_LINE_ACCEPTED_AI_PROVIDER="$ai_provider"
-    AGENSIC_LINE_ACCEPTED_AI_MODEL="$ai_model"
-    AGENSIC_LINE_LAST_ACTION="suggestion_accept"
-    AGENSIC_LINE_MANUAL_EDIT_AFTER_ACCEPT=0
-}
-
-_agensic_refresh_pending_proof_fields() {
-    AGENSIC_PENDING_PROOF_LABEL="$AGENSIC_NEXT_PROOF_LABEL"
-    AGENSIC_PENDING_PROOF_AGENT="$AGENSIC_NEXT_PROOF_AGENT"
-    AGENSIC_PENDING_PROOF_MODEL="$AGENSIC_NEXT_PROOF_MODEL"
-    AGENSIC_PENDING_PROOF_TRACE="$AGENSIC_NEXT_PROOF_TRACE"
-    AGENSIC_PENDING_PROOF_TIMESTAMP="$AGENSIC_NEXT_PROOF_TIMESTAMP"
-    AGENSIC_PENDING_PROOF_SIGNATURE="$AGENSIC_NEXT_PROOF_SIGNATURE"
-    AGENSIC_PENDING_PROOF_SIGNER_SCOPE="$AGENSIC_NEXT_PROOF_SIGNER_SCOPE"
-    AGENSIC_PENDING_PROOF_KEY_FINGERPRINT="$AGENSIC_NEXT_PROOF_KEY_FINGERPRINT"
-    AGENSIC_PENDING_PROOF_HOST_FINGERPRINT="$AGENSIC_NEXT_PROOF_HOST_FINGERPRINT"
-    if [[ -n "$AGENSIC_PENDING_PROOF_TRACE" ]]; then
-        AGENSIC_PENDING_WRAPPER_ID="proof:${AGENSIC_PENDING_PROOF_TRACE}"
-    fi
-    AGENSIC_NEXT_PROOF_LABEL=""
-    AGENSIC_NEXT_PROOF_AGENT=""
-    AGENSIC_NEXT_PROOF_MODEL=""
-    AGENSIC_NEXT_PROOF_TRACE=""
-    AGENSIC_NEXT_PROOF_TIMESTAMP=0
-    AGENSIC_NEXT_PROOF_SIGNATURE=""
-    AGENSIC_NEXT_PROOF_SIGNER_SCOPE=""
-    AGENSIC_NEXT_PROOF_KEY_FINGERPRINT=""
-    AGENSIC_NEXT_PROOF_HOST_FINGERPRINT=""
-}
-
-_agensic_clear_next_proof_fields() {
-    AGENSIC_NEXT_PROOF_LABEL=""
-    AGENSIC_NEXT_PROOF_AGENT=""
-    AGENSIC_NEXT_PROOF_MODEL=""
-    AGENSIC_NEXT_PROOF_TRACE=""
-    AGENSIC_NEXT_PROOF_TIMESTAMP=0
-    AGENSIC_NEXT_PROOF_SIGNATURE=""
-    AGENSIC_NEXT_PROOF_SIGNER_SCOPE=""
-    AGENSIC_NEXT_PROOF_KEY_FINGERPRINT=""
-    AGENSIC_NEXT_PROOF_HOST_FINGERPRINT=""
-}
-
-_agensic_snapshot_pending_execution() {
-    AGENSIC_PENDING_LAST_ACTION="$AGENSIC_LINE_LAST_ACTION"
-    AGENSIC_PENDING_ACCEPTED_ORIGIN="$AGENSIC_LINE_ACCEPTED_ORIGIN"
-    AGENSIC_PENDING_ACCEPTED_MODE="$AGENSIC_LINE_ACCEPTED_MODE"
-    AGENSIC_PENDING_ACCEPTED_KIND="$AGENSIC_LINE_ACCEPTED_KIND"
-    AGENSIC_PENDING_MANUAL_EDIT_AFTER_ACCEPT="$AGENSIC_LINE_MANUAL_EDIT_AFTER_ACCEPT"
-    AGENSIC_PENDING_AI_AGENT="$AGENSIC_LINE_ACCEPTED_AI_AGENT"
-    AGENSIC_PENDING_AI_PROVIDER="$AGENSIC_LINE_ACCEPTED_AI_PROVIDER"
-    AGENSIC_PENDING_AI_MODEL="$AGENSIC_LINE_ACCEPTED_AI_MODEL"
-    AGENSIC_PENDING_AGENT_NAME="${AGENSIC_AI_SESSION_AGENT_NAME:-}"
-    AGENSIC_PENDING_AGENT_HINT="$AGENSIC_LINE_ACCEPTED_AI_AGENT"
-    AGENSIC_PENDING_MODEL_RAW="$AGENSIC_LINE_ACCEPTED_AI_MODEL"
-    AGENSIC_PENDING_WRAPPER_ID=""
-    _agensic_refresh_pending_proof_fields
-}
-
-_agensic_pending_execution_has_provenance() {
-    if [[ -n "$AGENSIC_PENDING_LAST_ACTION" || -n "$AGENSIC_PENDING_ACCEPTED_ORIGIN" ]]; then
-        return 0
-    fi
-    return 1
 }
 
 _agensic_clear_ai_session_env() {
