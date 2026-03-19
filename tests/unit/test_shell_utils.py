@@ -2,11 +2,13 @@ import unittest
 
 from agensic.utils.shell import (
     command_matches_pattern,
+    current_shell_name,
     extract_executable_token,
     extract_git_subcommand,
     history_clears_state,
     is_blocked_command,
     is_git_destructive_subcommand,
+    normalize_shell_name,
     normalize_command_pattern,
     sanitize_patterns,
     tokenize_command,
@@ -18,6 +20,15 @@ class ShellUtilsTests(unittest.TestCase):
     def test_normalize_command_pattern(self):
         self.assertEqual(normalize_command_pattern("docker"), "docker")
         self.assertEqual(normalize_command_pattern("/usr/bin/git status"), "git")
+
+    def test_normalize_shell_name(self):
+        self.assertEqual(normalize_shell_name("/bin/zsh"), "zsh")
+        self.assertEqual(normalize_shell_name("/usr/bin/bash"), "bash")
+        self.assertEqual(normalize_shell_name("pwsh.exe"), "powershell")
+
+    def test_current_shell_name(self):
+        self.assertEqual(current_shell_name({"SHELL": "/bin/bash"}), "bash")
+        self.assertEqual(current_shell_name({"COMSPEC": "powershell.exe"}), "powershell")
 
     def test_extract_executable_token(self):
         self.assertEqual(extract_executable_token("git status"), "git")

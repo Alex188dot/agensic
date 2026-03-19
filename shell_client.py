@@ -9,6 +9,7 @@ import urllib.request
 from typing import Any
 
 from agensic.config.auth import AuthTokenCache, build_auth_headers
+from agensic.utils.shell import current_shell_name, normalize_shell_name
 
 PREDICT_URL = "http://127.0.0.1:22000/predict"
 INTENT_URL = "http://127.0.0.1:22000/intent"
@@ -149,7 +150,7 @@ def _validate_predict_input(payload: Any) -> dict[str, Any] | None:
 
     buffer = str(payload.get("command_buffer", "") or "")
     working_directory = str(payload.get("working_directory", "") or "")
-    shell = str(payload.get("shell", "zsh") or "zsh")
+    shell = normalize_shell_name(payload.get("shell", current_shell_name()) or current_shell_name())
     trigger_source = str(payload.get("trigger_source", "unknown") or "unknown")
 
     try:
@@ -178,7 +179,7 @@ def _build_intent_payload(args: argparse.Namespace, incoming: dict[str, Any]) ->
     return {
         "intent_text": intent_text,
         "working_directory": str(args.working_directory or incoming.get("working_directory", "") or ""),
-        "shell": str(args.shell_name or incoming.get("shell", "zsh") or "zsh"),
+        "shell": normalize_shell_name(args.shell_name or incoming.get("shell", current_shell_name()) or current_shell_name()),
         "terminal": str(args.terminal or incoming.get("terminal", "") or ""),
         "platform": str(args.platform or incoming.get("platform", "") or ""),
     }
@@ -192,7 +193,7 @@ def _build_assist_payload(args: argparse.Namespace, incoming: dict[str, Any]) ->
     return {
         "prompt_text": prompt_text,
         "working_directory": str(args.working_directory or incoming.get("working_directory", "") or ""),
-        "shell": str(args.shell_name or incoming.get("shell", "zsh") or "zsh"),
+        "shell": normalize_shell_name(args.shell_name or incoming.get("shell", current_shell_name()) or current_shell_name()),
         "terminal": str(args.terminal or incoming.get("terminal", "") or ""),
         "platform": str(args.platform or incoming.get("platform", "") or ""),
     }

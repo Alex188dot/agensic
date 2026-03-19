@@ -59,6 +59,7 @@ from agensic.utils import (
     ensure_private_dir,
     harden_private_tree,
 )
+from agensic.utils.shell import current_shell_name
 
 try:
     import questionary
@@ -2270,7 +2271,7 @@ def _manage_command_store_remove():
             console.print("[yellow]Deletion cancelled.[/yellow]")
             return
 
-        shell_name = os.environ.get("SHELL", "zsh")
+        shell_name = current_shell_name()
         result = _command_store_request(
             "POST",
             "/command_store/remove",
@@ -2312,7 +2313,7 @@ def _manage_command_store_resync():
             console.print("[yellow]History resync cancelled.[/yellow]")
         return
 
-    shell_name = os.environ.get("SHELL", "zsh")
+    shell_name = current_shell_name()
     result = _command_store_request(
         "POST",
         "/command_store/resync_history",
@@ -3154,7 +3155,7 @@ def test():
                 "command_buffer": "git comm",
                 "cursor_position": 8,
                 "working_directory": "/tmp",
-                "shell": "zsh"
+                "shell": current_shell_name()
             },
             timeout=5
         )
@@ -3285,7 +3286,7 @@ def doctor():
             "command_buffer": "git st",
             "cursor_position": 6,
             "working_directory": os.path.expanduser("~"),
-            "shell": "zsh",
+            "shell": current_shell_name(),
             "allow_ai": False,
             "trigger_source": "doctor",
         }

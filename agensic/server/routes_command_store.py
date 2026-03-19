@@ -12,6 +12,7 @@ from agensic.server.schemas import (
     CommandStoreResyncResponse,
     LogCommandResponse,
 )
+from agensic.utils.shell import current_shell_name, normalize_shell_name
 
 router = APIRouter()
 MAX_COMMAND_DURATION_MS = 86_400_000
@@ -131,7 +132,7 @@ def log_command(data: LogCommandPayload, background_tasks: BackgroundTasks) -> L
 def command_store_list(shell: str = "", include_all: bool = False) -> CommandStoreListResponse:
     deps.enter_request_or_503()
     try:
-        target_shell = (shell or os.environ.get("SHELL", "zsh")).strip()
+        target_shell = normalize_shell_name(shell or current_shell_name())
         history_file = deps.get_history_file(target_shell)
         vector_db = deps.engine._ensure_vector_db()
         payload = vector_db.list_command_store(history_file=history_file, include_all=include_all)
@@ -171,13 +172,13 @@ def command_store_remove(data: CommandStoreRemovePayload) -> CommandStoreRemoveR
     try:
         config = deps.load_config()
         if not deps.autocomplete_enabled_from_config(config):
-            target_shell = (data.shell or os.environ.get("SHELL", "zsh")).strip()
+            target_shell = normalize_shell_name(data.shell or current_shell_name())
             return {
                 "status": "ignored",
                 "reason": "autocomplete_disabled",
                 "history_file": deps.get_history_file(target_shell),
             }
-        target_shell = (data.shell or os.environ.get("SHELL", "zsh")).strip()
+        target_shell = normalize_shell_name(data.shell or current_shell_name())
         history_file = deps.get_history_file(target_shell)
         vector_db = deps.engine._ensure_vector_db()
 
@@ -216,7 +217,7 @@ def command_store_resync_history(data: CommandStoreHistoryPayload) -> CommandSto
     deps.enter_request_or_503()
     try:
         config = deps.load_config()
-        target_shell = (data.shell or os.environ.get("SHELL", "zsh")).strip()
+        target_shell = normalize_shell_name(data.shell or current_shell_name())
         history_file = deps.get_history_file(target_shell)
         if not deps.autocomplete_enabled_from_config(config):
             return {

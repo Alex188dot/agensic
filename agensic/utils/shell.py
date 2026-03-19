@@ -40,6 +40,34 @@ GIT_GLOBAL_OPTIONS_WITH_VALUE = {
 }
 
 
+def normalize_shell_name(value: str) -> str:
+    raw = str(value or "").strip().lower()
+    if not raw:
+        return "zsh"
+
+    base = os.path.basename(raw)
+    if base in {"bash", "zsh", "sh", "fish"}:
+        return base
+    if base in {"pwsh", "powershell", "powershell.exe", "pwsh.exe"}:
+        return "powershell"
+    if "powershell" in base:
+        return "powershell"
+    if base.endswith(".exe") and base[:-4] in {"bash", "zsh", "fish"}:
+        return base[:-4]
+    return base or "zsh"
+
+
+def current_shell_name(env: dict[str, str] | None = None, default: str = "zsh") -> str:
+    source_env = env or os.environ
+    raw = str(source_env.get("SHELL", "") or "").strip()
+    if not raw:
+        raw = str(source_env.get("COMSPEC", "") or "").strip()
+    normalized = normalize_shell_name(raw)
+    if normalized:
+        return normalized
+    return normalize_shell_name(default)
+
+
 def normalize_command_pattern(raw: str) -> str:
     value = str(raw or "").strip()
     if not value:

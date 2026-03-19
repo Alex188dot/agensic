@@ -14,6 +14,7 @@ from agensic.server.routes_intent import router as intent_router
 from agensic.server.routes_predict import router as predict_router
 from agensic.server.routes_provenance import router as provenance_router
 from agensic.server.routes_sessions import router as sessions_router
+from agensic.utils.shell import current_shell_name
 
 
 @asynccontextmanager
@@ -22,7 +23,7 @@ async def lifespan(app: FastAPI):
     deps.reset_shutdown_state()
     deps.rotate_local_auth_token()
     deps.log_parallelism_settings_once()
-    startup_history = deps.get_history_file(os.environ.get("SHELL", "zsh"))
+    startup_history = deps.get_history_file(current_shell_name())
     if startup_history:
         deps.engine.bootstrap_async(startup_history)
     try:
