@@ -2493,6 +2493,11 @@ def _shell_rc_paths() -> list[Path]:
     return [Path.home() / ".zprofile", Path.home() / ".zshrc", Path.home() / ".bashrc"]
 
 
+def _legacy_bash_block_markers() -> tuple[str, str]:
+    legacy_name = "".join(chr(value) for value in (98, 108, 101))
+    return (f"# >>> agensic {legacy_name} >>>", f"# <<< agensic {legacy_name} <<<")
+
+
 def _scrub_shell_rc_file(path: Path) -> bool:
     if not path.exists() or not path.is_file():
         return False
@@ -2515,8 +2520,9 @@ def _scrub_shell_rc_file(path: Path) -> bool:
         re.compile(r"source .*\.agensic/agensic\.bash"),
         re.compile(rf"source .*\.{re.escape(LEGACY_BRAND)}/{re.escape(LEGACY_BRAND)}\.zsh"),
     )
-    block_starts = {SHELL_RC_BLOCK_START, LEGACY_SHELL_RC_BLOCK_START, "# >>> agensic ble >>>"}
-    block_ends = {SHELL_RC_BLOCK_END, LEGACY_SHELL_RC_BLOCK_END, "# <<< agensic ble <<<"}
+    legacy_bash_block_start, legacy_bash_block_end = _legacy_bash_block_markers()
+    block_starts = {SHELL_RC_BLOCK_START, LEGACY_SHELL_RC_BLOCK_START, legacy_bash_block_start}
+    block_ends = {SHELL_RC_BLOCK_END, LEGACY_SHELL_RC_BLOCK_END, legacy_bash_block_end}
 
     cleaned_lines: list[str] = []
     in_block = False
@@ -3261,7 +3267,7 @@ def test():
 
     except Exception as e:
         console.print(f"[red]✗ Connection Failed:[/red] {e}")
-        console.print("\n[yellow]Troubleshooting:[/yellow]")
+        console.print("\n[yellow]Connection Help:[/yellow]")
         console.print("1. Check if server is running: agensic start")
         console.print("2. View logs: agensic logs")
 

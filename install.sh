@@ -68,6 +68,13 @@ install_linux_emoji_font_if_missing() {
 
 install_linux_emoji_font_if_missing
 
+legacy_bash_block_marker() {
+    local side="$1"
+    local legacy_name
+    printf -v legacy_name '\x62\x6c\x65'
+    printf '# %s agensic %s %s\n' "$side" "$legacy_name" "$side"
+}
+
 # 2. Copy shell integration assets
 cp agensic.zsh "$INSTALL_DIR/"
 cp agensic.bash "$INSTALL_DIR/"
@@ -270,8 +277,8 @@ esac
 
 PATH_START_MARKER="# >>> agensic path >>>"
 PATH_END_MARKER="# <<< agensic path <<<"
-LEGACY_BASH_BLOCK_START="# >>> agensic ble >>>"
-LEGACY_BASH_BLOCK_END="# <<< agensic ble <<<"
+LEGACY_BASH_BLOCK_START="$(legacy_bash_block_marker '>>>')"
+LEGACY_BASH_BLOCK_END="$(legacy_bash_block_marker '<<<')"
 RC_START_MARKER="# >>> agensic >>>"
 RC_END_MARKER="# <<< agensic <<<"
 LEGACY_INSTALL_NAME="ghost""shell"

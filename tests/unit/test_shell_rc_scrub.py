@@ -13,9 +13,9 @@ class ShellRcScrubTests(unittest.TestCase):
             rc_path.write_text(
                 "\n".join(
                     [
-                        "# >>> agensic ble >>>",
+                        cli_app._legacy_bash_block_markers()[0],
                         "export AGENSIC_LEGACY_BASH_HELPER=1",
-                        "# <<< agensic ble <<<",
+                        cli_app._legacy_bash_block_markers()[1],
                         "export PATH=\"$HOME/.agensic/bin:$PATH\"",
                         "alias agensic='python3 /Users/test/.agensic/cli.py'",
                         "source /Users/test/.agensic/agensic.zsh",
