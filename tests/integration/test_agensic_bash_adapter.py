@@ -46,6 +46,9 @@ class AgensicBashAdapterTests(unittest.TestCase):
                     [
                         "BLE_VERSION=mock-ble",
                         "ble-attach() { return 0; }",
+                        "ble-bind() { return 0; }",
+                        "ble/function#advice() { return 0; }",
+                        "ble/widget/redraw-line() { return 0; }",
                         "",
                     ]
                 ),
@@ -61,6 +64,34 @@ class AgensicBashAdapterTests(unittest.TestCase):
 
         self.assertEqual(result.returncode, 0, msg=result.stderr)
         self.assertEqual(result.stdout.strip(), f"1|{ble_path}")
+
+    def test_ble_override_registers_widgets(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            ble_path = Path(tmpdir) / "ble.sh"
+            ble_path.write_text(
+                "\n".join(
+                    [
+                        "BLE_VERSION=mock-ble",
+                        "ble-attach() { return 0; }",
+                        "ble-bind() { return 0; }",
+                        "ble/function#advice() { return 0; }",
+                        "ble/widget/redraw-line() { return 0; }",
+                        "",
+                    ]
+                ),
+                encoding="utf-8",
+            )
+            result = self._run_bash(
+                """
+                _agensic_source_ble_if_needed
+                _agensic_register_bash_widgets
+                printf '%s\\n' "${AGENSIC_BASH_WIDGETS_REGISTERED}"
+                """,
+                env={"AGENSIC_BLE_SH_PATH": str(ble_path)},
+            )
+
+        self.assertEqual(result.returncode, 0, msg=result.stderr)
+        self.assertEqual(result.stdout.splitlines()[0].strip(), "1")
 
 
 if __name__ == "__main__":
