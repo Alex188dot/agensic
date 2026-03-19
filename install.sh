@@ -68,67 +68,6 @@ install_linux_emoji_font_if_missing() {
 
 install_linux_emoji_font_if_missing
 
-find_ble_sh() {
-    local candidate=""
-    for candidate in \
-        "${HOME}/.local/share/blesh/ble.sh" \
-        "${HOME}/.local/share/blesh/latest/ble.sh" \
-        "/usr/local/share/blesh/ble.sh" \
-        "/usr/share/blesh/ble.sh"
-    do
-        if [ -f "$candidate" ]; then
-            printf '%s\n' "$candidate"
-            return 0
-        fi
-    done
-    return 1
-}
-
-install_ble_sh_if_missing() {
-    local target_shell="$1"
-    if [ "$target_shell" != "bash" ]; then
-        return 0
-    fi
-    if [ "${AGENSIC_SKIP_BLE_INSTALL:-0}" = "1" ]; then
-        echo "⚠️ Skipping ble.sh install because AGENSIC_SKIP_BLE_INSTALL=1."
-        return 0
-    fi
-    if existing_ble="$(find_ble_sh 2>/dev/null)"; then
-        echo "✅ Found ble.sh at $existing_ble"
-        return 0
-    fi
-    if ! command -v tar >/dev/null 2>&1; then
-        echo "⚠️ tar not found; could not install ble.sh automatically."
-        return 0
-    fi
-    if command -v curl >/dev/null 2>&1; then
-        BLE_FETCHER="curl -fsSL"
-    elif command -v wget >/dev/null 2>&1; then
-        BLE_FETCHER="wget -qO-"
-    else
-        echo "⚠️ curl/wget not found; could not install ble.sh automatically."
-        return 0
-    fi
-
-    echo "📦 Installing ble.sh for Bash inline suggestions..."
-    BLE_TMP_DIR="$(mktemp -d "${TMPDIR:-/tmp}/agensic-blesh.XXXXXX")" || return 0
-    if sh -c "$BLE_FETCHER https://github.com/akinomyoga/ble.sh/releases/download/nightly/ble-nightly.tar.xz" \
-        | tar -xJf - -C "$BLE_TMP_DIR" >/dev/null 2>&1; then
-        if [ -f "$BLE_TMP_DIR/ble-nightly/ble.sh" ] && bash "$BLE_TMP_DIR/ble-nightly/ble.sh" --install "$HOME/.local/share" >/dev/null 2>&1; then
-            if existing_ble="$(find_ble_sh 2>/dev/null)"; then
-                echo "✅ Installed ble.sh to $existing_ble"
-                rm -rf "$BLE_TMP_DIR"
-                return 0
-            fi
-        fi
-    fi
-    rm -rf "$BLE_TMP_DIR"
-    echo "⚠️ Could not install ble.sh automatically."
-    echo "   Bash will fall back to a limited Readline mode."
-    echo "   Manual install: https://github.com/akinomyoga/ble.sh"
-    return 0
-}
-
 # 2. Copy shell integration assets
 cp agensic.zsh "$INSTALL_DIR/"
 cp agensic.bash "$INSTALL_DIR/"
@@ -329,10 +268,10 @@ case "$TARGET_SHELL" in
     ;;
 esac
 
-install_ble_sh_if_missing "$TARGET_SHELL"
-
 PATH_START_MARKER="# >>> agensic path >>>"
 PATH_END_MARKER="# <<< agensic path <<<"
+LEGACY_BASH_BLOCK_START="# >>> agensic ble >>>"
+LEGACY_BASH_BLOCK_END="# <<< agensic ble <<<"
 RC_START_MARKER="# >>> agensic >>>"
 RC_END_MARKER="# <<< agensic <<<"
 LEGACY_INSTALL_NAME="ghost""shell"
@@ -357,6 +296,7 @@ sed -i.bak \
 
 # Remove previous managed blocks before rewriting the chosen target files.
 sed -i.bak \
+  -e "/$LEGACY_BASH_BLOCK_START/,/$LEGACY_BASH_BLOCK_END/d" \
   -e "/$LEGACY_START_MARKER/,/$LEGACY_END_MARKER/d" \
   -e "/$PATH_START_MARKER/,/$PATH_END_MARKER/d" \
   -e "/$RC_START_MARKER/,/$RC_END_MARKER/d" \
@@ -368,6 +308,7 @@ sed -i.bak \
   -e '\|export PATH=".*\.agensic/bin:\$PATH"|d' \
   -e "\|source .*\\.agensic/agensic\\.zsh|d" \
   -e "\|source .*\\.agensic/agensic\\.bash|d" \
+  -e "/$LEGACY_BASH_BLOCK_START/,/$LEGACY_BASH_BLOCK_END/d" \
   -e "/$LEGACY_START_MARKER/,/$LEGACY_END_MARKER/d" \
   -e "/$PATH_START_MARKER/,/$PATH_END_MARKER/d" \
   -e "/$RC_START_MARKER/,/$RC_END_MARKER/d" \

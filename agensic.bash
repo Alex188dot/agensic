@@ -1,8 +1,7 @@
 #!/usr/bin/env bash
 
 # Agensic Bash adapter entrypoint.
-# This currently handles shared helper loading and ble.sh discovery/attach.
-# Inline suggestion rendering and keybindings will be layered on top of this.
+# Bash uses a readline-only integration for inline autosuggestions.
 
 if [[ -n "${BASH_SOURCE[0]:-}" ]]; then
     AGENSIC_SOURCE_PATH="${BASH_SOURCE[0]}"
@@ -21,19 +20,12 @@ AGENSIC_PLUGIN_LOG="${AGENSIC_HOME}/plugin.log"
 AGENSIC_SHARED_HELPERS_PATH="${AGENSIC_SOURCE_DIR}/shell/agensic_shared.sh"
 AGENSIC_CLIENT_HELPER="${AGENSIC_CLIENT_HELPER:-${AGENSIC_SOURCE_DIR}/shell_client.py}"
 AGENSIC_RUNTIME_PYTHON="${AGENSIC_RUNTIME_PYTHON:-}"
-AGENSIC_BLE_SH_PATH="${AGENSIC_BLE_SH_PATH:-}"
 AGENSIC_BASH_ADAPTER_READY=0
-AGENSIC_BASH_BLE_AVAILABLE=0
-AGENSIC_BASH_BLE_LOADED_FROM=""
-AGENSIC_BASH_BLE_WARNING_EMITTED=0
 AGENSIC_BASH_READLINE_AVAILABLE=0
 AGENSIC_BASH_BACKEND="none"
 AGENSIC_BASH_WIDGETS_REGISTERED=0
-AGENSIC_BASH_GHOST_ACTIVE=0
-AGENSIC_BASH_GHOST_SUFFIX=""
-AGENSIC_BASH_GHOST_OLD_MARK=""
-AGENSIC_BASH_GHOST_OLD_MARK_ACTIVE=""
 AGENSIC_BASH_LAST_INFO_MESSAGE=""
+AGENSIC_BASH_PROMPT_PREPARED=0
 AGENSIC_STATUS_PREFIX="__AGENSIC_STATUS__:"
 AGENSIC_FETCH_ATTEMPT_COUNT=0
 AGENSIC_FETCH_SUCCESS_COUNT=0
@@ -56,8 +48,11 @@ AGENSIC_SUGGESTIONS=()
 AGENSIC_DISPLAY_TEXTS=()
 AGENSIC_ACCEPT_MODES=()
 AGENSIC_SUGGESTION_KINDS=()
+AGENSIC_PATH_HEAVY_EXECUTABLES=(cd ls cat less more head tail vi vim nvim nano code source open cp mv mkdir rmdir touch find grep rg sed awk bat)
+AGENSIC_SCRIPT_EXECUTABLES=(python python3 python3.11 python3.12 node bash sh zsh ruby perl php lua)
 AGENSIC_BASH_AT_PROMPT=1
 AGENSIC_BASH_IN_PROMPT_HOOK=0
+AGENSIC_BASH_ORIGINAL_PS1="${PS1-}"
 AGENSIC_BASH_ORIGINAL_PROMPT_COMMAND="${PROMPT_COMMAND:-}"
 AGENSIC_BASH_RUNTIME_HOOKS_REGISTERED=0
 
@@ -106,10 +101,87 @@ _agensic_bash_last_history_entry() {
 _agensic_bash_should_ignore_debug_command() {
     local command="${1:-}"
     case "$command" in
-        _agensic_*|ble-*|ble/*|__vte_prompt_command|history*|fc*|curl*|disown*|local\ *|return\ *|'[['*|']]'*)
+        _agensic_*|__vte_prompt_command|history*|fc*|curl*|disown*|local\ *|return\ *|'[['*|']]'*)
             return 0
             ;;
     esac
+    return 1
+}
+
+_agensic_bash_extract_executable_token() {
+    local command="${1:-}"
+    local -a tokens=()
+    local token=""
+    local i=0
+    local lower=""
+
+    read -r -a tokens <<< "$command"
+    while (( i < ${#tokens[@]} )); do
+        token="${tokens[$i]}"
+        if [[ -z "$token" ]]; then
+            ((i++))
+            continue
+        fi
+        case "$token" in
+            sudo|command)
+                ((i++))
+                continue
+                ;;
+            env|/usr/bin/env)
+                ((i++))
+                while (( i < ${#tokens[@]} )); do
+                    token="${tokens[$i]}"
+                    if [[ -z "$token" || "$token" == -* || "$token" == *=* ]]; then
+                        ((i++))
+                        continue
+                    fi
+                    break
+                done
+                continue
+                ;;
+            -*|*=*)
+                ((i++))
+                continue
+                ;;
+            *)
+                lower="${token##*/}"
+                printf '%s\n' "${lower,,}"
+                return 0
+                ;;
+        esac
+    done
+
+    return 1
+}
+
+_agensic_bash_should_preserve_native_tab() {
+    local buffer="$1"
+    local exe=""
+    local -a tokens=()
+    local token=""
+
+    exe="$(_agensic_bash_extract_executable_token "$buffer")" || return 1
+    if [[ -z "$exe" ]]; then
+        return 1
+    fi
+
+    if _agensic_value_in_array "$exe" "${AGENSIC_PATH_HEAVY_EXECUTABLES[@]}"; then
+        return 0
+    fi
+
+    read -r -a tokens <<< "$buffer"
+    for token in "${tokens[@]}"; do
+        if _agensic_token_looks_path_or_file "$token"; then
+            return 0
+        fi
+    done
+
+    if _agensic_value_in_array "$exe" "${AGENSIC_SCRIPT_EXECUTABLES[@]}"; then
+        if [[ "$buffer" == *[[:space:]] || ${#tokens[@]} -ge 2 ]]; then
+            return 0
+        fi
+    fi
+
     return 1
 }
 
@@ -152,33 +224,31 @@ print(str(payload.get('auth_token', '') or '').strip())
 }
 
 _agensic_bash_current_buffer() {
-    if [[ "${AGENSIC_BASH_READLINE_AVAILABLE:-0}" == "1" ]]; then
-        printf '%s\n' "${READLINE_LINE:-}"
-        return
-    fi
-    printf '%s\n' "${_ble_edit_str:-}"
+    printf '%s\n' "${READLINE_LINE:-}"
 }
 
 _agensic_bash_current_cursor() {
-    if [[ "${AGENSIC_BASH_READLINE_AVAILABLE:-0}" == "1" ]]; then
-        printf '%s\n' "${READLINE_POINT:-0}"
-        return
-    fi
-    printf '%s\n' "${_ble_edit_ind:-0}"
+    printf '%s\n' "${READLINE_POINT:-0}"
 }
 
 _agensic_bash_set_buffer() {
     local value="$1"
-    if [[ "${AGENSIC_BASH_READLINE_AVAILABLE:-0}" == "1" ]]; then
-        READLINE_LINE="$value"
-        READLINE_POINT=${#READLINE_LINE}
-        return
+    READLINE_LINE="$value"
+    READLINE_POINT=${#READLINE_LINE}
+}
+
+_agensic_bash_prepare_prompt() {
+    if [[ "${AGENSIC_BASH_PROMPT_PREPARED:-0}" == "1" ]]; then
+        return 0
     fi
-    _ble_edit_str="$value"
-    _ble_edit_ind=${#_ble_edit_str}
-    if declare -F ble/widget/redraw-line >/dev/null 2>&1; then
-        ble/widget/redraw-line >/dev/null 2>&1 || true
+    if [[ "${PS1-}" != $'\n'* ]]; then
+        PS1=$'\n'"${PS1-}"
     fi
+    AGENSIC_BASH_PROMPT_PREPARED=1
+}
+
+_agensic_bash_overlay_supported() {
+    [[ "${AGENSIC_BASH_READLINE_AVAILABLE:-0}" == "1" && "${AGENSIC_BASH_PROMPT_PREPARED:-0}" == "1" && -t 2 && "${TERM:-}" != "dumb" ]]
 }
 
 _agensic_bash_print_readline_message() {
@@ -186,105 +256,29 @@ _agensic_bash_print_readline_message() {
     if [[ "${AGENSIC_BASH_READLINE_AVAILABLE:-0}" != "1" ]]; then
         return 0
     fi
+    message="${message//$'\r'/ }"
+    message="${message//$'\n'/ }"
     if [[ "$message" == "${AGENSIC_BASH_LAST_INFO_MESSAGE:-}" ]]; then
         return 0
     fi
     AGENSIC_BASH_LAST_INFO_MESSAGE="$message"
+    if ! _agensic_bash_overlay_supported; then
+        return 0
+    fi
+    printf '\0337\r\033[1A\033[2K' >&2
     if [[ -n "$message" ]]; then
-        printf '\n[Agensic] %s\n' "$message" >&2
+        printf '[Agensic] %s' "$message" >&2
     fi
-}
-
-_agensic_bash_strip_ghost_if_present() {
-    if [[ "${AGENSIC_BASH_GHOST_ACTIVE:-0}" != "1" || -z "${AGENSIC_BASH_GHOST_SUFFIX:-}" ]]; then
-        return 0
-    fi
-    if [[ "${AGENSIC_BASH_READLINE_AVAILABLE:-0}" == "1" ]]; then
-        AGENSIC_BASH_GHOST_ACTIVE=0
-        AGENSIC_BASH_GHOST_SUFFIX=""
-        AGENSIC_BASH_GHOST_OLD_MARK=""
-        AGENSIC_BASH_GHOST_OLD_MARK_ACTIVE=""
-        return 0
-    fi
-
-    local current="${_ble_edit_str:-}"
-    if [[ "$current" == *"${AGENSIC_BASH_GHOST_SUFFIX}" ]]; then
-        _ble_edit_str="${current%"$AGENSIC_BASH_GHOST_SUFFIX"}"
-        if (( _ble_edit_ind > ${#_ble_edit_str} )); then
-            _ble_edit_ind=${#_ble_edit_str}
-        fi
-    fi
-    if [[ -n "${AGENSIC_BASH_GHOST_OLD_MARK_ACTIVE+x}" ]]; then
-        _ble_edit_mark_active="$AGENSIC_BASH_GHOST_OLD_MARK_ACTIVE"
-    fi
-    if [[ -n "${AGENSIC_BASH_GHOST_OLD_MARK+x}" ]]; then
-        _ble_edit_mark="$AGENSIC_BASH_GHOST_OLD_MARK"
-    fi
-    AGENSIC_BASH_GHOST_ACTIVE=0
-    AGENSIC_BASH_GHOST_SUFFIX=""
-    AGENSIC_BASH_GHOST_OLD_MARK=""
-    AGENSIC_BASH_GHOST_OLD_MARK_ACTIVE=""
-}
-
-_agensic_bash_apply_ghost_suffix() {
-    local base="$1"
-    local suffix="$2"
-
-    _agensic_bash_strip_ghost_if_present
-    if [[ -z "$suffix" ]]; then
-        return 0
-    fi
-    if [[ "${AGENSIC_BASH_READLINE_AVAILABLE:-0}" == "1" ]]; then
-        AGENSIC_BASH_GHOST_ACTIVE=0
-        AGENSIC_BASH_GHOST_SUFFIX=""
-        return 0
-    fi
-
-    _ble_edit_str="${base}${suffix}"
-    _ble_edit_ind=${#base}
-    AGENSIC_BASH_GHOST_OLD_MARK="${_ble_edit_mark-}"
-    AGENSIC_BASH_GHOST_OLD_MARK_ACTIVE="${_ble_edit_mark_active-}"
-    _ble_edit_mark=${#_ble_edit_str}
-    _ble_edit_mark_active=insert
-    AGENSIC_BASH_GHOST_ACTIVE=1
-    AGENSIC_BASH_GHOST_SUFFIX="$suffix"
-    if declare -F ble/widget/redraw-line >/dev/null 2>&1; then
-        ble/widget/redraw-line >/dev/null 2>&1 || true
-    fi
+    printf '\0338' >&2
 }
 
 _agensic_bash_render_info() {
     local message="$1"
-    if [[ "${AGENSIC_BASH_READLINE_AVAILABLE:-0}" == "1" ]]; then
-        _agensic_bash_print_readline_message "$message"
-        return 0
-    fi
-    AGENSIC_BASH_LAST_INFO_MESSAGE="$message"
-    if declare -p _ble_edit_info >/dev/null 2>&1; then
-        _ble_edit_info[0]=1
-        _ble_edit_info[1]=0
-        _ble_edit_info[2]="$message"
-        _ble_edit_info_invalidated=1
-    fi
-    if declare -F ble/widget/redraw-line >/dev/null 2>&1; then
-        ble/widget/redraw-line >/dev/null 2>&1 || true
-    fi
+    _agensic_bash_print_readline_message "$message"
 }
 
 _agensic_bash_clear_info() {
-    AGENSIC_BASH_LAST_INFO_MESSAGE=""
-    if [[ "${AGENSIC_BASH_READLINE_AVAILABLE:-0}" == "1" ]]; then
-        return 0
-    fi
-    if declare -p _ble_edit_info >/dev/null 2>&1; then
-        _ble_edit_info[0]=0
-        _ble_edit_info[1]=0
-        _ble_edit_info[2]=""
-        _ble_edit_info_invalidated=1
-    fi
-    if declare -F ble/widget/redraw-line >/dev/null 2>&1; then
-        ble/widget/redraw-line >/dev/null 2>&1 || true
-    fi
+    _agensic_bash_print_readline_message ""
 }
 
 _agensic_bash_render_markdown_or_plain() {
@@ -316,7 +310,6 @@ _agensic_bash_is_status_suggestion() {
 }
 
 _agensic_bash_clear_suggestions() {
-    _agensic_bash_strip_ghost_if_present
     AGENSIC_SUGGESTIONS=()
     AGENSIC_DISPLAY_TEXTS=()
     AGENSIC_ACCEPT_MODES=()
@@ -328,7 +321,6 @@ _agensic_bash_clear_suggestions() {
 _agensic_bash_update_display() {
     if (( ${#AGENSIC_SUGGESTIONS[@]} == 0 || AGENSIC_SUGGESTION_INDEX <= 0 )); then
         _agensic_bash_clear_info
-        _agensic_bash_strip_ghost_if_present
         return
     fi
 
@@ -338,16 +330,19 @@ _agensic_bash_update_display() {
     local buffer=""
     local message=""
     local inline_suffix=""
+    local count=0
 
     if _agensic_bash_is_status_suggestion "$current"; then
-        _agensic_bash_strip_ghost_if_present
         message="${current#${AGENSIC_STATUS_PREFIX}}"
         _agensic_bash_render_info "$message"
         return
     fi
 
-    _agensic_bash_strip_ghost_if_present
     buffer="$(_agensic_bash_current_buffer)"
+    if _agensic_bash_should_preserve_native_tab "$buffer"; then
+        _agensic_bash_clear_info
+        return
+    fi
     if [[ "$mode" == "replace_full" ]]; then
         if [[ "$current" == "$buffer" ]]; then
             _agensic_bash_clear_info
@@ -365,27 +360,16 @@ _agensic_bash_update_display() {
         return
     fi
 
-    local count=${#AGENSIC_SUGGESTIONS[@]}
-    if [[ "${AGENSIC_BASH_READLINE_AVAILABLE:-0}" == "1" ]]; then
-        if [[ "$mode" == "replace_full" ]]; then
-            message="$display_text"
-        else
-            message="${buffer}${inline_suffix}"
-        fi
-        if (( count > 1 )); then
-            message="(${AGENSIC_SUGGESTION_INDEX}/${count}) ${message}"
-        fi
-        _agensic_bash_render_info "$message"
-        return
-    fi
-
-    _agensic_bash_apply_ghost_suffix "$buffer" "$inline_suffix"
-    if (( count > 1 )); then
-        message="(${AGENSIC_SUGGESTION_INDEX}/${count}, Ctrl+P/N)"
-        _agensic_bash_render_info "$message"
+    count=${#AGENSIC_SUGGESTIONS[@]}
+    if [[ "$mode" == "replace_full" ]]; then
+        message="$display_text"
     else
-        _agensic_bash_clear_info
+        message="${buffer}${inline_suffix}"
     fi
+    if (( count > 1 )); then
+        message="(${AGENSIC_SUGGESTION_INDEX}/${count}) ${message}"
+    fi
+    _agensic_bash_render_info "$message"
 }
 
 _agensic_bash_fetch_error_message() {
@@ -458,7 +442,6 @@ _agensic_bash_fetch_suggestions() {
     local parsed=""
     local sep=$'\x1f'
 
-    _agensic_bash_strip_ghost_if_present
     buffer="$(_agensic_bash_current_buffer)"
     cursor="$(_agensic_bash_current_cursor)"
     AGENSIC_LAST_FETCH_USED_AI=0
@@ -468,6 +451,10 @@ _agensic_bash_fetch_suggestions() {
     AGENSIC_FETCH_ATTEMPT_COUNT=$((AGENSIC_FETCH_ATTEMPT_COUNT + 1))
 
     if [[ ${#buffer} -lt 2 || ! -f "$AGENSIC_CLIENT_HELPER" ]]; then
+        _agensic_bash_clear_suggestions
+        return
+    fi
+    if [[ "$trigger_source" != manual_* ]] && _agensic_bash_should_preserve_native_tab "$buffer"; then
         _agensic_bash_clear_suggestions
         return
     fi
@@ -591,11 +578,7 @@ _agensic_bash_accept_current_suggestion() {
         return 1
     fi
 
-    if [[ "${AGENSIC_BASH_GHOST_ACTIVE:-0}" == "1" && "$mode" != "replace_full" ]]; then
-        _ble_edit_ind=${#_ble_edit_str}
-        AGENSIC_BASH_GHOST_ACTIVE=0
-        AGENSIC_BASH_GHOST_SUFFIX=""
-    elif [[ "$mode" == "replace_full" ]]; then
+    if [[ "$mode" == "replace_full" ]]; then
         _agensic_bash_set_buffer "$(_agensic_canonicalize_buffer_spacing "$current")"
     else
         local typed_since_fetch="${buffer#"$AGENSIC_LAST_BUFFER"}"
@@ -608,13 +591,46 @@ _agensic_bash_accept_current_suggestion() {
     return 0
 }
 
+_agensic_bash_partial_accept_current_suggestion() {
+    if (( ${#AGENSIC_SUGGESTIONS[@]} == 0 || AGENSIC_SUGGESTION_INDEX <= 0 )); then
+        return 1
+    fi
+
+    local idx=$((AGENSIC_SUGGESTION_INDEX - 1))
+    local current="${AGENSIC_SUGGESTIONS[$idx]}"
+    local mode="${AGENSIC_ACCEPT_MODES[$idx]:-suffix_append}"
+    local buffer=""
+    local typed_since_fetch=""
+    local remaining=""
+    local first_word=""
+
+    buffer="$(_agensic_bash_current_buffer)"
+    if _agensic_bash_is_status_suggestion "$current"; then
+        return 1
+    fi
+    if [[ "$mode" == "replace_full" ]]; then
+        _agensic_bash_set_buffer "$(_agensic_canonicalize_buffer_spacing "$current")"
+        _agensic_bash_clear_suggestions
+        return 0
+    fi
+
+    typed_since_fetch="${buffer#"$AGENSIC_LAST_BUFFER"}"
+    remaining="${current#"$typed_since_fetch"}"
+    remaining="$(_agensic_merge_suffix "$buffer" "$remaining")"
+    first_word="${remaining%% *}"
+    if [[ "$first_word" == "$remaining" ]]; then
+        _agensic_bash_set_buffer "$(_agensic_canonicalize_buffer_spacing "${buffer}${remaining}")"
+    else
+        _agensic_bash_set_buffer "$(_agensic_canonicalize_buffer_spacing "${buffer}${first_word} ")"
+    fi
+    _agensic_bash_clear_suggestions
+    return 0
+}
+
 _agensic_bash_cycle_next() {
     local count=${#AGENSIC_SUGGESTIONS[@]}
     if (( count == 0 )); then
-        if declare -F ble/widget/next-history >/dev/null 2>&1; then
-            ble/widget/next-history
-        fi
-        return
+        return 0
     fi
     AGENSIC_SUGGESTION_INDEX=$(( AGENSIC_SUGGESTION_INDEX % count + 1 ))
     _agensic_bash_update_display
@@ -623,10 +639,7 @@ _agensic_bash_cycle_next() {
 _agensic_bash_cycle_prev() {
     local count=${#AGENSIC_SUGGESTIONS[@]}
     if (( count == 0 )); then
-        if declare -F ble/widget/previous-history >/dev/null 2>&1; then
-            ble/widget/previous-history
-        fi
-        return
+        return 0
     fi
     AGENSIC_SUGGESTION_INDEX=$(( (AGENSIC_SUGGESTION_INDEX + count - 2) % count + 1 ))
     _agensic_bash_update_display
@@ -634,7 +647,6 @@ _agensic_bash_cycle_prev() {
 
 _agensic_bash_handle_enter() {
     local buffer=""
-    _agensic_bash_strip_ghost_if_present
     buffer="$(_agensic_bash_current_buffer)"
     if [[ "$buffer" == '##'* ]]; then
         _agensic_bash_clear_suggestions
@@ -651,14 +663,11 @@ _agensic_bash_handle_enter() {
     else
         _agensic_clear_pending_execution
     fi
-    if declare -F ble/widget/accept-line >/dev/null 2>&1; then
-        ble/widget/accept-line
-    fi
+    return 0
 }
 
 _agensic_bash_after_self_insert() {
     local buffer=""
-    _agensic_bash_strip_ghost_if_present
     buffer="$(_agensic_bash_current_buffer)"
     if [[ "$buffer" == '#'* ]]; then
         _agensic_bash_clear_suggestions
@@ -666,6 +675,10 @@ _agensic_bash_after_self_insert() {
     fi
     if (( ${#AGENSIC_SUGGESTIONS[@]} > 0 )); then
         _agensic_bash_filter_pool
+    fi
+    if _agensic_bash_should_preserve_native_tab "$buffer"; then
+        _agensic_bash_clear_suggestions
+        return 0
     fi
     if [[ ${#buffer} -lt 2 ]]; then
         return 0
@@ -682,8 +695,17 @@ _agensic_bash_after_self_insert() {
 }
 
 _agensic_bash_after_delete() {
-    _agensic_bash_strip_ghost_if_present
+    local buffer=""
     _agensic_bash_clear_suggestions
+    buffer="$(_agensic_bash_current_buffer)"
+    if [[ "$buffer" == '#'* ]]; then
+        return 0
+    fi
+    if [[ ${#buffer} -lt 2 ]] || _agensic_bash_should_preserve_native_tab "$buffer"; then
+        return 0
+    fi
+    AGENSIC_LAST_BUFFER="$buffer"
+    _agensic_bash_fetch_suggestions 1 "delete_auto"
 }
 
 _agensic_bash_resolve_intent_command() {
@@ -886,140 +908,11 @@ _agensic_bash_precmd() {
         fi
         _agensic_bash_log_command "$AGENSIC_LAST_EXECUTED_CMD" "$exit_code" "$duration_ms"
     fi
+    _agensic_bash_clear_suggestions
     AGENSIC_LAST_EXECUTED_CMD=""
     AGENSIC_LAST_EXECUTED_STARTED_AT_MS=0
     AGENSIC_BASH_AT_PROMPT=1
     AGENSIC_BASH_IN_PROMPT_HOOK=0
-}
-
-_agensic_find_ble_sh() {
-    local candidate=""
-    local -a candidates=()
-
-    if [[ -n "$AGENSIC_BLE_SH_PATH" ]]; then
-        candidates+=("$AGENSIC_BLE_SH_PATH")
-    fi
-
-    candidates+=(
-        "${HOME}/.local/share/blesh/ble.sh"
-        "${HOME}/.local/share/blesh/latest/ble.sh"
-        "/usr/local/share/blesh/ble.sh"
-        "/usr/share/blesh/ble.sh"
-    )
-
-    for candidate in "${candidates[@]}"; do
-        if [[ -f "$candidate" ]]; then
-            printf '%s\n' "$candidate"
-            return 0
-        fi
-    done
-
-    return 1
-}
-
-_agensic_emit_ble_missing_warning() {
-    if ! _agensic_bash_is_interactive; then
-        return
-    fi
-    if [[ "${AGENSIC_BASH_BLE_WARNING_EMITTED:-0}" == "1" ]]; then
-        return
-    fi
-    AGENSIC_BASH_BLE_WARNING_EMITTED=1
-    printf '%s\n' "Agensic bash support requires ble.sh. Install ble.sh and restart bash." >&2
-}
-
-_agensic_source_ble_if_needed() {
-    if [[ -n "${BLE_VERSION:-}" ]]; then
-        AGENSIC_BASH_BLE_AVAILABLE=1
-        AGENSIC_BASH_BLE_LOADED_FROM="session"
-        return 0
-    fi
-
-    local ble_path=""
-    ble_path="$(_agensic_find_ble_sh)" || return 1
-    local ble_source_rc=0
-    # ble.sh initialization relies on terminal I/O during source. Redirecting
-    # stderr can leave BLE_VERSION unset and force a readline fallback.
-    source "$ble_path" --attach=none || ble_source_rc=$?
-    if [[ -z "${BLE_VERSION:-}" ]]; then
-        return 1
-    fi
-    if declare -F ble-attach >/dev/null 2>&1; then
-        ble-attach >/dev/null 2>&1 || true
-    fi
-    if [[ -n "${BLE_VERSION:-}" ]]; then
-        AGENSIC_BASH_BLE_AVAILABLE=1
-        AGENSIC_BASH_BLE_LOADED_FROM="$ble_path"
-        if (( ble_source_rc != 0 )); then
-            _agensic_bash_log "ble_loaded_with_nonzero_exit source=${ble_path} rc=${ble_source_rc}"
-        fi
-        return 0
-    fi
-    return 1
-}
-
-function ble/widget/agensic/accept {
-    if ! _agensic_bash_accept_current_suggestion; then
-        if declare -F ble/widget/complete >/dev/null 2>&1; then
-            ble/widget/complete
-        fi
-    fi
-}
-
-function ble/widget/agensic/manual-trigger {
-    local buffer=""
-    buffer="$(_agensic_bash_current_buffer)"
-    if [[ ${#buffer} -lt 2 ]]; then
-        return 0
-    fi
-    AGENSIC_LAST_BUFFER="$buffer"
-    _agensic_bash_fetch_suggestions 1 "manual_ctrl_space"
-}
-
-function ble/widget/agensic/partial-accept {
-    if (( ${#AGENSIC_SUGGESTIONS[@]} == 0 || AGENSIC_SUGGESTION_INDEX <= 0 )); then
-        if declare -F ble/widget/forward-word >/dev/null 2>&1; then
-            ble/widget/forward-word
-        fi
-        return 0
-    fi
-
-    local idx=$((AGENSIC_SUGGESTION_INDEX - 1))
-    local current="${AGENSIC_SUGGESTIONS[$idx]}"
-    local mode="${AGENSIC_ACCEPT_MODES[$idx]:-suffix_append}"
-    local buffer=""
-    buffer="$(_agensic_bash_current_buffer)"
-    if _agensic_bash_is_status_suggestion "$current"; then
-        return 0
-    fi
-    if [[ "$mode" == "replace_full" ]]; then
-        _agensic_bash_set_buffer "$(_agensic_canonicalize_buffer_spacing "$current")"
-        _agensic_bash_clear_suggestions
-        return 0
-    fi
-
-    local typed_since_fetch="${buffer#"$AGENSIC_LAST_BUFFER"}"
-    local remaining="${current#"$typed_since_fetch"}"
-    remaining="$(_agensic_merge_suffix "$buffer" "$remaining")"
-    local first_word="${remaining%% *}"
-    if [[ "$first_word" == "$remaining" ]]; then
-        _agensic_bash_set_buffer "$(_agensic_canonicalize_buffer_spacing "${buffer}${remaining}")"
-    else
-        _agensic_bash_set_buffer "$(_agensic_canonicalize_buffer_spacing "${buffer}${first_word} ")"
-    fi
-    _agensic_bash_clear_suggestions
-}
-
-function ble/widget/agensic/cycle-next {
-    _agensic_bash_cycle_next
-}
-
-function ble/widget/agensic/cycle-prev {
-    _agensic_bash_cycle_prev
-}
-
-function ble/widget/agensic/accept-line {
-    _agensic_bash_handle_enter
 }
 
 _agensic_readline_insert_text() {
@@ -1029,6 +922,12 @@ _agensic_readline_insert_text() {
     local right="${READLINE_LINE:$point}"
     READLINE_LINE="${left}${text}${right}"
     READLINE_POINT=$(( point + ${#text} ))
+}
+
+_agensic_readline_self_insert_char() {
+    local text="${1:-}"
+    _agensic_readline_insert_text "$text"
+    _agensic_bash_after_self_insert
 }
 
 _agensic_readline_manual_trigger() {
@@ -1042,21 +941,42 @@ _agensic_readline_manual_trigger() {
 }
 
 _agensic_readline_accept() {
+    local buffer="${READLINE_LINE:-}"
+    if (( ${#AGENSIC_SUGGESTIONS[@]} == 0 )); then
+        if [[ ${#buffer} -ge 2 ]]; then
+            AGENSIC_LAST_BUFFER="$buffer"
+            _agensic_bash_fetch_suggestions 1 "manual_tab"
+        fi
+    fi
     if ! _agensic_bash_accept_current_suggestion; then
         printf '\a' >&2
     fi
 }
 
 _agensic_readline_cycle_next() {
+    local buffer="${READLINE_LINE:-}"
+    if (( ${#AGENSIC_SUGGESTIONS[@]} == 0 )) && [[ ${#buffer} -ge 2 ]]; then
+        AGENSIC_LAST_BUFFER="$buffer"
+        _agensic_bash_fetch_suggestions 1 "manual_ctrl_n"
+        return 0
+    fi
     _agensic_bash_cycle_next
 }
 
 _agensic_readline_cycle_prev() {
+    local buffer="${READLINE_LINE:-}"
+    if (( ${#AGENSIC_SUGGESTIONS[@]} == 0 )) && [[ ${#buffer} -ge 2 ]]; then
+        AGENSIC_LAST_BUFFER="$buffer"
+        _agensic_bash_fetch_suggestions 1 "manual_ctrl_p"
+        return 0
+    fi
     _agensic_bash_cycle_prev
 }
 
 _agensic_readline_partial_accept() {
-    ble/widget/agensic/partial-accept
+    if ! _agensic_bash_partial_accept_current_suggestion; then
+        printf '\a' >&2
+    fi
 }
 
 _agensic_readline_insert_space() {
@@ -1069,7 +989,7 @@ _agensic_readline_insert_space() {
     _agensic_bash_fetch_suggestions 1 "space_auto"
 }
 
-_agensic_readline_backspace() {
+_agensic_readline_delete_backward_char() {
     local point="${READLINE_POINT:-0}"
     if (( point <= 0 )); then
         return 0
@@ -1081,32 +1001,28 @@ _agensic_readline_backspace() {
     _agensic_bash_after_delete
 }
 
-_agensic_register_bash_widgets() {
-    if [[ "${AGENSIC_BASH_WIDGETS_REGISTERED:-0}" == "1" ]]; then
-        return 0
-    fi
-    if ! declare -F ble-bind >/dev/null 2>&1; then
-        return 1
-    fi
+_agensic_register_readline_command() {
+    local keyseq="$1"
+    local command="$2"
 
-    ble-bind -f 'C-@' 'agensic/manual-trigger'
-    ble-bind -f 'TAB' 'agensic/accept'
-    ble-bind -f 'C-p' 'agensic/cycle-prev'
-    ble-bind -f 'C-n' 'agensic/cycle-next'
-    ble-bind -f 'M-f' 'agensic/partial-accept'
-    ble-bind -f 'C-m' 'agensic/accept-line'
-    ble-bind -f 'RET' 'agensic/accept-line'
+    bind -m emacs-standard -x "\"${keyseq}\":${command}" >/dev/null 2>&1 || return 1
+    bind -m vi-insert -x "\"${keyseq}\":${command}" >/dev/null 2>&1 || return 1
+}
 
-    if declare -F ble-face >/dev/null 2>&1; then
-        ble-face -s region_insert fg=242 >/dev/null 2>&1 || true
-    fi
+_agensic_register_readline_self_insert_bindings() {
+    local code=0
+    local char=""
+    local keyseq=""
+    local shell_char=""
 
-    if declare -F ble/function#advice >/dev/null 2>&1; then
-        ble/function#advice after ble/widget/default/self-insert '_agensic_bash_after_self_insert'
-        ble/function#advice after ble/widget/default/backward-delete-char '_agensic_bash_after_delete'
-    fi
+    for code in {33..126}; do
+        printf -v char "\\$(printf '%03o' "$code")"
+        printf -v keyseq '\\x%02x' "$code"
+        printf -v shell_char '%q' "$char"
+        _agensic_register_readline_command "$keyseq" "_agensic_readline_self_insert_char ${shell_char}" || return 1
+    done
 
-    AGENSIC_BASH_WIDGETS_REGISTERED=1
+    _agensic_register_readline_command " " "_agensic_readline_insert_space" || return 1
     return 0
 }
 
@@ -1115,14 +1031,14 @@ _agensic_register_readline_widgets() {
         return 0
     fi
 
-    bind -x '"\C-@":_agensic_readline_manual_trigger' >/dev/null 2>&1 || return 1
-    bind -x '"\C-n":_agensic_readline_cycle_next' >/dev/null 2>&1 || return 1
-    bind -x '"\C-p":_agensic_readline_cycle_prev' >/dev/null 2>&1 || return 1
-    bind -x '"\ef":_agensic_readline_partial_accept' >/dev/null 2>&1 || return 1
-    bind -x '" ":_agensic_readline_insert_space' >/dev/null 2>&1 || return 1
-    bind -x '"\C-?":_agensic_readline_backspace' >/dev/null 2>&1 || true
-    bind -x '"\C-h":_agensic_readline_backspace' >/dev/null 2>&1 || true
-    bind -x '"\t":_agensic_readline_accept' >/dev/null 2>&1 || return 1
+    _agensic_register_readline_self_insert_bindings || return 1
+    _agensic_register_readline_command '\C-@' "_agensic_readline_manual_trigger" || return 1
+    _agensic_register_readline_command '\C-n' "_agensic_readline_cycle_next" || return 1
+    _agensic_register_readline_command '\C-p' "_agensic_readline_cycle_prev" || return 1
+    _agensic_register_readline_command '\ef' "_agensic_readline_partial_accept" || return 1
+    _agensic_register_readline_command '\C-?' "_agensic_readline_delete_backward_char" || true
+    _agensic_register_readline_command '\C-h' "_agensic_readline_delete_backward_char" || true
+    _agensic_register_readline_command '\t' "_agensic_readline_accept" || return 1
 
     AGENSIC_BASH_READLINE_AVAILABLE=1
     AGENSIC_BASH_BACKEND="readline"
@@ -1148,25 +1064,16 @@ _agensic_initialize_bash_adapter() {
     if ! _agensic_bash_is_interactive; then
         return 0
     fi
-    if _agensic_source_ble_if_needed; then
-        AGENSIC_BASH_ADAPTER_READY=1
-        AGENSIC_BASH_BACKEND="ble"
-        _agensic_register_bash_widgets >/dev/null 2>&1 || true
-        _agensic_register_bash_runtime_hooks >/dev/null 2>&1 || true
-        _agensic_bash_log "ble_ready source=${AGENSIC_BASH_BLE_LOADED_FROM:-unknown}"
-        return 0
-    fi
-    AGENSIC_BASH_BLE_AVAILABLE=0
+    _agensic_bash_prepare_prompt >/dev/null 2>&1 || true
     if _agensic_register_readline_widgets >/dev/null 2>&1; then
         AGENSIC_BASH_ADAPTER_READY=1
         _agensic_register_bash_runtime_hooks >/dev/null 2>&1 || true
-        _agensic_bash_log "readline_fallback_ready"
+        _agensic_bash_log "readline_ready"
         return 0
     fi
     AGENSIC_BASH_ADAPTER_READY=0
     AGENSIC_BASH_BACKEND="none"
-    _agensic_bash_log "ble_missing"
-    _agensic_emit_ble_missing_warning
+    _agensic_bash_log "readline_unavailable"
     return 1
 }
 

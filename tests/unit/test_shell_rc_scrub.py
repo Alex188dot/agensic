@@ -13,6 +13,9 @@ class ShellRcScrubTests(unittest.TestCase):
             rc_path.write_text(
                 "\n".join(
                     [
+                        "# >>> agensic ble >>>",
+                        "export AGENSIC_LEGACY_BASH_HELPER=1",
+                        "# <<< agensic ble <<<",
                         "export PATH=\"$HOME/.agensic/bin:$PATH\"",
                         "alias agensic='python3 /Users/test/.agensic/cli.py'",
                         "source /Users/test/.agensic/agensic.zsh",
@@ -37,6 +40,7 @@ class ShellRcScrubTests(unittest.TestCase):
         self.assertNotIn(".agensic/bin", updated)
         self.assertNotIn("agensic.zsh", updated)
         self.assertNotIn("agensic.bash", updated)
+        self.assertNotIn("AGENSIC_LEGACY_BASH_HELPER", updated)
         self.assertIn("export KEEP_ME=1", updated)
 
 

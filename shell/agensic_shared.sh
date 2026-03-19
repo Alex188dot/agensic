@@ -1,7 +1,7 @@
 #!/usr/bin/env sh
 
 # Shared shell-integration helpers used by shell-specific adapters.
-# Keep this file free of zle/readline/ble.sh/PowerShell-specific logic.
+# Keep this file free of shell-editor-specific logic.
 
 _agensic_value_in_array() {
     local needle="$1"

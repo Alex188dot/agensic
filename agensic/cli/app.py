@@ -2515,8 +2515,8 @@ def _scrub_shell_rc_file(path: Path) -> bool:
         re.compile(r"source .*\.agensic/agensic\.bash"),
         re.compile(rf"source .*\.{re.escape(LEGACY_BRAND)}/{re.escape(LEGACY_BRAND)}\.zsh"),
     )
-    block_starts = {SHELL_RC_BLOCK_START, LEGACY_SHELL_RC_BLOCK_START}
-    block_ends = {SHELL_RC_BLOCK_END, LEGACY_SHELL_RC_BLOCK_END}
+    block_starts = {SHELL_RC_BLOCK_START, LEGACY_SHELL_RC_BLOCK_START, "# >>> agensic ble >>>"}
+    block_ends = {SHELL_RC_BLOCK_END, LEGACY_SHELL_RC_BLOCK_END, "# <<< agensic ble <<<"}
 
     cleaned_lines: list[str] = []
     in_block = False
