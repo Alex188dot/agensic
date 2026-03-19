@@ -19,7 +19,7 @@ AGENSIC_CONFIG_PATH="${AGENSIC_CONFIG_HOME}/agensic/config.json"
 AGENSIC_AUTH_PATH="${AGENSIC_CONFIG_HOME}/agensic/auth.json"
 AGENSIC_PLUGIN_LOG="${AGENSIC_HOME}/plugin.log"
 AGENSIC_SHARED_HELPERS_PATH="${AGENSIC_SOURCE_DIR}/shell/agensic_shared.sh"
-AGENSIC_CLIENT_HELPER="${AGENSIC_SOURCE_DIR}/shell_client.py"
+AGENSIC_CLIENT_HELPER="${AGENSIC_CLIENT_HELPER:-${AGENSIC_SOURCE_DIR}/shell_client.py}"
 AGENSIC_RUNTIME_PYTHON="${AGENSIC_RUNTIME_PYTHON:-}"
 AGENSIC_BLE_SH_PATH="${AGENSIC_BLE_SH_PATH:-}"
 AGENSIC_BASH_ADAPTER_READY=0
@@ -27,6 +27,8 @@ AGENSIC_BASH_BLE_AVAILABLE=0
 AGENSIC_BASH_BLE_LOADED_FROM=""
 AGENSIC_BASH_BLE_WARNING_EMITTED=0
 AGENSIC_BASH_WIDGETS_REGISTERED=0
+AGENSIC_BASH_GHOST_ACTIVE=0
+AGENSIC_BASH_GHOST_SUFFIX=""
 AGENSIC_STATUS_PREFIX="__AGENSIC_STATUS__:"
 AGENSIC_FETCH_ATTEMPT_COUNT=0
 AGENSIC_FETCH_SUCCESS_COUNT=0
@@ -35,6 +37,12 @@ AGENSIC_LAST_FETCH_USED_AI=0
 AGENSIC_LAST_FETCH_AI_AGENT=""
 AGENSIC_LAST_FETCH_AI_PROVIDER=""
 AGENSIC_LAST_FETCH_AI_MODEL=""
+AGENSIC_LAST_NL_INPUT=""
+AGENSIC_LAST_NL_KIND=""
+AGENSIC_LAST_NL_COMMAND=""
+AGENSIC_LAST_NL_ASSIST=""
+AGENSIC_LAST_EXECUTED_CMD=""
+AGENSIC_LAST_EXECUTED_STARTED_AT_MS=0
 AGENSIC_AUTH_MTIME=""
 AGENSIC_AUTH_TOKEN=""
 AGENSIC_LAST_BUFFER=""
@@ -43,6 +51,10 @@ AGENSIC_SUGGESTIONS=()
 AGENSIC_DISPLAY_TEXTS=()
 AGENSIC_ACCEPT_MODES=()
 AGENSIC_SUGGESTION_KINDS=()
+AGENSIC_BASH_AT_PROMPT=1
+AGENSIC_BASH_IN_PROMPT_HOOK=0
+AGENSIC_BASH_ORIGINAL_PROMPT_COMMAND="${PROMPT_COMMAND:-}"
+AGENSIC_BASH_RUNTIME_HOOKS_REGISTERED=0
 
 if [[ -f "$AGENSIC_SHARED_HELPERS_PATH" ]]; then
     # shellcheck disable=SC1090
@@ -130,6 +142,40 @@ _agensic_bash_set_buffer() {
     fi
 }
 
+_agensic_bash_strip_ghost_if_present() {
+    if [[ "${AGENSIC_BASH_GHOST_ACTIVE:-0}" != "1" || -z "${AGENSIC_BASH_GHOST_SUFFIX:-}" ]]; then
+        return 0
+    fi
+
+    local current="${_ble_edit_str:-}"
+    if [[ "$current" == *"${AGENSIC_BASH_GHOST_SUFFIX}" ]]; then
+        _ble_edit_str="${current%"$AGENSIC_BASH_GHOST_SUFFIX"}"
+        if (( _ble_edit_ind > ${#_ble_edit_str} )); then
+            _ble_edit_ind=${#_ble_edit_str}
+        fi
+    fi
+    AGENSIC_BASH_GHOST_ACTIVE=0
+    AGENSIC_BASH_GHOST_SUFFIX=""
+}
+
+_agensic_bash_apply_ghost_suffix() {
+    local base="$1"
+    local suffix="$2"
+
+    _agensic_bash_strip_ghost_if_present
+    if [[ -z "$suffix" ]]; then
+        return 0
+    fi
+
+    _ble_edit_str="${base}${suffix}"
+    _ble_edit_ind=${#base}
+    AGENSIC_BASH_GHOST_ACTIVE=1
+    AGENSIC_BASH_GHOST_SUFFIX="$suffix"
+    if declare -F ble/widget/redraw-line >/dev/null 2>&1; then
+        ble/widget/redraw-line >/dev/null 2>&1 || true
+    fi
+}
+
 _agensic_bash_render_info() {
     local message="$1"
     if declare -p _ble_edit_info >/dev/null 2>&1; then
@@ -155,11 +201,36 @@ _agensic_bash_clear_info() {
     fi
 }
 
+_agensic_bash_render_markdown_or_plain() {
+    local text="$1"
+    if command -v python3 >/dev/null 2>&1; then
+        AGENSIC_MARKDOWN_TEXT="$text" python3 -c "
+import os
+text = os.environ.get('AGENSIC_MARKDOWN_TEXT', '')
+try:
+    from rich.console import Console
+    from rich.markdown import Markdown
+    Console(soft_wrap=True).print(Markdown(text))
+except Exception:
+    print(text)
+" 2>/dev/null && return 0
+    fi
+    printf '%s\n' "$text"
+}
+
+_agensic_bash_now_epoch_ms() {
+    python3 - <<'PY' 2>/dev/null
+import time
+print(int(time.time() * 1000))
+PY
+}
+
 _agensic_bash_is_status_suggestion() {
     [[ "${1:-}" == "$AGENSIC_STATUS_PREFIX"* ]]
 }
 
 _agensic_bash_clear_suggestions() {
+    _agensic_bash_strip_ghost_if_present
     AGENSIC_SUGGESTIONS=()
     AGENSIC_DISPLAY_TEXTS=()
     AGENSIC_ACCEPT_MODES=()
@@ -171,6 +242,7 @@ _agensic_bash_clear_suggestions() {
 _agensic_bash_update_display() {
     if (( ${#AGENSIC_SUGGESTIONS[@]} == 0 || AGENSIC_SUGGESTION_INDEX <= 0 )); then
         _agensic_bash_clear_info
+        _agensic_bash_strip_ghost_if_present
         return
     fi
 
@@ -179,33 +251,38 @@ _agensic_bash_update_display() {
     local mode="${AGENSIC_ACCEPT_MODES[$((AGENSIC_SUGGESTION_INDEX - 1))]}"
     local buffer=""
     local message=""
+    local inline_suffix=""
 
     if _agensic_bash_is_status_suggestion "$current"; then
+        _agensic_bash_strip_ghost_if_present
         message="${current#${AGENSIC_STATUS_PREFIX}}"
         _agensic_bash_render_info "$message"
         return
     fi
 
+    _agensic_bash_strip_ghost_if_present
     buffer="$(_agensic_bash_current_buffer)"
     if [[ "$mode" == "replace_full" ]]; then
         if [[ "$current" == "$buffer" ]]; then
             _agensic_bash_clear_info
             return
         fi
-        message="$display_text"
+        inline_suffix=" $display_text"
     else
         local typed_since_fetch="${buffer#"$AGENSIC_LAST_BUFFER"}"
-        local suffix="${current#"$typed_since_fetch"}"
-        suffix="$(_agensic_merge_suffix "$buffer" "$suffix")"
-        message="$suffix"
+        inline_suffix="${current#"$typed_since_fetch"}"
+        inline_suffix="$(_agensic_merge_suffix "$buffer" "$inline_suffix")"
     fi
 
-    if [[ -n "$message" ]]; then
+    if [[ -n "$inline_suffix" ]]; then
+        _agensic_bash_apply_ghost_suffix "$buffer" "$inline_suffix"
         local count=${#AGENSIC_SUGGESTIONS[@]}
         if (( count > 1 )); then
-            message="${message}  (${AGENSIC_SUGGESTION_INDEX}/${count}, Ctrl+P/N)"
+            message="(${AGENSIC_SUGGESTION_INDEX}/${count}, Ctrl+P/N)"
+            _agensic_bash_render_info "$message"
+        else
+            _agensic_bash_clear_info
         fi
-        _agensic_bash_render_info "$message"
     else
         _agensic_bash_clear_info
     fi
@@ -271,6 +348,7 @@ _agensic_bash_fetch_suggestions() {
     local parsed=""
     local sep=$'\x1f'
 
+    _agensic_bash_strip_ghost_if_present
     buffer="$(_agensic_bash_current_buffer)"
     cursor="$(_agensic_bash_current_cursor)"
     AGENSIC_LAST_FETCH_USED_AI=0
@@ -393,7 +471,11 @@ _agensic_bash_accept_current_suggestion() {
         return 1
     fi
 
-    if [[ "$mode" == "replace_full" ]]; then
+    if [[ "${AGENSIC_BASH_GHOST_ACTIVE:-0}" == "1" && "$mode" != "replace_full" ]]; then
+        _ble_edit_ind=${#_ble_edit_str}
+        AGENSIC_BASH_GHOST_ACTIVE=0
+        AGENSIC_BASH_GHOST_SUFFIX=""
+    elif [[ "$mode" == "replace_full" ]]; then
         _agensic_bash_set_buffer "$(_agensic_canonicalize_buffer_spacing "$current")"
     else
         local typed_since_fetch="${buffer#"$AGENSIC_LAST_BUFFER"}"
@@ -432,17 +514,22 @@ _agensic_bash_cycle_prev() {
 
 _agensic_bash_handle_enter() {
     local buffer=""
+    _agensic_bash_strip_ghost_if_present
     buffer="$(_agensic_bash_current_buffer)"
     if [[ "$buffer" == '##'* ]]; then
-        printf '\nAgensic assistant (##)\n%s\n' "Assistant mode is not wired in bash yet." >&2
-        _agensic_bash_set_buffer ""
         _agensic_bash_clear_suggestions
-        return 0
+        _agensic_bash_resolve_general_assist "$buffer"
+        return $?
     fi
     if [[ "$buffer" == '#'* ]]; then
-        printf '\nAgensic command mode (#)\n%s\n' "Intent mode is not wired in bash yet." >&2
         _agensic_bash_clear_suggestions
-        return 0
+        _agensic_bash_resolve_intent_command "$buffer"
+        return $?
+    fi
+    if [[ -n "${buffer//[[:space:]]/}" ]]; then
+        _agensic_snapshot_pending_execution
+    else
+        _agensic_clear_pending_execution
     fi
     if declare -F ble/widget/accept-line >/dev/null 2>&1; then
         ble/widget/accept-line
@@ -451,6 +538,7 @@ _agensic_bash_handle_enter() {
 
 _agensic_bash_after_self_insert() {
     local buffer=""
+    _agensic_bash_strip_ghost_if_present
     buffer="$(_agensic_bash_current_buffer)"
     if (( ${#AGENSIC_SUGGESTIONS[@]} > 0 )); then
         _agensic_bash_filter_pool
@@ -462,7 +550,206 @@ _agensic_bash_after_self_insert() {
 }
 
 _agensic_bash_after_delete() {
+    _agensic_bash_strip_ghost_if_present
     _agensic_bash_clear_suggestions
+}
+
+_agensic_bash_resolve_intent_command() {
+    local raw="$1"
+    local body="${raw#\#}"
+    body="${body#"${body%%[![:space:]]*}"}"
+    if [[ -z "$body" ]]; then
+        _agensic_bash_render_info "Add a terminal request after '#'."
+        return 1
+    fi
+
+    local response=""
+    local -a helper_cmd=()
+    helper_cmd=(
+        "$AGENSIC_RUNTIME_PYTHON" "$AGENSIC_CLIENT_HELPER"
+        --op intent
+        --format shell_lines_v1
+        --timeout 3.0
+        --intent-text "$body"
+        --working-directory "$PWD"
+        --shell bash
+        --terminal "${TERM:-}"
+        --platform "$(uname -s 2>/dev/null || printf 'unknown')"
+    )
+    _agensic_reload_auth_token_if_needed
+    if [[ -n "$AGENSIC_AUTH_TOKEN" ]]; then
+        helper_cmd+=("--auth-token=$AGENSIC_AUTH_TOKEN")
+    fi
+    response="$("${helper_cmd[@]}" 2>/dev/null)"
+
+    local -a lines=()
+    mapfile -t lines <<< "$response"
+    if [[ "${lines[0]:-}" != "agensic_shell_lines_v1" || "${lines[1]:-}" != "intent" ]]; then
+        _agensic_bash_render_info "Could not resolve command mode right now."
+        return 1
+    fi
+
+    local status="${lines[4]:-error}"
+    local primary="${lines[5]:-}"
+    local explanation="${lines[6]:-Could not resolve command mode right now.}"
+    if [[ "$status" != "ok" || -z "$primary" ]]; then
+        _agensic_bash_render_info "$explanation"
+        return 1
+    fi
+
+    _agensic_bash_set_buffer "$primary"
+    AGENSIC_LAST_NL_INPUT="$raw"
+    AGENSIC_LAST_NL_KIND="intent"
+    AGENSIC_LAST_NL_COMMAND="$primary"
+    printf '\nAgensic command mode (#)\nQuestion: %s\n\n%s\n' "$body" "$primary" >&2
+    return 0
+}
+
+_agensic_bash_resolve_general_assist() {
+    local raw="$1"
+    local body="${raw#\#\#}"
+    body="${body#"${body%%[![:space:]]*}"}"
+    if [[ -z "$body" ]]; then
+        _agensic_bash_render_info "Add a question after '##'."
+        return 1
+    fi
+
+    local response=""
+    local -a helper_cmd=()
+    helper_cmd=(
+        "$AGENSIC_RUNTIME_PYTHON" "$AGENSIC_CLIENT_HELPER"
+        --op assist
+        --format shell_lines_v1
+        --timeout 4.0
+        --prompt-text "$body"
+        --working-directory "$PWD"
+        --shell bash
+        --terminal "${TERM:-}"
+        --platform "$(uname -s 2>/dev/null || printf 'unknown')"
+    )
+    _agensic_reload_auth_token_if_needed
+    if [[ -n "$AGENSIC_AUTH_TOKEN" ]]; then
+        helper_cmd+=("--auth-token=$AGENSIC_AUTH_TOKEN")
+    fi
+    response="$("${helper_cmd[@]}" 2>/dev/null)"
+
+    local -a lines=()
+    mapfile -t lines <<< "$response"
+    if [[ "${lines[0]:-}" != "agensic_shell_lines_v1" || "${lines[1]:-}" != "assist" ]]; then
+        _agensic_bash_render_info "Could not fetch assistant reply right now."
+        return 1
+    fi
+
+    local answer_count="${lines[4]:-0}"
+    local answer=""
+    if [[ "$answer_count" =~ ^[0-9]+$ ]] && (( answer_count > 0 )); then
+        local i=0
+        for (( i = 5; i < 5 + answer_count; i++ )); do
+            answer+="${lines[$i]}"$'\n'
+        done
+        answer="${answer%$'\n'}"
+    fi
+    if [[ -z "$answer" ]]; then
+        answer="Could not fetch assistant reply right now."
+    fi
+
+    AGENSIC_LAST_NL_INPUT="$raw"
+    AGENSIC_LAST_NL_KIND="assist"
+    AGENSIC_LAST_NL_ASSIST="$answer"
+    printf '\nAgensic assistant (##)\n' >&2
+    _agensic_bash_render_markdown_or_plain "$answer" >&2
+    _agensic_bash_set_buffer ""
+    return 0
+}
+
+_agensic_bash_build_log_command_json() {
+    local command="$1"
+    local exit_code="$2"
+    local duration_ms="${3:-}"
+    AGENSIC_LOG_COMMAND="$command" \
+    AGENSIC_LOG_EXIT="$exit_code" \
+    AGENSIC_LOG_DURATION_MS="$duration_ms" \
+    AGENSIC_LOG_CWD="$PWD" \
+    python3 - <<'PY' 2>/dev/null
+import json
+import os
+
+def as_int(value, default=None):
+    try:
+        return int(value)
+    except (TypeError, ValueError):
+        return default
+
+payload = {
+    "command": str(os.environ.get("AGENSIC_LOG_COMMAND", "") or ""),
+    "exit_code": as_int(os.environ.get("AGENSIC_LOG_EXIT", None), None),
+    "duration_ms": as_int(os.environ.get("AGENSIC_LOG_DURATION_MS", None), None),
+    "source": "runtime",
+    "working_directory": str(os.environ.get("AGENSIC_LOG_CWD", "") or ""),
+    "shell_pid": as_int(os.getpid(), None),
+}
+print(json.dumps(payload, separators=(",", ":")))
+PY
+}
+
+_agensic_bash_log_command() {
+    local command="$1"
+    local exit_code="$2"
+    local duration_ms="${3:-}"
+    local json_data=""
+    json_data="$(_agensic_bash_build_log_command_json "$command" "$exit_code" "$duration_ms")"
+    if [[ -z "$json_data" ]]; then
+        return
+    fi
+    _agensic_reload_auth_token_if_needed
+    (
+        local -a auth_headers=()
+        if [[ -n "$AGENSIC_AUTH_TOKEN" ]]; then
+            auth_headers=(-H "Authorization: Bearer $AGENSIC_AUTH_TOKEN" -H "X-Agensic-Auth: $AGENSIC_AUTH_TOKEN")
+        fi
+        curl -s -X POST "http://127.0.0.1:22000/log_command" \
+            "${auth_headers[@]}" \
+            -H "Content-Type: application/json" \
+            -d "$json_data" >/dev/null 2>&1
+    ) &
+}
+
+_agensic_bash_preexec_trap() {
+    if [[ "${AGENSIC_BASH_IN_PROMPT_HOOK:-0}" == "1" ]]; then
+        return 0
+    fi
+    if [[ "${AGENSIC_BASH_AT_PROMPT:-0}" != "1" ]]; then
+        return 0
+    fi
+    local command="${BASH_COMMAND:-}"
+    if [[ -z "$command" ]]; then
+        return 0
+    fi
+    AGENSIC_BASH_AT_PROMPT=0
+    AGENSIC_LAST_EXECUTED_CMD="$command"
+    AGENSIC_LAST_EXECUTED_STARTED_AT_MS="$(_agensic_bash_now_epoch_ms)"
+    return 0
+}
+
+_agensic_bash_precmd() {
+    local exit_code="$?"
+    AGENSIC_BASH_IN_PROMPT_HOOK=1
+    if [[ -n "${AGENSIC_LAST_EXECUTED_CMD:-}" ]]; then
+        local finished_at_ms=""
+        local duration_ms=""
+        finished_at_ms="$(_agensic_bash_now_epoch_ms)"
+        if [[ "$AGENSIC_LAST_EXECUTED_STARTED_AT_MS" =~ ^[0-9]+$ && "$finished_at_ms" =~ ^[0-9]+$ ]]; then
+            duration_ms=$(( finished_at_ms - AGENSIC_LAST_EXECUTED_STARTED_AT_MS ))
+            if (( duration_ms < 0 )); then
+                duration_ms=0
+            fi
+        fi
+        _agensic_bash_log_command "$AGENSIC_LAST_EXECUTED_CMD" "$exit_code" "$duration_ms"
+    fi
+    AGENSIC_LAST_EXECUTED_CMD=""
+    AGENSIC_LAST_EXECUTED_STARTED_AT_MS=0
+    AGENSIC_BASH_AT_PROMPT=1
+    AGENSIC_BASH_IN_PROMPT_HOOK=0
 }
 
 _agensic_find_ble_sh() {
@@ -613,6 +900,20 @@ _agensic_register_bash_widgets() {
     return 0
 }
 
+_agensic_register_bash_runtime_hooks() {
+    if [[ "${AGENSIC_BASH_RUNTIME_HOOKS_REGISTERED:-0}" == "1" ]]; then
+        return 0
+    fi
+    trap '_agensic_bash_preexec_trap' DEBUG
+    if [[ -n "${PROMPT_COMMAND:-}" ]]; then
+        PROMPT_COMMAND="_agensic_bash_precmd;${PROMPT_COMMAND}"
+    else
+        PROMPT_COMMAND="_agensic_bash_precmd"
+    fi
+    AGENSIC_BASH_RUNTIME_HOOKS_REGISTERED=1
+    return 0
+}
+
 _agensic_initialize_bash_adapter() {
     if ! _agensic_bash_is_interactive; then
         return 0
@@ -620,6 +921,7 @@ _agensic_initialize_bash_adapter() {
     if _agensic_source_ble_if_needed; then
         AGENSIC_BASH_ADAPTER_READY=1
         _agensic_register_bash_widgets >/dev/null 2>&1 || true
+        _agensic_register_bash_runtime_hooks >/dev/null 2>&1 || true
         _agensic_bash_log "ble_ready source=${AGENSIC_BASH_BLE_LOADED_FROM:-unknown}"
         return 0
     fi

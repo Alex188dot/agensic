@@ -25,6 +25,49 @@ mkdir -p "$INSTALL_DIR"
 mkdir -p "$INSTALL_BIN_DIR"
 mkdir -p "$USER_BIN_DIR"
 
+install_linux_emoji_font_if_missing() {
+    if [ "$(uname -s 2>/dev/null)" != "Linux" ]; then
+        return 0
+    fi
+
+    if command -v fc-list >/dev/null 2>&1; then
+        if fc-list | grep -qi "Noto Color Emoji"; then
+            return 0
+        fi
+    fi
+
+    if ! command -v apt-get >/dev/null 2>&1; then
+        echo "⚠️ Linux emoji font not detected and apt-get is unavailable."
+        echo "   Install an emoji font manually, for example: fonts-noto-color-emoji"
+        return 0
+    fi
+
+    if command -v dpkg-query >/dev/null 2>&1; then
+        if dpkg-query -W -f='${Status}' fonts-noto-color-emoji 2>/dev/null | grep -q "install ok installed"; then
+            return 0
+        fi
+    fi
+
+    echo "🔤 Installing Linux emoji font support (fonts-noto-color-emoji)..."
+    if command -v sudo >/dev/null 2>&1; then
+        sudo apt-get update -y >/dev/null 2>&1 || true
+        sudo apt-get install -y fonts-noto-color-emoji || {
+            echo "⚠️ Could not install fonts-noto-color-emoji automatically."
+            echo "   Run manually: sudo apt-get install -y fonts-noto-color-emoji"
+            return 0
+        }
+    else
+        apt-get update -y >/dev/null 2>&1 || true
+        apt-get install -y fonts-noto-color-emoji || {
+            echo "⚠️ Could not install fonts-noto-color-emoji automatically."
+            echo "   Run manually: apt-get install -y fonts-noto-color-emoji"
+            return 0
+        }
+    fi
+}
+
+install_linux_emoji_font_if_missing
+
 # 2. Copy shell integration assets
 cp agensic.zsh "$INSTALL_DIR/"
 cp agensic.bash "$INSTALL_DIR/"
