@@ -152,6 +152,8 @@ SHELL_CLIENT_SCRIPT = (
 )
 PLIST_PATH = os.path.expanduser("~/Library/LaunchAgents/com.agensic.daemon.plist")
 LEGACY_PLIST_PATH = os.path.expanduser(f"~/Library/LaunchAgents/com.{LEGACY_BRAND}.daemon.plist")
+SYSTEMD_USER_DIR = os.path.expanduser("~/.config/systemd/user")
+SYSTEMD_UNIT_PATH = os.path.join(SYSTEMD_USER_DIR, "agensic-daemon.service")
 LOCKS_DIR = APP_PATHS.locks_dir
 FIX_LOCK_FILE = os.path.join(LOCKS_DIR, "fix.lock")
 REPAIR_DIR = APP_PATHS.repair_dir
@@ -1798,11 +1800,36 @@ def _ensure_command_store_backend_ready() -> bool:
 
 
 def _is_startup_enabled() -> bool:
+    if sys.platform.startswith("linux"):
+        return os.path.exists(SYSTEMD_UNIT_PATH)
     return os.path.exists(PLIST_PATH)
 
 
 def _disable_startup_impl() -> None:
     removed = False
+
+    if sys.platform.startswith("linux"):
+        if os.path.exists(SYSTEMD_UNIT_PATH):
+            subprocess.run(
+                ["systemctl", "--user", "disable", "--now", "agensic-daemon.service"],
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
+                check=False,
+            )
+            subprocess.run(
+                ["systemctl", "--user", "daemon-reload"],
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
+                check=False,
+            )
+            if _remove_file_if_exists(SYSTEMD_UNIT_PATH):
+                removed = True
+
+        if removed:
+            console.print("[green]✓ Removed daemon from startup.[/green]")
+        else:
+            console.print("[yellow]Daemon is not set to launch at startup.[/yellow]")
+        return
 
     if os.path.exists(PLIST_PATH):
         subprocess.run(["launchctl", "unload", PLIST_PATH], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, check=False)
@@ -2914,11 +2941,69 @@ def setup():
             _autocomplete_setup_menu()
 
 def _enable_startup_impl(start_now: bool) -> None:
-    if sys.platform != "darwin":
-        console.print("[red]Start on boot is currently only supported on macOS.[/red]")
-        return
     _clear_uninstall_sentinel()
     _cleanup_legacy_daemon_artifacts()
+
+    if sys.platform.startswith("linux"):
+        os.makedirs(SYSTEMD_USER_DIR, mode=0o700, exist_ok=True)
+        python_path = sys.executable
+        service_content = f"""[Unit]
+Description=Agensic daemon
+After=default.target
+
+[Service]
+Type=simple
+ExecStart={python_path} {SERVER_SCRIPT}
+Restart=always
+RestartSec=2
+Environment=PYTHONUNBUFFERED=1
+WorkingDirectory={PROJECT_ROOT}
+StandardOutput=append:{SERVER_LOG_FILE}
+StandardError=append:{SERVER_LOG_FILE}
+
+[Install]
+WantedBy=default.target
+"""
+        with open(SYSTEMD_UNIT_PATH, "w", encoding="utf-8") as f:
+            f.write(service_content)
+        enforce_private_file(SYSTEMD_UNIT_PATH)
+
+        reload_res = subprocess.run(
+            ["systemctl", "--user", "daemon-reload"],
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+        if reload_res.returncode != 0:
+            err_text = (reload_res.stderr or reload_res.stdout or "systemctl --user daemon-reload failed").strip()
+            console.print(f"[red]✗ Failed to reload user systemd units:[/red] {err_text}")
+            raise typer.Exit(code=1)
+
+        enable_cmd = ["systemctl", "--user", "enable", "agensic-daemon.service"]
+        if start_now:
+            enable_cmd = ["systemctl", "--user", "enable", "--now", "agensic-daemon.service"]
+        enable_res = subprocess.run(enable_cmd, capture_output=True, text=True, check=False)
+        if enable_res.returncode != 0:
+            err_text = (enable_res.stderr or enable_res.stdout or "systemctl --user enable failed").strip()
+            console.print(f"[red]✗ Failed to enable start on boot:[/red] {err_text}")
+            raise typer.Exit(code=1)
+
+        if not start_now:
+            console.print("[green]✔ Start on boot enabled[/green]")
+            return
+
+        ready, indexed, error = _wait_for_bootstrap_ready()
+        if ready:
+            console.print("[green]✔ Command index ready[/green]")
+            console.print("[bold green]✔ Agensic started and set to start automatically! Open a new terminal to use it![/bold green]")
+            return
+
+        console.print(f"[red]✗ Startup failed before readiness:[/red] {error}")
+        raise typer.Exit(code=1)
+
+    if sys.platform != "darwin":
+        console.print("[red]Start on boot is currently supported on macOS and Linux systemd user sessions.[/red]")
+        return
 
     python_path = sys.executable
     plist_content = f"""<?xml version="1.0" encoding="UTF-8"?>
@@ -2975,7 +3060,7 @@ def _enable_startup_impl(start_now: bool) -> None:
 
 @app.command()
 def enable_startup():
-    """Create a macOS LaunchAgent to start on boot."""
+    """Create a startup service to start on boot/login."""
     _enable_startup_impl(start_now=True)
 
 
@@ -3206,6 +3291,8 @@ def uninstall(
         removed.append(PLIST_PATH)
     if _remove_file_if_exists(LEGACY_PLIST_PATH):
         removed.append(LEGACY_PLIST_PATH)
+    if _remove_file_if_exists(SYSTEMD_UNIT_PATH):
+        removed.append(SYSTEMD_UNIT_PATH)
 
     for rc_path in _shell_rc_paths():
         if _scrub_shell_rc_file(rc_path):

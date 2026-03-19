@@ -122,13 +122,13 @@ class AgensicBashAdapterTests(unittest.TestCase):
                 AGENSIC_SUGGESTION_KINDS=("normal")
                 AGENSIC_SUGGESTION_INDEX=1
                 _agensic_bash_update_display
-                printf '%s\\n' "${_ble_edit_str}|${_ble_edit_ind}|${AGENSIC_BASH_GHOST_ACTIVE}|${AGENSIC_BASH_GHOST_SUFFIX}"
+                printf '%s\\n' "${_ble_edit_str}|${_ble_edit_ind}|${AGENSIC_BASH_GHOST_ACTIVE}|${AGENSIC_BASH_GHOST_SUFFIX}|${_ble_edit_mark}|${_ble_edit_mark_active}"
                 """,
                 env={"AGENSIC_BLE_SH_PATH": str(ble_path)},
             )
 
         self.assertEqual(result.returncode, 0, msg=result.stderr)
-        self.assertEqual(result.stdout.strip(), "git status|6|1|atus")
+        self.assertEqual(result.stdout.strip(), "git status|6|1|atus|10|insert")
 
     def test_intent_command_rewrites_buffer_from_helper_response(self):
         with tempfile.TemporaryDirectory() as tmpdir:
@@ -186,6 +186,104 @@ class AgensicBashAdapterTests(unittest.TestCase):
 
         self.assertEqual(result.returncode, 0, msg=result.stderr)
         self.assertEqual(result.stdout.strip(), "git status")
+
+    def test_readline_fallback_renders_preview_without_mutating_buffer(self):
+        result = self._run_bash(
+            """
+            AGENSIC_BASH_READLINE_AVAILABLE=1
+            READLINE_LINE="git st"
+            READLINE_POINT=6
+            AGENSIC_LAST_BUFFER="git st"
+            AGENSIC_SUGGESTIONS=("atus")
+            AGENSIC_DISPLAY_TEXTS=("atus")
+            AGENSIC_ACCEPT_MODES=("suffix_append")
+            AGENSIC_SUGGESTION_KINDS=("normal")
+            AGENSIC_SUGGESTION_INDEX=1
+            _agensic_bash_update_display
+            printf '%s\\n' "${READLINE_LINE}|${READLINE_POINT}|${AGENSIC_BASH_LAST_INFO_MESSAGE}"
+            """
+        )
+
+        self.assertEqual(result.returncode, 0, msg=result.stderr)
+        self.assertEqual(result.stdout.strip(), "git st|6|git status")
+
+    def test_readline_manual_trigger_fetches_suggestions(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            helper_path = Path(tmpdir) / "helper.py"
+            helper_path.write_text(
+                "\n".join(
+                    [
+                        "import json",
+                        "print(json.dumps({",
+                        "  'ok': True,",
+                        "  'pool': ['atus'],",
+                        "  'display': ['atus'],",
+                        "  'modes': ['suffix_append'],",
+                        "  'kinds': ['normal'],",
+                        "  'used_ai': False,",
+                        "  'ai_agent': '',",
+                        "  'ai_provider': '',",
+                        "  'ai_model': '',",
+                        "}))",
+                        "",
+                    ]
+                ),
+                encoding="utf-8",
+            )
+            result = self._run_bash(
+                """
+                AGENSIC_BASH_READLINE_AVAILABLE=1
+                AGENSIC_CLIENT_HELPER="$TEST_HELPER"
+                AGENSIC_RUNTIME_PYTHON="python3"
+                READLINE_LINE="git st"
+                READLINE_POINT=6
+                _agensic_readline_manual_trigger
+                printf '%s\\n' "${AGENSIC_SUGGESTIONS[0]}|${AGENSIC_BASH_LAST_INFO_MESSAGE}"
+                """,
+                env={"TEST_HELPER": str(helper_path)},
+            )
+
+        self.assertEqual(result.returncode, 0, msg=result.stderr)
+        self.assertEqual(result.stdout.strip(), "atus|git status")
+
+    def test_after_self_insert_fetches_when_pool_is_empty(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            ble_path = Path(tmpdir) / "ble.sh"
+            ble_path.write_text(
+                "\n".join(
+                    [
+                        "BLE_VERSION=mock-ble",
+                        "ble-attach() { return 0; }",
+                        "ble-bind() { return 0; }",
+                        "ble/function#advice() { return 0; }",
+                        "ble/widget/redraw-line() { return 0; }",
+                        "",
+                    ]
+                ),
+                encoding="utf-8",
+            )
+            result = self._run_bash(
+                """
+                _agensic_source_ble_if_needed
+                calls=0
+                _agensic_bash_fetch_suggestions() {
+                    calls=$((calls + 1))
+                    AGENSIC_SUGGESTIONS=("atus")
+                    AGENSIC_DISPLAY_TEXTS=("atus")
+                    AGENSIC_ACCEPT_MODES=("suffix_append")
+                    AGENSIC_SUGGESTION_KINDS=("normal")
+                    AGENSIC_SUGGESTION_INDEX=1
+                }
+                _ble_edit_str="git st"
+                _ble_edit_ind=6
+                _agensic_bash_after_self_insert
+                printf '%s\\n' "${calls}|${AGENSIC_LAST_BUFFER}|${AGENSIC_SUGGESTIONS[0]}"
+                """,
+                env={"AGENSIC_BLE_SH_PATH": str(ble_path)},
+            )
+
+        self.assertEqual(result.returncode, 0, msg=result.stderr)
+        self.assertEqual(result.stdout.strip(), "1|git st|atus")
 
 
 if __name__ == "__main__":

@@ -68,6 +68,67 @@ install_linux_emoji_font_if_missing() {
 
 install_linux_emoji_font_if_missing
 
+find_ble_sh() {
+    local candidate=""
+    for candidate in \
+        "${HOME}/.local/share/blesh/ble.sh" \
+        "${HOME}/.local/share/blesh/latest/ble.sh" \
+        "/usr/local/share/blesh/ble.sh" \
+        "/usr/share/blesh/ble.sh"
+    do
+        if [ -f "$candidate" ]; then
+            printf '%s\n' "$candidate"
+            return 0
+        fi
+    done
+    return 1
+}
+
+install_ble_sh_if_missing() {
+    local target_shell="$1"
+    if [ "$target_shell" != "bash" ]; then
+        return 0
+    fi
+    if [ "${AGENSIC_SKIP_BLE_INSTALL:-0}" = "1" ]; then
+        echo "⚠️ Skipping ble.sh install because AGENSIC_SKIP_BLE_INSTALL=1."
+        return 0
+    fi
+    if existing_ble="$(find_ble_sh 2>/dev/null)"; then
+        echo "✅ Found ble.sh at $existing_ble"
+        return 0
+    fi
+    if ! command -v tar >/dev/null 2>&1; then
+        echo "⚠️ tar not found; could not install ble.sh automatically."
+        return 0
+    fi
+    if command -v curl >/dev/null 2>&1; then
+        BLE_FETCHER="curl -fsSL"
+    elif command -v wget >/dev/null 2>&1; then
+        BLE_FETCHER="wget -qO-"
+    else
+        echo "⚠️ curl/wget not found; could not install ble.sh automatically."
+        return 0
+    fi
+
+    echo "📦 Installing ble.sh for Bash inline suggestions..."
+    BLE_TMP_DIR="$(mktemp -d "${TMPDIR:-/tmp}/agensic-blesh.XXXXXX")" || return 0
+    if sh -c "$BLE_FETCHER https://github.com/akinomyoga/ble.sh/releases/download/nightly/ble-nightly.tar.xz" \
+        | tar -xJf - -C "$BLE_TMP_DIR" >/dev/null 2>&1; then
+        if [ -f "$BLE_TMP_DIR/ble-nightly/ble.sh" ] && bash "$BLE_TMP_DIR/ble-nightly/ble.sh" --install "$HOME/.local/share" >/dev/null 2>&1; then
+            if existing_ble="$(find_ble_sh 2>/dev/null)"; then
+                echo "✅ Installed ble.sh to $existing_ble"
+                rm -rf "$BLE_TMP_DIR"
+                return 0
+            fi
+        fi
+    fi
+    rm -rf "$BLE_TMP_DIR"
+    echo "⚠️ Could not install ble.sh automatically."
+    echo "   Bash will fall back to a limited Readline mode."
+    echo "   Manual install: https://github.com/akinomyoga/ble.sh"
+    return 0
+}
+
 # 2. Copy shell integration assets
 cp agensic.zsh "$INSTALL_DIR/"
 cp agensic.bash "$INSTALL_DIR/"
@@ -78,9 +139,19 @@ cp shell/agensic_shared.sh "$INSTALL_DIR/shell/"
 # 2b. Build the local provenance TUI sidecar from source when cargo is available.
 TUI_MANIFEST_PATH="$PWD/rust/provenance_tui/Cargo.toml"
 LOCAL_TUI_BIN="$PWD/rust/provenance_tui/target/release/agensic-provenance-tui"
-if [ -f "$TUI_MANIFEST_PATH" ] && command -v cargo >/dev/null 2>&1; then
+CARGO_BIN="${CARGO:-}"
+if [ -z "$CARGO_BIN" ] && command -v cargo >/dev/null 2>&1; then
+    CARGO_BIN="$(command -v cargo)"
+fi
+if [ -z "$CARGO_BIN" ] && [ -x "$HOME/.cargo/bin/cargo" ]; then
+    CARGO_BIN="$HOME/.cargo/bin/cargo"
+fi
+if [ -n "$CARGO_BIN" ]; then
+    export PATH="$(dirname "$CARGO_BIN"):$PATH"
+fi
+if [ -f "$TUI_MANIFEST_PATH" ] && [ -n "$CARGO_BIN" ]; then
     echo "🛠️ Building provenance TUI sidecar from source..."
-    cargo build --manifest-path "$TUI_MANIFEST_PATH" --release || {
+    "$CARGO_BIN" build --manifest-path "$TUI_MANIFEST_PATH" --release || {
         echo "❌ Failed to build provenance TUI sidecar from source."
         echo "   Fix the Rust build or install without local sidecar changes."
         exit 1
@@ -104,6 +175,7 @@ import shutil
 import sys
 import tarfile
 import tempfile
+import urllib.error
 import urllib.request
 
 manifest_url = str(sys.argv[1] if len(sys.argv) > 1 else "").strip()
@@ -124,8 +196,16 @@ elif system == "linux" and machine in {"arm64", "aarch64"}:
 else:
     raise SystemExit(1)
 
-with urllib.request.urlopen(manifest_url, timeout=12) as response:
-    manifest = json.loads(response.read().decode("utf-8"))
+try:
+    with urllib.request.urlopen(manifest_url, timeout=12) as response:
+        manifest = json.loads(response.read().decode("utf-8"))
+except urllib.error.HTTPError as exc:
+    if int(getattr(exc, "code", 0) or 0) == 404:
+        print("No published provenance TUI sidecar manifest was found for this install.", file=sys.stderr)
+        raise SystemExit(1)
+    raise SystemExit(1)
+except Exception:
+    raise SystemExit(1)
 
 entry = ((manifest or {}).get("platforms", {}) or {}).get(platform_key, {})
 if not isinstance(entry, dict) or not entry.get("url"):
@@ -139,8 +219,11 @@ binary_name = str(entry.get("binary", "agensic-provenance-tui") or "agensic-prov
 os.makedirs(os.path.dirname(dest_bin), exist_ok=True)
 with tempfile.TemporaryDirectory(prefix="agensic-tui-install-") as tmp:
     artifact_path = os.path.join(tmp, "provenance_tui.tar.gz")
-    with urllib.request.urlopen(artifact_url, timeout=30) as response, open(artifact_path, "wb") as out:
-        shutil.copyfileobj(response, out)
+    try:
+        with urllib.request.urlopen(artifact_url, timeout=30) as response, open(artifact_path, "wb") as out:
+            shutil.copyfileobj(response, out)
+    except Exception:
+        raise SystemExit(1)
 
     if artifact_sha:
         with open(artifact_path, "rb") as f:
@@ -245,6 +328,8 @@ case "$TARGET_SHELL" in
     RC_FILE="$HOME/.zshrc"
     ;;
 esac
+
+install_ble_sh_if_missing "$TARGET_SHELL"
 
 PATH_START_MARKER="# >>> agensic path >>>"
 PATH_END_MARKER="# <<< agensic path <<<"
