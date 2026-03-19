@@ -92,6 +92,51 @@ class AgensicBashAdapterTests(unittest.TestCase):
         self.assertEqual(result.returncode, 0, msg=result.stderr)
         self.assertEqual(result.stdout.strip(), "cat ./rea|")
 
+    def test_filter_pool_keeps_closest_surviving_match(self):
+        result = self._run_bash(
+            """
+            AGENSIC_BASH_READLINE_AVAILABLE=1
+            AGENSIC_LAST_BUFFER="git "
+            READLINE_LINE="git sta"
+            READLINE_POINT=${#READLINE_LINE}
+            AGENSIC_SUGGESTIONS=("status" "stash" "switch")
+            AGENSIC_DISPLAY_TEXTS=("status" "stash" "switch")
+            AGENSIC_ACCEPT_MODES=("suffix_append" "suffix_append" "suffix_append")
+            AGENSIC_SUGGESTION_KINDS=("normal" "normal" "normal")
+            AGENSIC_SUGGESTION_INDEX=3
+            _agensic_bash_filter_pool
+            printf '%s\\n' "${AGENSIC_SUGGESTION_INDEX}|${AGENSIC_SUGGESTIONS[0]}|${AGENSIC_SUGGESTIONS[1]}|${AGENSIC_BASH_LAST_INFO_MESSAGE}"
+            """
+        )
+
+        self.assertEqual(result.returncode, 0, msg=result.stderr)
+        self.assertEqual(result.stdout.strip(), "1|status|stash|git status")
+
+    def test_overlay_message_is_cropped_to_terminal_width(self):
+        result = self._run_bash(
+            """
+            COLUMNS=20
+            printf '%s\\n' "$(_agensic_bash_render_overlay_message '12345678901234567890')"
+            """,
+        )
+
+        self.assertEqual(result.returncode, 0, msg=result.stderr)
+        self.assertEqual(result.stdout.strip(), "\x1b[32m[Agensic]\x1b[0m \x1b[38;5;245m1234567...\x1b[0m")
+
+    def test_overlay_message_renders_hint_before_suggestion(self):
+        result = self._run_bash(
+            """
+            COLUMNS=80
+            printf '%s\\n' "$(_agensic_bash_render_overlay_message 'agensic provenance --tui' '(3/6, Ctrl+P/N)')"
+            """,
+        )
+
+        self.assertEqual(result.returncode, 0, msg=result.stderr)
+        self.assertEqual(
+            result.stdout.strip(),
+            "\x1b[32m[Agensic]\x1b[0m (3/6, Ctrl+P/N) \x1b[38;5;245magensic provenance --tui\x1b[0m",
+        )
+
     def test_readline_manual_trigger_fetches_suggestions(self):
         with tempfile.TemporaryDirectory() as tmpdir:
             helper_path = Path(tmpdir) / "helper.py"
@@ -207,7 +252,7 @@ class AgensicBashAdapterTests(unittest.TestCase):
             )
 
         self.assertEqual(result.returncode, 0, msg=result.stderr)
-        self.assertEqual(result.stdout.strip(), "atus| add|(1/2) git status")
+        self.assertEqual(result.stdout.strip(), "atus| add|git status")
 
     def test_readline_self_insert_fetches_automatically(self):
         with tempfile.TemporaryDirectory() as tmpdir:

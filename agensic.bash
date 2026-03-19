@@ -27,6 +27,10 @@ AGENSIC_BASH_WIDGETS_REGISTERED=0
 AGENSIC_BASH_LAST_INFO_MESSAGE=""
 AGENSIC_BASH_PROMPT_PREPARED=0
 AGENSIC_STATUS_PREFIX="__AGENSIC_STATUS__:"
+AGENSIC_BASH_LABEL_TEXT="[Agensic]"
+AGENSIC_BASH_LABEL_COLOR=$'\033[32m'
+AGENSIC_BASH_SUGGESTION_COLOR=$'\033[38;5;245m'
+AGENSIC_BASH_RESET_COLOR=$'\033[0m'
 AGENSIC_FETCH_ATTEMPT_COUNT=0
 AGENSIC_FETCH_SUCCESS_COUNT=0
 AGENSIC_LAST_FETCH_ERROR_CODE=""
@@ -253,6 +257,8 @@ _agensic_bash_overlay_supported() {
 
 _agensic_bash_print_readline_message() {
     local message="$1"
+    local hint="${2:-}"
+    local rendered=""
     if [[ "${AGENSIC_BASH_READLINE_AVAILABLE:-0}" != "1" ]]; then
         return 0
     fi
@@ -265,16 +271,80 @@ _agensic_bash_print_readline_message() {
     if ! _agensic_bash_overlay_supported; then
         return 0
     fi
+    rendered="$(_agensic_bash_render_overlay_message "$message" "$hint")"
     printf '\0337\r\033[1A\033[2K' >&2
     if [[ -n "$message" ]]; then
-        printf '[Agensic] %s' "$message" >&2
+        printf '%s' "$rendered" >&2
     fi
     printf '\0338' >&2
 }
 
+_agensic_bash_terminal_columns() {
+    local cols="${COLUMNS:-}"
+    if [[ "$cols" =~ ^[0-9]+$ ]] && (( cols > 0 )); then
+        printf '%s\n' "$cols"
+        return
+    fi
+    cols="$(tput cols 2>/dev/null)"
+    if [[ "$cols" =~ ^[0-9]+$ ]] && (( cols > 0 )); then
+        printf '%s\n' "$cols"
+        return
+    fi
+    printf '%s\n' "80"
+}
+
+_agensic_bash_crop_plain_text() {
+    local text="$1"
+    local max_cols="$2"
+    local ellipsis="..."
+    if [[ ! "$max_cols" =~ ^[0-9]+$ ]] || (( max_cols <= 0 )); then
+        printf '%s\n' ""
+        return
+    fi
+    if (( ${#text} <= max_cols )); then
+        printf '%s\n' "$text"
+        return
+    fi
+    if (( max_cols <= ${#ellipsis} )); then
+        printf '%.*s\n' "$max_cols" "$ellipsis"
+        return
+    fi
+    printf '%s%s\n' "${text:0:$((max_cols - ${#ellipsis}))}" "$ellipsis"
+}
+
+_agensic_bash_render_overlay_message() {
+    local message="$1"
+    local hint="$2"
+    local cols=0
+    local plain_prefix="${AGENSIC_BASH_LABEL_TEXT}"
+    local hint_segment=""
+    local prefix=""
+    local message_cols=0
+    cols="$(_agensic_bash_terminal_columns)"
+    if [[ -n "$hint" ]]; then
+        hint_segment=" ${hint}"
+    fi
+    prefix="${plain_prefix}${hint_segment} "
+    message_cols=$(( cols - ${#prefix} ))
+    if (( message_cols <= 0 )); then
+        message=""
+    else
+        message="$(_agensic_bash_crop_plain_text "$message" "$message_cols")"
+    fi
+    printf '%s%s%s%s %s%s%s\n' \
+        "$AGENSIC_BASH_LABEL_COLOR" \
+        "$AGENSIC_BASH_LABEL_TEXT" \
+        "$AGENSIC_BASH_RESET_COLOR" \
+        "$hint_segment" \
+        "$AGENSIC_BASH_SUGGESTION_COLOR" \
+        "$message" \
+        "$AGENSIC_BASH_RESET_COLOR"
+}
+
 _agensic_bash_render_info() {
     local message="$1"
-    _agensic_bash_print_readline_message "$message"
+    local hint="${2:-}"
+    _agensic_bash_print_readline_message "$message" "$hint"
 }
 
 _agensic_bash_clear_info() {
@@ -318,6 +388,80 @@ _agensic_bash_clear_suggestions() {
     _agensic_bash_clear_info
 }
 
+_agensic_bash_candidate_visible_length() {
+    local suggestion="$1"
+    local mode="$2"
+    local buffer="$3"
+    local display_text="$4"
+    local visible=""
+
+    if _agensic_bash_is_status_suggestion "$suggestion"; then
+        printf '%s\n' "1"
+        return
+    fi
+    if [[ "$mode" == "replace_full" ]]; then
+        if [[ "$suggestion" == "$buffer" ]]; then
+            printf '%s\n' "0"
+        else
+            printf '%s\n' "${#display_text}"
+        fi
+        return
+    fi
+
+    local typed_since_fetch="${buffer#"$AGENSIC_LAST_BUFFER"}"
+    visible="${suggestion#"$typed_since_fetch"}"
+    visible="$(_agensic_merge_suffix "$buffer" "$visible")"
+    printf '%s\n' "${#visible}"
+}
+
+_agensic_bash_select_best_suggestion_index() {
+    local previous_index="${1:-0}"
+    local buffer=""
+    local count=0
+    local best_index=0
+    local best_length=-1
+    local i=0
+
+    count=${#AGENSIC_SUGGESTIONS[@]}
+    if (( count == 0 )); then
+        AGENSIC_SUGGESTION_INDEX=0
+        return
+    fi
+
+    buffer="$(_agensic_bash_current_buffer)"
+    if (( previous_index > 0 && previous_index <= count )); then
+        local prev_len=0
+        prev_len="$(_agensic_bash_candidate_visible_length \
+            "${AGENSIC_SUGGESTIONS[$((previous_index - 1))]}" \
+            "${AGENSIC_ACCEPT_MODES[$((previous_index - 1))]}" \
+            "$buffer" \
+            "${AGENSIC_DISPLAY_TEXTS[$((previous_index - 1))]}")"
+        if (( prev_len > 0 )); then
+            AGENSIC_SUGGESTION_INDEX=$previous_index
+            return
+        fi
+    fi
+
+    for (( i = 0; i < count; i++ )); do
+        local visible_len=0
+        visible_len="$(_agensic_bash_candidate_visible_length \
+            "${AGENSIC_SUGGESTIONS[$i]}" \
+            "${AGENSIC_ACCEPT_MODES[$i]}" \
+            "$buffer" \
+            "${AGENSIC_DISPLAY_TEXTS[$i]}")"
+        if (( visible_len > best_length )); then
+            best_length=$visible_len
+            best_index=$((i + 1))
+        fi
+    done
+
+    if (( best_length <= 0 )); then
+        AGENSIC_SUGGESTION_INDEX=0
+    else
+        AGENSIC_SUGGESTION_INDEX=$best_index
+    fi
+}
+
 _agensic_bash_update_display() {
     if (( ${#AGENSIC_SUGGESTIONS[@]} == 0 || AGENSIC_SUGGESTION_INDEX <= 0 )); then
         _agensic_bash_clear_info
@@ -331,6 +475,7 @@ _agensic_bash_update_display() {
     local message=""
     local inline_suffix=""
     local count=0
+    local hint=""
 
     if _agensic_bash_is_status_suggestion "$current"; then
         message="${current#${AGENSIC_STATUS_PREFIX}}"
@@ -367,9 +512,9 @@ _agensic_bash_update_display() {
         message="${buffer}${inline_suffix}"
     fi
     if (( count > 1 )); then
-        message="(${AGENSIC_SUGGESTION_INDEX}/${count}) ${message}"
+        hint="(${AGENSIC_SUGGESTION_INDEX}/${count}, Ctrl+P/N)"
     fi
-    _agensic_bash_render_info "$message"
+    _agensic_bash_render_info "$message" "$hint"
 }
 
 _agensic_bash_fetch_error_message() {
@@ -384,6 +529,7 @@ _agensic_bash_fetch_error_message() {
 
 _agensic_bash_filter_pool() {
     local buffer=""
+    local previous_index="${AGENSIC_SUGGESTION_INDEX:-0}"
     buffer="$(_agensic_bash_current_buffer)"
     if [[ "${#buffer}" -lt "${#AGENSIC_LAST_BUFFER}" ]]; then
         _agensic_bash_clear_suggestions
@@ -424,23 +570,25 @@ _agensic_bash_filter_pool() {
     AGENSIC_DISPLAY_TEXTS=("${next_displays[@]}")
     AGENSIC_ACCEPT_MODES=("${next_modes[@]}")
     AGENSIC_SUGGESTION_KINDS=("${next_kinds[@]}")
-    if (( ${#AGENSIC_SUGGESTIONS[@]} > 0 )); then
-        AGENSIC_SUGGESTION_INDEX=1
-    else
-        AGENSIC_SUGGESTION_INDEX=0
-    fi
+    _agensic_bash_select_best_suggestion_index "$previous_index"
     _agensic_bash_update_display
 }
 
 _agensic_bash_fetch_suggestions() {
     local allow_ai="${1:-1}"
     local trigger_source="${2:-manual}"
+    local preserve_existing="${3:-0}"
     local buffer=""
     local cursor=""
     local request_json=""
     local response_json=""
     local parsed=""
     local sep=$'\x1f'
+    local previous_index="${AGENSIC_SUGGESTION_INDEX:-0}"
+    local -a old_suggestions=("${AGENSIC_SUGGESTIONS[@]}")
+    local -a old_display_texts=("${AGENSIC_DISPLAY_TEXTS[@]}")
+    local -a old_accept_modes=("${AGENSIC_ACCEPT_MODES[@]}")
+    local -a old_suggestion_kinds=("${AGENSIC_SUGGESTION_KINDS[@]}")
 
     buffer="$(_agensic_bash_current_buffer)"
     cursor="$(_agensic_bash_current_cursor)"
@@ -529,11 +677,20 @@ print('kinds=' + sep.join(kinds))
     local -a lines=()
     mapfile -t lines <<< "$parsed"
     if [[ "${lines[0]:-}" != "ok=1" ]]; then
-        _agensic_bash_clear_suggestions
+        if (( preserve_existing == 1 && ${#old_suggestions[@]} > 0 )); then
+            AGENSIC_SUGGESTIONS=("${old_suggestions[@]}")
+            AGENSIC_DISPLAY_TEXTS=("${old_display_texts[@]}")
+            AGENSIC_ACCEPT_MODES=("${old_accept_modes[@]}")
+            AGENSIC_SUGGESTION_KINDS=("${old_suggestion_kinds[@]}")
+            _agensic_bash_select_best_suggestion_index "$previous_index"
+            _agensic_bash_update_display
+        else
+            _agensic_bash_clear_suggestions
+        fi
         AGENSIC_LAST_FETCH_ERROR_CODE="${lines[1]#error_code=}"
         local fetch_error_message=""
         fetch_error_message="$(_agensic_bash_fetch_error_message "$AGENSIC_LAST_FETCH_ERROR_CODE")"
-        if [[ -n "$fetch_error_message" ]]; then
+        if [[ -n "$fetch_error_message" && ${#AGENSIC_SUGGESTIONS[@]} == 0 ]]; then
             _agensic_bash_render_info "$fetch_error_message"
         fi
         return
@@ -556,9 +713,17 @@ print('kinds=' + sep.join(kinds))
     IFS="$sep" read -r -a AGENSIC_ACCEPT_MODES <<< "$mode_line"
     IFS="$sep" read -r -a AGENSIC_SUGGESTION_KINDS <<< "$kind_line"
     if (( ${#AGENSIC_SUGGESTIONS[@]} > 0 )); then
-        AGENSIC_SUGGESTION_INDEX=1
+        _agensic_bash_select_best_suggestion_index "$previous_index"
     else
-        AGENSIC_SUGGESTION_INDEX=0
+        if (( preserve_existing == 1 && ${#old_suggestions[@]} > 0 )); then
+            AGENSIC_SUGGESTIONS=("${old_suggestions[@]}")
+            AGENSIC_DISPLAY_TEXTS=("${old_display_texts[@]}")
+            AGENSIC_ACCEPT_MODES=("${old_accept_modes[@]}")
+            AGENSIC_SUGGESTION_KINDS=("${old_suggestion_kinds[@]}")
+            _agensic_bash_select_best_suggestion_index "$previous_index"
+        else
+            AGENSIC_SUGGESTION_INDEX=0
+        fi
     fi
     _agensic_bash_update_display
 }
@@ -685,13 +850,11 @@ _agensic_bash_after_self_insert() {
     fi
     if [[ "$buffer" == *" " ]]; then
         AGENSIC_LAST_BUFFER="$buffer"
-        _agensic_bash_fetch_suggestions 1 "space_auto"
+        _agensic_bash_fetch_suggestions 1 "space_auto" 1
         return 0
     fi
-    if (( ${#AGENSIC_SUGGESTIONS[@]} == 0 )); then
-        AGENSIC_LAST_BUFFER="$buffer"
-        _agensic_bash_fetch_suggestions 1 "typing_auto"
-    fi
+    AGENSIC_LAST_BUFFER="$buffer"
+    _agensic_bash_fetch_suggestions 1 "typing_auto" 1
 }
 
 _agensic_bash_after_delete() {
@@ -705,7 +868,7 @@ _agensic_bash_after_delete() {
         return 0
     fi
     AGENSIC_LAST_BUFFER="$buffer"
-    _agensic_bash_fetch_suggestions 1 "delete_auto"
+    _agensic_bash_fetch_suggestions 1 "delete_auto" 1
 }
 
 _agensic_bash_resolve_intent_command() {
