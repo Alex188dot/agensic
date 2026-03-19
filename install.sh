@@ -185,8 +185,23 @@ EOF
 chmod 700 "$SESSION_STOP_LAUNCHER"
 
 # 3. Add Agensic to PATH and source shell integration (idempotent)
-SHELL_RC="$HOME/.zshrc"
-SHELL_PROFILE="$HOME/.zprofile"
+TARGET_SHELL="$(basename "${SHELL:-zsh}")"
+INTEGRATION_FILE="$INSTALL_DIR/agensic.zsh"
+PATH_FILE="$HOME/.zprofile"
+RC_FILE="$HOME/.zshrc"
+
+case "$TARGET_SHELL" in
+  bash)
+    INTEGRATION_FILE="$INSTALL_DIR/agensic.bash"
+    PATH_FILE="$HOME/.bashrc"
+    RC_FILE="$HOME/.bashrc"
+    ;;
+  zsh|*)
+    INTEGRATION_FILE="$INSTALL_DIR/agensic.zsh"
+    PATH_FILE="$HOME/.zprofile"
+    RC_FILE="$HOME/.zshrc"
+    ;;
+esac
 
 PATH_START_MARKER="# >>> agensic path >>>"
 PATH_END_MARKER="# <<< agensic path <<<"
@@ -198,8 +213,8 @@ LEGACY_START_MARKER="# >>> ${LEGACY_INSTALL_NAME} >>>"
 LEGACY_END_MARKER="# <<< ${LEGACY_INSTALL_NAME} <<<"
 UNINSTALL_SENTINEL="${TMPDIR:-/tmp}/agensic-shell-uninstalled-$(id -u)"
 
-touch "$SHELL_RC"
-touch "$SHELL_PROFILE"
+touch "$RC_FILE"
+touch "$PATH_FILE"
 rm -f "$UNINSTALL_SENTINEL"
 
 # Remove old unmanaged lines from previous installs.
@@ -210,35 +225,48 @@ sed -i.bak \
   -e "\|source .*\\.${LEGACY_INSTALL_NAME}/${LEGACY_INSTALL_NAME}\\.zsh|d" \
   -e "\|source .*\\.agensic/agensic\\.zsh|d" \
   -e "\|source .*\\.agensic/agensic\\.bash|d" \
-  "$SHELL_RC"
+  "$RC_FILE"
 
-# Keep PATH management out of .zshrc; scrub legacy PATH lines there too.
+# Remove previous managed blocks before rewriting the chosen target files.
 sed -i.bak \
   -e "/$LEGACY_START_MARKER/,/$LEGACY_END_MARKER/d" \
   -e "/$PATH_START_MARKER/,/$PATH_END_MARKER/d" \
   -e "/$RC_START_MARKER/,/$RC_END_MARKER/d" \
-  "$SHELL_RC"
+  "$RC_FILE"
 
 sed -i.bak \
   -e "\|alias ${LEGACY_CLI_NAME}='python3 .*\\.${LEGACY_INSTALL_NAME}/cli\\.py'|d" \
   -e "\|alias agensic='python3 .*\\.agensic/cli\\.py'|d" \
   -e '\|export PATH=".*\.agensic/bin:\$PATH"|d' \
+  -e "\|source .*\\.agensic/agensic\\.zsh|d" \
+  -e "\|source .*\\.agensic/agensic\\.bash|d" \
   -e "/$LEGACY_START_MARKER/,/$LEGACY_END_MARKER/d" \
   -e "/$PATH_START_MARKER/,/$PATH_END_MARKER/d" \
   -e "/$RC_START_MARKER/,/$RC_END_MARKER/d" \
-  "$SHELL_PROFILE"
+  "$PATH_FILE"
 
-cat >> "$SHELL_PROFILE" <<EOF
+if [ "$PATH_FILE" = "$RC_FILE" ]; then
+  cat >> "$RC_FILE" <<EOF
+$PATH_START_MARKER
+export PATH="$USER_BIN_DIR:\$PATH"
+$PATH_END_MARKER
+$RC_START_MARKER
+source "$INTEGRATION_FILE"
+$RC_END_MARKER
+EOF
+else
+  cat >> "$PATH_FILE" <<EOF
 $PATH_START_MARKER
 export PATH="$USER_BIN_DIR:\$PATH"
 $PATH_END_MARKER
 EOF
 
-cat >> "$SHELL_RC" <<EOF
+  cat >> "$RC_FILE" <<EOF
 $RC_START_MARKER
-source "$INSTALL_DIR/agensic.zsh"
+source "$INTEGRATION_FILE"
 $RC_END_MARKER
 EOF
+fi
 
 echo ""
 echo "✅ Agensic 🫆 Installation complete!"
