@@ -26,8 +26,7 @@ class CliAiExecTests(unittest.TestCase):
         )
 
         self.assertEqual(result.exit_code, 2)
-        self.assertIn("ai-exec has been removed", result.stdout)
-        self.assertIn("agensic run <agent>", result.stdout)
+        self.assertIn("Use `agensic run <agent>` for observed agent sessions.", result.stdout)
 
 
 if __name__ == "__main__":
