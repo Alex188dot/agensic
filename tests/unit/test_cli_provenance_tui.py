@@ -1,4 +1,5 @@
 import unittest
+import re
 from unittest.mock import patch
 
 from typer.testing import CliRunner
@@ -7,6 +8,11 @@ import importlib
 
 app_module = importlib.import_module("agensic.cli.app")
 app = app_module.app
+ANSI_RE = re.compile(r"\x1b\[[0-9;]*m")
+
+
+def _plain(text: str) -> str:
+    return ANSI_RE.sub("", text)
 
 
 class CliProvenanceTuiTests(unittest.TestCase):
@@ -28,7 +34,7 @@ class CliProvenanceTuiTests(unittest.TestCase):
         self.assertEqual(result.exit_code, 0)
         kwargs = run_tui.call_args.kwargs
         self.assertEqual(kwargs.get("out_path"), "/tmp/default-prov.json")
-        self.assertIn("Exported provenance rows to:", result.stdout)
+        self.assertIn("Exported provenance rows to:", _plain(result.stdout))
 
     def test_provenance_tui_export_falls_back_when_sidecar_fails(self):
         with patch("agensic.cli.app._run_provenance_tui", return_value=False), patch(

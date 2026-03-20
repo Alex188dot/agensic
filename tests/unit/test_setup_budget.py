@@ -57,22 +57,28 @@ class SetupBudgetTests(unittest.TestCase):
         question = MagicMock()
         question.ask.return_value = "Choose AI provider"
 
-        with patch.object(cli_app, "_build_select_question", return_value=question) as build_mock:
+        with patch.object(cli_app, "_can_use_raw_setup_select", return_value=False), patch.object(
+            cli_app, "_build_select_question", return_value=question
+        ) as build_mock:
             cli_app._setup_select("Choose one:", ["Choose AI provider"])
 
         self.assertEqual(build_mock.call_args.kwargs["pointer"], "👉")
 
     def test_setup_menu_includes_daemon_launch(self):
         observed_choices = []
+        entered_autocomplete = False
 
         def _fake_select(_message, choices):
+            nonlocal entered_autocomplete
             observed_choices.extend(choices)
-            if "Agensic Autocomplete" in choices:
+            if "Agensic Autocomplete" in choices and not entered_autocomplete:
+                entered_autocomplete = True
                 return "Agensic Autocomplete"
             return cli_app.BACK_SIGNAL
 
         with patch.object(cli_app, "_rotate_auth_token_or_exit"), patch.object(
             cli_app, "_setup_select", side_effect=_fake_select
+        ), patch.object(cli_app, "_load_config", return_value={}
         ), patch.object(cli_app.console, "print"):
             cli_app.setup()
 
@@ -80,7 +86,10 @@ class SetupBudgetTests(unittest.TestCase):
 
     def test_setup_redraws_clean_screen_when_returning_to_main_menu(self):
         with patch.object(cli_app, "_rotate_auth_token_or_exit"), patch.object(
-            cli_app, "_setup_select", side_effect=["Agensic Autocomplete", "Daemon launch", cli_app.BACK_SIGNAL]
+            cli_app,
+            "_setup_select",
+            side_effect=["Agensic Autocomplete", "Daemon launch", cli_app.BACK_SIGNAL, cli_app.BACK_SIGNAL],
+        ), patch.object(cli_app, "_load_config", return_value={}
         ), patch.object(cli_app, "_manage_daemon_launch"), patch.object(
             cli_app.console, "print"
         ), patch.object(cli_app.console, "clear") as clear_mock:

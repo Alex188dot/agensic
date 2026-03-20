@@ -1471,6 +1471,8 @@ def _infer_track_model(*, command: list[str], agent: str, env: dict[str, str] | 
 
 def _build_tracked_child_env(launch: TrackLaunch, session_id: str) -> dict[str, str]:
     env = os.environ.copy()
+    for transient_key in ("ZDOTDIR", "BASH_ENV", "ENV"):
+        env.pop(transient_key, None)
     env["AGENSIC_TRACK_ACTIVE"] = "1"
     env["AGENSIC_TRACK_SESSION_ID"] = session_id
     env["AGENSIC_TRACK_AGENT"] = launch.agent

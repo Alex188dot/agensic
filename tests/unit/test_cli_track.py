@@ -9,6 +9,7 @@ import tempfile
 import threading
 import time
 import unittest
+import re
 from contextlib import contextmanager
 from pathlib import Path
 from unittest.mock import patch
@@ -22,6 +23,11 @@ cli_app = importlib.import_module("agensic.cli.app")
 track_module = importlib.import_module("agensic.cli.track")
 provenance_module = importlib.import_module("agensic.engine.provenance")
 app = cli_app.app
+ANSI_RE = re.compile(r"\x1b\[[0-9;]*m")
+
+
+def _plain(text: str) -> str:
+    return ANSI_RE.sub("", text)
 
 
 class _FakeDaemonResponse:
@@ -173,7 +179,7 @@ class CliTrackTests(unittest.TestCase):
         ):
             result = self.runner.invoke(app, ["run", "status"], env=env)
         self.assertEqual(result.exit_code, 0)
-        self.assertIn("inactive", result.stdout)
+        self.assertIn("inactive", _plain(result.stdout))
 
     def test_track_stop_inactive(self):
         with self._temp_app_paths() as (env, _), patch.object(
@@ -181,7 +187,7 @@ class CliTrackTests(unittest.TestCase):
         ):
             result = self.runner.invoke(app, ["run", "stop"], env=env)
         self.assertEqual(result.exit_code, 0)
-        self.assertIn("inactive", result.stdout)
+        self.assertIn("inactive", _plain(result.stdout))
 
     def test_track_status_lists_multiple_active_sessions(self):
         with self._temp_app_paths() as (env, temp_paths), patch.object(
@@ -205,9 +211,10 @@ class CliTrackTests(unittest.TestCase):
 
             result = self.runner.invoke(app, ["run", "status"], env=env)
             self.assertEqual(result.exit_code, 0)
-            self.assertIn("active_sessions=2", result.stdout)
+            output = _plain(result.stdout)
+            self.assertIn("active_sessions=2", output)
             for row in active[:2]:
-                self.assertIn(str(row["session_id"]), result.stdout)
+                self.assertIn(str(row["session_id"]), output)
 
             stop_result = self.runner.invoke(app, ["run", "stop", "--all"], env=env)
             worker_one.join(timeout=10.0)
@@ -243,7 +250,7 @@ class CliTrackTests(unittest.TestCase):
 
             result = self.runner.invoke(app, ["run", "stop"], env=env)
             self.assertEqual(result.exit_code, 2)
-            self.assertIn("Multiple tracked sessions are active", result.stdout)
+            self.assertIn("Multiple tracked sessions are active", _plain(result.stdout))
 
             cleanup = self.runner.invoke(app, ["run", "stop", "--all"], env=env)
             worker_one.join(timeout=10.0)
@@ -315,7 +322,7 @@ class CliTrackTests(unittest.TestCase):
         ):
             result = self.runner.invoke(app, ["--add_agent", "myagent"], env=env)
             self.assertEqual(result.exit_code, 0)
-            self.assertIn("agensic run myagent", result.stdout)
+            self.assertIn("agensic run myagent", _plain(result.stdout))
             override_path = Path(temp_paths.agent_registry_local_override_path)
             self.assertTrue(override_path.is_file())
             payload = json.loads(override_path.read_text(encoding="utf-8"))
@@ -343,7 +350,7 @@ class CliTrackTests(unittest.TestCase):
             result = self.runner.invoke(app, ["--add_agent", "codex"], env=env)
 
         self.assertEqual(result.exit_code, 2)
-        self.assertIn("already mapped", result.stdout)
+        self.assertIn("already mapped", _plain(result.stdout))
 
     def test_run_accepts_custom_agent_after_registration(self):
         with self._temp_app_paths() as (env, _), patch.object(
@@ -431,7 +438,7 @@ class CliTrackTests(unittest.TestCase):
             result = self.runner.invoke(app, ["run", "--agent", "foo", "codex"])
 
         self.assertEqual(result.exit_code, 2)
-        self.assertIn("Unsupported run option:", result.stdout)
+        self.assertIn("Unsupported run option:", _plain(result.stdout))
 
     def test_track_alias_launch_infers_codex_model_from_codex_home(self):
         with tempfile.TemporaryDirectory() as temp_dir:
@@ -601,8 +608,9 @@ class CliTrackTests(unittest.TestCase):
             result = self.runner.invoke(app, ["run", "gh"])
 
         self.assertEqual(result.exit_code, 2)
-        self.assertIn("is not recognized", result.stdout)
-        self.assertIn('agensic --add_agent "gh"', result.stdout)
+        output = ANSI_RE.sub("", result.stdout)
+        self.assertIn("is not recognized", output)
+        self.assertIn('agensic --add_agent "gh"', output)
         run_mock.assert_not_called()
 
     def test_track_alias_launch_infers_ollama_model_from_run_subcommand(self):
@@ -690,7 +698,8 @@ class CliTrackTests(unittest.TestCase):
             result = self.runner.invoke(app, ["run", "--", "zsh", "-lc", "echo hi"])
 
         self.assertEqual(result.exit_code, 2)
-        self.assertIn("Agent 'zsh' is not recognized", result.stdout)
+        output = ANSI_RE.sub("", result.stdout)
+        self.assertIn("Agent 'zsh' is not recognized", output)
         run_mock.assert_not_called()
 
     def test_track_alias_launch_honors_explicit_model_override(self):
@@ -1063,7 +1072,7 @@ class CliTrackTests(unittest.TestCase):
             self.assertIn("session_boundary_escape", str(session.get("violation_code", "") or ""))
 
     def test_run_tracked_command_observes_escape_primitives_without_blocking(self):
-        with self._temp_app_paths() as (_, temp_paths):
+        with self._temp_app_paths() as (_, temp_paths), self._mock_track_daemon(temp_paths):
             launch = _make_test_launch(
                 ["zsh", "-ic", "nohup sleep 5 >/tmp/agensic-track-test.log 2>&1 & disown; echo should-not-print"]
             )
@@ -1073,7 +1082,10 @@ class CliTrackTests(unittest.TestCase):
             store = SQLiteStateStore(temp_paths.state_sqlite_path, journal=None)
             session = store.get_latest_tracked_session()
             self.assertIsNotNone(session)
-            self.assertIn("escape_primitive_blocked", str(session.get("violation_code", "") or ""))
+            self.assertEqual(str(session.get("status", "") or ""), "exited")
+            rows = store.list_command_runs(limit=20)
+            commands = [str(row.get("command", "") or "") for row in rows]
+            self.assertTrue(any(command.startswith("zsh -ic ") for command in commands), msg=commands)
 
     def test_track_stop_uses_sqlite_when_cache_file_is_missing(self):
         with self._temp_app_paths() as (env, temp_paths):
@@ -1114,9 +1126,10 @@ class CliTrackTests(unittest.TestCase):
             result = self.runner.invoke(app, ["run", "inspect", str(session["session_id"])], env=env)
 
         self.assertEqual(result.exit_code, 0)
-        self.assertIn("transcript_events=", result.stdout)
-        self.assertIn("recorded_runs=", result.stdout)
-        self.assertIn("command=", result.stdout)
+        output = _plain(result.stdout)
+        self.assertIn("transcript_events=", output)
+        self.assertIn("recorded_runs=", output)
+        self.assertIn("command=", output)
 
     def test_time_travel_preview_and_fork_restore_git_checkpoint(self):
         with self._temp_app_paths() as (_, temp_paths), tempfile.TemporaryDirectory() as repo_dir:

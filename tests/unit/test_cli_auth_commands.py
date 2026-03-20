@@ -1,11 +1,18 @@
 import unittest
 import importlib
+import json
+import re
 from unittest.mock import patch
 
 from typer.testing import CliRunner
 
 cli_app = importlib.import_module("agensic.cli.app")
 app = cli_app.app
+ANSI_RE = re.compile(r"\x1b\[[0-9;]*m")
+
+
+def _plain(text: str) -> str:
+    return ANSI_RE.sub("", text)
 
 
 class CliAuthCommandTests(unittest.TestCase):
@@ -24,7 +31,7 @@ class CliAuthCommandTests(unittest.TestCase):
         ):
             result = self.runner.invoke(app, ["auth", "rotate"])
         self.assertEqual(result.exit_code, 0)
-        self.assertIn("Local auth token rotated", result.stdout)
+        self.assertIn("Local auth token rotated", _plain(result.stdout))
         rotate_mock.assert_called_once()
 
     def test_auth_status_command_prints_metadata(self):
@@ -42,9 +49,10 @@ class CliAuthCommandTests(unittest.TestCase):
             stat_mock.return_value.st_mtime = 1700000200
             result = self.runner.invoke(app, ["auth", "status"])
         self.assertEqual(result.exit_code, 0)
-        self.assertIn("auth status: present", result.stdout)
-        self.assertIn("created_at:", result.stdout)
-        self.assertIn("last_rotated_at:", result.stdout)
+        output = _plain(result.stdout)
+        self.assertIn("auth status: present", output)
+        self.assertIn("created_at:", output)
+        self.assertIn("last_rotated_at:", output)
 
     def test_auth_status_json(self):
         with patch.object(cli_app.Path, "exists", return_value=False), patch.object(
@@ -54,19 +62,21 @@ class CliAuthCommandTests(unittest.TestCase):
         ):
             result = self.runner.invoke(app, ["auth", "status", "--json"])
         self.assertEqual(result.exit_code, 0)
-        self.assertIn('"exists": false', result.stdout)
+        payload = json.loads(_plain(result.stdout))
+        self.assertFalse(payload["exists"])
 
     def test_root_help_shows_auth_subcommands_and_hides_group_entry(self):
         result = self.runner.invoke(app, ["--help"])
         self.assertEqual(result.exit_code, 0)
-        self.assertIn("--explain", result.stdout)
-        self.assertIn("Explain a shell command and exit", result.stdout)
-        self.assertIn("auth rotate", result.stdout)
-        self.assertIn("auth status", result.stdout)
-        self.assertNotIn("provenance-registry", result.stdout)
-        self.assertNotIn("ai-session", result.stdout)
-        self.assertNotIn("│ auth            ", result.stdout)
-        self.assertNotIn("\n│ wrap ", result.stdout)
+        output = _plain(result.stdout)
+        self.assertIn("--explain", output)
+        self.assertIn("Explain a shell command and exit", output)
+        self.assertIn("auth rotate", output)
+        self.assertIn("auth status", output)
+        self.assertNotIn("provenance-registry", output)
+        self.assertNotIn("ai-session", output)
+        self.assertNotIn("│ auth            ", output)
+        self.assertNotIn("\n│ wrap ", output)
 
     def test_root_explain_option_uses_assist_endpoint(self):
         class Response:
