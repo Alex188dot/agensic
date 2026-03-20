@@ -45,7 +45,7 @@ class AgensicSessionShellTests(unittest.TestCase):
             env["HOME"] = temp_home
             env["AGENSIC_RUNTIME_PYTHON"] = str(PYTHON_BIN)
             return subprocess.run(
-                ["zsh", "-c", script],
+                ["zsh", "-f", "-c", script],
                 capture_output=True,
                 text=True,
                 check=False,
