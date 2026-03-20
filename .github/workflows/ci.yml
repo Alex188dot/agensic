@@ -11,6 +11,9 @@ jobs:
       fail-fast: false
       matrix:
         os: [ubuntu-latest, macos-latest]
+    env:
+      ZDOTDIR: ${{ github.workspace }}/.ci-zsh
+      ZSH_DISABLE_COMPFIX: "true"
 
     steps:
       - name: Checkout
@@ -29,14 +32,21 @@ jobs:
             sudo apt-get install -y zsh
           fi
           python -m pip install --upgrade pip
-          python -m pip install --index-url https://download.pytorch.org/whl/cpu "torch==2.10.0+cpu"
+          if [ "${{ runner.os }}" = "Linux" ]; then
+            python -m pip install --index-url https://download.pytorch.org/whl/cpu "torch==2.10.0+cpu"
+          else
+            python -m pip install --index-url https://download.pytorch.org/whl/cpu "torch==2.10.0"
+          fi
           python -m pip install -e ".[dev]"
 
       - name: Prepare zsh for CI
         shell: bash
         run: |
-          touch "$HOME/.zshrc" "$HOME/.zprofile"
-          export ZDOTDIR="$HOME"
+          mkdir -p "$ZDOTDIR"
+          printf '%s\n' 'export ZSH_DISABLE_COMPFIX=true' > "$ZDOTDIR/.zshenv"
+          : > "$ZDOTDIR/.zshrc"
+          : > "$ZDOTDIR/.zprofile"
+          chmod 700 "$ZDOTDIR"
           printenv ZDOTDIR || true
           zsh -lc 'echo zsh-ready'
 

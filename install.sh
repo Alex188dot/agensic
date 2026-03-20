@@ -234,14 +234,18 @@ chmod -R u=rwX,go= "$APP_CONFIG_DIR" "$APP_STATE_DIR" "$APP_CACHE_DIR"
 
 # 2d. Install the Python package into an isolated virtual environment.
 echo "📦 Installing Python package into $VENV_DIR..."
+TORCH_PIN="torch==2.10.0"
+if [ "$TORCH_VARIANT" = "cpu" ] && [ "$(uname -s 2>/dev/null)" = "Linux" ]; then
+    TORCH_PIN="torch==2.10.0+cpu"
+fi
 if command -v uv >/dev/null 2>&1; then
     echo "⚡ Using uv for faster environment setup"
     if [ ! -x "$VENV_DIR/bin/python" ]; then
         uv venv "$VENV_DIR"
     fi
     if [ "$TORCH_VARIANT" = "cpu" ]; then
-        echo "🧠 Installing CPU-only PyTorch to avoid CUDA downloads"
-        uv pip install --python "$VENV_DIR/bin/python" --index-url https://download.pytorch.org/whl/cpu "torch==2.10.0+cpu"
+        echo "🧠 Installing CPU-oriented PyTorch to avoid unnecessary CUDA downloads"
+        uv pip install --python "$VENV_DIR/bin/python" --index-url https://download.pytorch.org/whl/cpu "$TORCH_PIN"
     fi
     uv pip install --python "$VENV_DIR/bin/python" "$PWD"
 else
@@ -253,8 +257,8 @@ else
     fi
     "$VENV_DIR/bin/python" -m pip install --upgrade pip setuptools wheel
     if [ "$TORCH_VARIANT" = "cpu" ]; then
-        echo "🧠 Installing CPU-only PyTorch to avoid CUDA downloads"
-        "$VENV_DIR/bin/python" -m pip install --index-url https://download.pytorch.org/whl/cpu "torch==2.10.0+cpu"
+        echo "🧠 Installing CPU-oriented PyTorch to avoid unnecessary CUDA downloads"
+        "$VENV_DIR/bin/python" -m pip install --index-url https://download.pytorch.org/whl/cpu "$TORCH_PIN"
     fi
     "$VENV_DIR/bin/python" -m pip install "$PWD"
 fi
