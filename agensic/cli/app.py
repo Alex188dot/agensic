@@ -2462,6 +2462,35 @@ def _wait_for_port_close(timeout_seconds: float = 10.0, interval_seconds: float 
     return not is_port_open()
 
 
+def _stop_systemd_user_service() -> bool:
+    if not sys.platform.startswith("linux") or not os.path.exists(SYSTEMD_UNIT_PATH):
+        return False
+
+    try:
+        active = subprocess.run(
+            ["systemctl", "--user", "is-active", "--quiet", "agensic-daemon.service"],
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+            check=False,
+        )
+    except Exception:
+        return False
+
+    if active.returncode != 0:
+        return False
+
+    try:
+        stopped = subprocess.run(
+            ["systemctl", "--user", "stop", "agensic-daemon.service"],
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+            check=False,
+        )
+    except Exception:
+        return False
+    return stopped.returncode == 0
+
+
 def _remove_file_if_exists(path: str) -> bool:
     try:
         os.remove(path)
@@ -3170,6 +3199,11 @@ def stop():
     # Capture if it's running before we start killing things
     was_running = is_port_open() or os.path.exists(PID_FILE)
     graceful_stopped = False
+    startup_service_stopped = _stop_systemd_user_service()
+
+    if startup_service_stopped:
+        was_running = True
+        graceful_stopped = _wait_for_port_close(timeout_seconds=4.0, interval_seconds=0.2)
     
     # Try graceful shutdown first
     if is_port_open():
@@ -3192,7 +3226,7 @@ def stop():
         if res == 0:
             was_running = True
 
-    stopped_any = graceful_stopped
+    stopped_any = graceful_stopped or startup_service_stopped
 
     # Fallback hard stop only if the daemon is still present.
     if is_port_open() or _read_pid_file() is not None:

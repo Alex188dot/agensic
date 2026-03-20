@@ -51,6 +51,7 @@ AGENSIC_CONFIG_MTIME=""
 AGENSIC_AUTH_MTIME=""
 AGENSIC_AUTH_TOKEN=""
 AGENSIC_LAST_BUFFER=""
+AGENSIC_SUGGESTION_BUFFER=""
 AGENSIC_SUGGESTION_INDEX=0
 AGENSIC_SUGGESTIONS=()
 AGENSIC_DISPLAY_TEXTS=()
@@ -894,11 +895,16 @@ print(int(time.time() * 1000))
 PY
 }
 
+_agensic_bash_active_suggestion_buffer() {
+    printf '%s\n' "${AGENSIC_SUGGESTION_BUFFER:-${AGENSIC_LAST_BUFFER:-}}"
+}
+
 _agensic_bash_is_status_suggestion() {
     [[ "${1:-}" == "$AGENSIC_STATUS_PREFIX"* ]]
 }
 
 _agensic_bash_clear_suggestions() {
+    AGENSIC_SUGGESTION_BUFFER=""
     AGENSIC_SUGGESTIONS=()
     AGENSIC_DISPLAY_TEXTS=()
     AGENSIC_ACCEPT_MODES=()
@@ -930,6 +936,7 @@ _agensic_bash_candidate_visible_length() {
     local buffer="$3"
     local display_text="$4"
     local visible=""
+    local suggestion_buffer=""
 
     if _agensic_bash_is_status_suggestion "$suggestion"; then
         printf '%s\n' "1"
@@ -944,7 +951,8 @@ _agensic_bash_candidate_visible_length() {
         return
     fi
 
-    local typed_since_fetch="${buffer#"$AGENSIC_LAST_BUFFER"}"
+    suggestion_buffer="$(_agensic_bash_active_suggestion_buffer)"
+    local typed_since_fetch="${buffer#"$suggestion_buffer"}"
     visible="${suggestion#"$typed_since_fetch"}"
     visible="$(_agensic_merge_suffix "$buffer" "$visible")"
     printf '%s\n' "${#visible}"
@@ -1012,6 +1020,7 @@ _agensic_bash_update_display() {
     local inline_suffix=""
     local count=0
     local hint=""
+    local suggestion_buffer=""
 
     if _agensic_bash_is_status_suggestion "$current"; then
         message="${current#${AGENSIC_STATUS_PREFIX}}"
@@ -1031,7 +1040,8 @@ _agensic_bash_update_display() {
         fi
         inline_suffix=" $display_text"
     else
-        local typed_since_fetch="${buffer#"$AGENSIC_LAST_BUFFER"}"
+        suggestion_buffer="$(_agensic_bash_active_suggestion_buffer)"
+        local typed_since_fetch="${buffer#"$suggestion_buffer"}"
         inline_suffix="${current#"$typed_since_fetch"}"
         inline_suffix="$(_agensic_merge_suffix "$buffer" "$inline_suffix")"
     fi
@@ -1063,16 +1073,30 @@ _agensic_bash_fetch_error_message() {
     esac
 }
 
+_agensic_bash_should_preserve_suggestions_on_fetch_error() {
+    case "${1:-}" in
+        predict_timeout|predict_error)
+            return 0
+            ;;
+    esac
+    return 1
+}
+
 _agensic_bash_filter_pool() {
     local buffer=""
     local previous_index="${AGENSIC_SUGGESTION_INDEX:-0}"
+    local suggestion_buffer=""
     buffer="$(_agensic_bash_current_buffer)"
-    if [[ "${#buffer}" -lt "${#AGENSIC_LAST_BUFFER}" ]]; then
+    suggestion_buffer="$(_agensic_bash_active_suggestion_buffer)"
+    if [[ -z "${AGENSIC_SUGGESTION_BUFFER:-}" && -n "$suggestion_buffer" ]]; then
+        AGENSIC_SUGGESTION_BUFFER="$suggestion_buffer"
+    fi
+    if [[ "${#buffer}" -lt "${#suggestion_buffer}" ]]; then
         _agensic_bash_clear_suggestions
         return
     fi
 
-    local typed_since_fetch="${buffer#"$AGENSIC_LAST_BUFFER"}"
+    local typed_since_fetch="${buffer#"$suggestion_buffer"}"
     local -a next_suggestions=()
     local -a next_displays=()
     local -a next_modes=()
@@ -1121,6 +1145,8 @@ _agensic_bash_fetch_suggestions() {
     local parsed=""
     local sep=$'\x1f'
     local previous_index="${AGENSIC_SUGGESTION_INDEX:-0}"
+    local old_last_buffer="${AGENSIC_LAST_BUFFER:-}"
+    local old_suggestion_buffer=""
     local -a old_suggestions=("${AGENSIC_SUGGESTIONS[@]}")
     local -a old_display_texts=("${AGENSIC_DISPLAY_TEXTS[@]}")
     local -a old_accept_modes=("${AGENSIC_ACCEPT_MODES[@]}")
@@ -1133,6 +1159,7 @@ _agensic_bash_fetch_suggestions() {
     AGENSIC_LAST_FETCH_AI_PROVIDER=""
     AGENSIC_LAST_FETCH_AI_MODEL=""
     AGENSIC_FETCH_ATTEMPT_COUNT=$((AGENSIC_FETCH_ATTEMPT_COUNT + 1))
+    old_suggestion_buffer="$(_agensic_bash_active_suggestion_buffer)"
 
     if [[ ${#buffer} -lt 2 || ! -f "$AGENSIC_CLIENT_HELPER" ]]; then
         _agensic_bash_clear_suggestions
@@ -1217,7 +1244,11 @@ print('kinds=' + sep.join(kinds))
     local -a lines=()
     _agensic_bash_split_lines_to_array lines "$parsed"
     if [[ "${lines[0]:-}" != "ok=1" ]]; then
-        if (( preserve_existing == 1 && ${#old_suggestions[@]} > 0 )); then
+        AGENSIC_LAST_FETCH_ERROR_CODE="${lines[1]#error_code=}"
+        if (( preserve_existing == 1 && ${#old_suggestions[@]} > 0 )) \
+            && _agensic_bash_should_preserve_suggestions_on_fetch_error "$AGENSIC_LAST_FETCH_ERROR_CODE"; then
+            AGENSIC_LAST_BUFFER="$old_last_buffer"
+            AGENSIC_SUGGESTION_BUFFER="$old_suggestion_buffer"
             AGENSIC_SUGGESTIONS=("${old_suggestions[@]}")
             AGENSIC_DISPLAY_TEXTS=("${old_display_texts[@]}")
             AGENSIC_ACCEPT_MODES=("${old_accept_modes[@]}")
@@ -1227,7 +1258,6 @@ print('kinds=' + sep.join(kinds))
         else
             _agensic_bash_clear_suggestions
         fi
-        AGENSIC_LAST_FETCH_ERROR_CODE="${lines[1]#error_code=}"
         local fetch_error_message=""
         fetch_error_message="$(_agensic_bash_fetch_error_message "$AGENSIC_LAST_FETCH_ERROR_CODE")"
         if [[ -n "$fetch_error_message" && ${#AGENSIC_SUGGESTIONS[@]} == 0 ]]; then
@@ -1253,15 +1283,19 @@ print('kinds=' + sep.join(kinds))
     IFS="$sep" read -r -a AGENSIC_ACCEPT_MODES <<< "$mode_line"
     IFS="$sep" read -r -a AGENSIC_SUGGESTION_KINDS <<< "$kind_line"
     if (( ${#AGENSIC_SUGGESTIONS[@]} > 0 )); then
+        AGENSIC_SUGGESTION_BUFFER="$buffer"
         _agensic_bash_select_best_suggestion_index "$previous_index"
     else
         if (( preserve_existing == 1 && ${#old_suggestions[@]} > 0 )); then
+            AGENSIC_LAST_BUFFER="$old_last_buffer"
+            AGENSIC_SUGGESTION_BUFFER="$old_suggestion_buffer"
             AGENSIC_SUGGESTIONS=("${old_suggestions[@]}")
             AGENSIC_DISPLAY_TEXTS=("${old_display_texts[@]}")
             AGENSIC_ACCEPT_MODES=("${old_accept_modes[@]}")
             AGENSIC_SUGGESTION_KINDS=("${old_suggestion_kinds[@]}")
             _agensic_bash_select_best_suggestion_index "$previous_index"
         else
+            AGENSIC_SUGGESTION_BUFFER=""
             AGENSIC_SUGGESTION_INDEX=0
         fi
     fi
@@ -1282,6 +1316,7 @@ _agensic_bash_accept_current_suggestion() {
     local ai_agent=""
     local ai_provider=""
     local ai_model=""
+    local suggestion_buffer=""
     buffer="$(_agensic_bash_current_buffer)"
 
     if _agensic_bash_is_status_suggestion "$current"; then
@@ -1299,7 +1334,8 @@ _agensic_bash_accept_current_suggestion() {
         _agensic_bash_set_buffer "$(_agensic_canonicalize_buffer_spacing "$current")"
         _agensic_set_suggestion_accept_state "$origin" "replace_full" "$kind" "$ai_agent" "$ai_provider" "$ai_model"
     else
-        local typed_since_fetch="${buffer#"$AGENSIC_LAST_BUFFER"}"
+        suggestion_buffer="$(_agensic_bash_active_suggestion_buffer)"
+        local typed_since_fetch="${buffer#"$suggestion_buffer"}"
         local to_add="${current#"$typed_since_fetch"}"
         to_add="$(_agensic_merge_suffix "$buffer" "$to_add")"
         _agensic_bash_set_buffer "$(_agensic_canonicalize_buffer_spacing "${buffer}${to_add}")"
@@ -1327,6 +1363,7 @@ _agensic_bash_partial_accept_current_suggestion() {
     local ai_agent=""
     local ai_provider=""
     local ai_model=""
+    local suggestion_buffer=""
 
     buffer="$(_agensic_bash_current_buffer)"
     if _agensic_bash_is_status_suggestion "$current"; then
@@ -1345,7 +1382,8 @@ _agensic_bash_partial_accept_current_suggestion() {
         return 0
     fi
 
-    typed_since_fetch="${buffer#"$AGENSIC_LAST_BUFFER"}"
+    suggestion_buffer="$(_agensic_bash_active_suggestion_buffer)"
+    typed_since_fetch="${buffer#"$suggestion_buffer"}"
     remaining="${current#"$typed_since_fetch"}"
     remaining="$(_agensic_merge_suffix "$buffer" "$remaining")"
     first_word="${remaining%% *}"
@@ -1441,7 +1479,7 @@ _agensic_bash_after_delete() {
         return 0
     fi
     AGENSIC_LAST_BUFFER="$buffer"
-    _agensic_bash_fetch_suggestions 1 "delete_auto" 1
+    return 0
 }
 
 _agensic_bash_resolve_intent_command() {
@@ -1718,6 +1756,7 @@ _agensic_bash_preexec_trap() {
     if _agensic_bash_should_ignore_debug_command "$command"; then
         return 0
     fi
+    _agensic_bash_clear_suggestions
     if _agensic_command_forces_human_provenance "$command"; then
         _agensic_force_pending_human_typed_command
     elif _agensic_pending_execution_has_provenance; then

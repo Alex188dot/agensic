@@ -315,6 +315,97 @@ class AgensicBashAdapterTests(unittest.TestCase):
         self.assertEqual(result.returncode, 0, msg=result.stderr)
         self.assertEqual(result.stdout.strip(), "git st|6|atus|git status")
 
+    def test_readline_self_insert_clears_exact_match_without_duplicating_last_character(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            helper_path = Path(tmpdir) / "helper.py"
+            helper_path.write_text(
+                "\n".join(
+                    [
+                        "import json",
+                        "print(json.dumps({",
+                        "  'ok': True,",
+                        "  'pool': [],",
+                        "  'display': [],",
+                        "  'modes': [],",
+                        "  'kinds': [],",
+                        "  'used_ai': False,",
+                        "  'ai_agent': '',",
+                        "  'ai_provider': '',",
+                        "  'ai_model': '',",
+                        "}))",
+                        "",
+                    ]
+                ),
+                encoding="utf-8",
+            )
+            result = self._run_bash(
+                """
+                AGENSIC_BASH_READLINE_AVAILABLE=1
+                AGENSIC_CLIENT_HELPER="$TEST_HELPER"
+                AGENSIC_RUNTIME_PYTHON="python3"
+                READLINE_LINE="agensic sto"
+                READLINE_POINT=${#READLINE_LINE}
+                AGENSIC_LAST_BUFFER="agensic sto"
+                AGENSIC_SUGGESTIONS=("p")
+                AGENSIC_DISPLAY_TEXTS=("p")
+                AGENSIC_ACCEPT_MODES=("suffix_append")
+                AGENSIC_SUGGESTION_KINDS=("normal")
+                AGENSIC_SUGGESTION_INDEX=1
+                _agensic_readline_self_insert_char p
+                printf '%s\\n' "${READLINE_LINE}|${AGENSIC_SUGGESTION_INDEX}|${AGENSIC_BASH_LAST_INFO_MESSAGE}"
+                """,
+                env={"TEST_HELPER": str(helper_path)},
+            )
+
+        self.assertEqual(result.returncode, 0, msg=result.stderr)
+        self.assertEqual(result.stdout.strip(), "agensic stop|0|")
+
+    def test_fetch_clears_stale_suggestions_when_daemon_is_unreachable(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            helper_path = Path(tmpdir) / "helper.py"
+            helper_path.write_text(
+                "\n".join(
+                    [
+                        "import json",
+                        "print(json.dumps({",
+                        "  'ok': False,",
+                        "  'error_code': 'daemon_unreachable',",
+                        "  'pool': [],",
+                        "  'display': [],",
+                        "  'modes': [],",
+                        "  'kinds': [],",
+                        "  'used_ai': False,",
+                        "  'ai_agent': '',",
+                        "  'ai_provider': '',",
+                        "  'ai_model': '',",
+                        "}))",
+                        "",
+                    ]
+                ),
+                encoding="utf-8",
+            )
+            result = self._run_bash(
+                """
+                AGENSIC_BASH_READLINE_AVAILABLE=1
+                AGENSIC_CLIENT_HELPER="$TEST_HELPER"
+                AGENSIC_RUNTIME_PYTHON="python3"
+                READLINE_LINE="git st"
+                READLINE_POINT=${#READLINE_LINE}
+                AGENSIC_LAST_BUFFER="git st"
+                AGENSIC_SUGGESTIONS=("atus")
+                AGENSIC_DISPLAY_TEXTS=("atus")
+                AGENSIC_ACCEPT_MODES=("suffix_append")
+                AGENSIC_SUGGESTION_KINDS=("normal")
+                AGENSIC_SUGGESTION_INDEX=1
+                _agensic_bash_fetch_suggestions 1 "typing_auto" 1
+                printf '%s\\n' "${#AGENSIC_SUGGESTIONS[@]}|${AGENSIC_BASH_LAST_INFO_MESSAGE}"
+                """,
+                env={"TEST_HELPER": str(helper_path)},
+            )
+
+        self.assertEqual(result.returncode, 0, msg=result.stderr)
+        self.assertEqual(result.stdout.strip(), "0|Agensic daemon is not running. Run: agensic start")
+
     def test_readline_delete_backward_char_clears_suggestions_without_refetch(self):
         with tempfile.TemporaryDirectory() as tmpdir:
             helper_path = Path(tmpdir) / "helper.py"
@@ -483,6 +574,27 @@ class AgensicBashAdapterTests(unittest.TestCase):
 
         self.assertEqual(result.returncode, 0, msg=result.stderr)
         self.assertEqual(result.stdout.strip(), "agensic start")
+
+    def test_preexec_clears_visible_suggestions_before_command_runs(self):
+        result = self._run_bash(
+            """
+            history -s -- 'echo hi'
+            AGENSIC_BASH_AT_PROMPT=1
+            AGENSIC_BASH_READLINE_AVAILABLE=1
+            AGENSIC_LAST_BUFFER="git st"
+            AGENSIC_SUGGESTIONS=("atus")
+            AGENSIC_DISPLAY_TEXTS=("atus")
+            AGENSIC_ACCEPT_MODES=("suffix_append")
+            AGENSIC_SUGGESTION_KINDS=("normal")
+            AGENSIC_SUGGESTION_INDEX=1
+            AGENSIC_BASH_LAST_INFO_MESSAGE="git status"
+            _agensic_bash_preexec_trap
+            printf '%s\\n' "${#AGENSIC_SUGGESTIONS[@]}|${AGENSIC_BASH_LAST_INFO_MESSAGE}"
+            """
+        )
+
+        self.assertEqual(result.returncode, 0, msg=result.stderr)
+        self.assertEqual(result.stdout.strip(), "0|")
 
 
 if __name__ == "__main__":
