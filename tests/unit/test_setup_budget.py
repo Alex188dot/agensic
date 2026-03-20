@@ -112,6 +112,7 @@ class SetupBudgetTests(unittest.TestCase):
     def test_manage_daemon_launch_enables_startup_without_starting_now(self):
         with patch.object(cli_app, "_is_startup_enabled", return_value=False), patch.object(
             cli_app, "_setup_select", return_value="launch at startup (recommended)"
+        ), patch.object(cli_app, "_reset_setup_screen"
         ), patch.object(cli_app, "_enable_startup_impl") as enable_mock, patch.object(
             cli_app.console, "print"
         ):
@@ -122,6 +123,7 @@ class SetupBudgetTests(unittest.TestCase):
     def test_manage_daemon_launch_disables_startup_when_requested(self):
         with patch.object(cli_app, "_is_startup_enabled", return_value=True), patch.object(
             cli_app, "_setup_select", return_value="remove from startup"
+        ), patch.object(cli_app, "_reset_setup_screen"
         ), patch.object(cli_app, "_disable_startup_impl") as disable_mock, patch.object(
             cli_app.console, "print"
         ):
