@@ -176,6 +176,7 @@ ALT_SCREEN_EXIT_SEQ = "\x1b[?1049l"
 DEFAULT_TUI_MANIFEST_URL = (
     "https://github.com/Alex188dot/agensic/releases/latest/download/provenance_tui_manifest.json"
 )
+PUBLISHED_TUI_PLATFORMS = {"darwin-arm64"}
 DEFAULT_SIGNING_AGENT = "unknown"
 DEFAULT_SIGNING_MODEL = "unknown-model"
 MAX_COMMAND_DURATION_MS = 86_400_000
@@ -879,21 +880,33 @@ def _ensure_provenance_tui_binary() -> str:
     local_bin = _resolve_local_provenance_tui_binary()
     if local_bin:
         return local_bin
+    installed_bin = _resolve_installed_provenance_tui_binary()
+    if installed_bin:
+        return installed_bin
+    platform_tag = _platform_tag()
+    manifest_override = str(os.environ.get("AGENSIC_PROVENANCE_TUI_MANIFEST_URL", "") or "").strip()
+    if not manifest_override and platform_tag not in PUBLISHED_TUI_PLATFORMS:
+        raise RuntimeError(
+            "provenance_tui_unavailable:"
+            f" no_published_sidecar_for_platform={platform_tag}; "
+            "CLI fallback still works; "
+            "set AGENSIC_PROVENANCE_TUI_MANIFEST_URL to use a custom external manifest, "
+            "or build locally with cargo build --manifest-path rust/provenance_tui/Cargo.toml --release"
+        )
     try:
         manifest = _fetch_provenance_tui_manifest()
         entry = _resolve_provenance_tui_platform_entry(manifest)
         return _install_provenance_tui_binary(entry)
     except Exception as manifest_exc:
-        installed_bin = _resolve_installed_provenance_tui_binary()
-        if installed_bin:
-            return installed_bin
         local_bin = _resolve_local_provenance_tui_binary()
         if local_bin:
             return local_bin
         raise RuntimeError(
             "provenance_tui_unavailable:"
             f"{manifest_exc}; "
-            "for local dev build run: cargo build --manifest-path rust/provenance_tui/Cargo.toml --release"
+            "CLI fallback still works; "
+            "set AGENSIC_PROVENANCE_TUI_MANIFEST_URL to use a custom external manifest, "
+            "or build locally with cargo build --manifest-path rust/provenance_tui/Cargo.toml --release"
         ) from manifest_exc
 
 

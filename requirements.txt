@@ -14,5 +14,5 @@ zvec>=0.1.0
 sentence-transformers==5.2.3
 transformers==5.2.0
 tokenizers==0.22.2
-torch==2.10.0
+torch>=2.10,<2.11
 rapidfuzz==3.12.2

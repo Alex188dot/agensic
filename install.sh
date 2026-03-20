@@ -14,6 +14,7 @@ INSTALL_DIR="$APP_STATE_DIR/install"
 INSTALL_BIN_DIR="$INSTALL_DIR/bin"
 USER_BIN_DIR="$BIN_HOME"
 VENV_DIR="$INSTALL_DIR/.venv"
+TORCH_VARIANT="${AGENSIC_TORCH_VARIANT:-cpu}"
 FIRST_INSTALL=0
 if [ ! -x "$USER_BIN_DIR/agensic" ]; then
     FIRST_INSTALL=1
@@ -112,7 +113,7 @@ if [ -x "$LOCAL_TUI_BIN" ]; then
     echo "✅ Installed local provenance TUI sidecar to $INSTALL_BIN_DIR"
 else
     MANIFEST_URL="${AGENSIC_PROVENANCE_TUI_MANIFEST_URL:-https://github.com/Alex188dot/agensic/releases/latest/download/provenance_tui_manifest.json}"
-    python3 - "$MANIFEST_URL" "$INSTALL_BIN_DIR/agensic-provenance-tui" <<'PY' || echo "⚠️ Could not download provenance TUI sidecar; CLI fallback will still work."
+    python3 - "$MANIFEST_URL" "$INSTALL_BIN_DIR/agensic-provenance-tui" <<'PY' || echo "⚠️ Provenance TUI sidecar was not installed; CLI fallback will still work."
 import hashlib
 import json
 import os
@@ -142,20 +143,43 @@ elif system == "linux" and machine in {"arm64", "aarch64"}:
 else:
     raise SystemExit(1)
 
+default_manifest = "https://github.com/Alex188dot/agensic/releases/latest/download/provenance_tui_manifest.json"
+published_platforms = {"darwin-arm64", "darwin-x64", "linux-arm64", "linux-x64", "windows-x64"}
+manifest_overridden = manifest_url != default_manifest
+
+if not manifest_overridden and platform_key not in published_platforms:
+    print(
+        f"No published provenance TUI sidecar is available for {platform_key}; skipping download.",
+        file=sys.stderr,
+    )
+    print(
+        "Set AGENSIC_PROVENANCE_TUI_MANIFEST_URL to use a custom external sidecar manifest.",
+        file=sys.stderr,
+    )
+    raise SystemExit(0)
+
 try:
     with urllib.request.urlopen(manifest_url, timeout=12) as response:
         manifest = json.loads(response.read().decode("utf-8"))
 except urllib.error.HTTPError as exc:
     if int(getattr(exc, "code", 0) or 0) == 404:
-        print("No published provenance TUI sidecar manifest was found for this install.", file=sys.stderr)
-        raise SystemExit(1)
+        print("No published provenance TUI sidecar manifest was found; skipping download.", file=sys.stderr)
+        print(
+            "Set AGENSIC_PROVENANCE_TUI_MANIFEST_URL to use a custom external sidecar manifest.",
+            file=sys.stderr,
+        )
+        raise SystemExit(0)
     raise SystemExit(1)
 except Exception:
     raise SystemExit(1)
 
 entry = ((manifest or {}).get("platforms", {}) or {}).get(platform_key, {})
 if not isinstance(entry, dict) or not entry.get("url"):
-    raise SystemExit(1)
+    print(
+        f"Manifest does not include a provenance TUI sidecar for {platform_key}; skipping download.",
+        file=sys.stderr,
+    )
+    raise SystemExit(0)
 
 artifact_url = str(entry.get("url", "") or "").strip()
 artifact_sha = str(entry.get("artifact_sha256", "") or "").strip().lower()
@@ -215,6 +239,10 @@ if command -v uv >/dev/null 2>&1; then
     if [ ! -x "$VENV_DIR/bin/python" ]; then
         uv venv "$VENV_DIR"
     fi
+    if [ "$TORCH_VARIANT" = "cpu" ]; then
+        echo "🧠 Installing CPU-only PyTorch to avoid CUDA downloads"
+        uv pip install --python "$VENV_DIR/bin/python" --index-url https://download.pytorch.org/whl/cpu "torch==2.10.0+cpu"
+    fi
     uv pip install --python "$VENV_DIR/bin/python" "$PWD"
 else
     if [ ! -x "$VENV_DIR/bin/python" ]; then
@@ -224,6 +252,10 @@ else
         "$VENV_DIR/bin/python" -m ensurepip --upgrade
     fi
     "$VENV_DIR/bin/python" -m pip install --upgrade pip setuptools wheel
+    if [ "$TORCH_VARIANT" = "cpu" ]; then
+        echo "🧠 Installing CPU-only PyTorch to avoid CUDA downloads"
+        "$VENV_DIR/bin/python" -m pip install --index-url https://download.pytorch.org/whl/cpu "torch==2.10.0+cpu"
+    fi
     "$VENV_DIR/bin/python" -m pip install "$PWD"
 fi
 
@@ -345,7 +377,7 @@ EOF
 fi
 
 echo ""
-echo "✅ Agensic 🫆 Installation complete!"
+echo "✅ Agensic Installation complete!"
 echo "------------------------------------------------"
 echo "1. Open a new terminal, or run: export PATH=\"$USER_BIN_DIR:\$PATH\""
 if [ "$FIRST_INSTALL" -eq 1 ]; then

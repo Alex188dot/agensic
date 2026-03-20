@@ -50,7 +50,7 @@ Agensic is designed to integrate deeply with your shell environment.
 
 - Linux (Bash/Zsh) — coming soon 🕐
 
-- Windows (PowerShell/WSL) — planned 🚧
+- Windows (PowerShell) — planned 🚧
 
 We are actively working on expanding cross-platform support while maintaining the same level of reliability and low-level integration.
 
@@ -63,6 +63,8 @@ The fastest path is using the managed installer:
 ```bash
 bash ./install.sh
 ```
+
+The installer defaults to a CPU-only PyTorch wheel to avoid large CUDA downloads on machines that do not need GPU inference. If you already have `uv`, the installer will use it automatically for faster setup.
 
 On first run, Agensic will prompt you to choose your preferred LLM provider and configure your API keys for command autocomplete.
 
