@@ -6,7 +6,11 @@ on:
 
 jobs:
   test:
-    runs-on: ubuntu-latest
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest]
 
     steps:
       - name: Checkout
@@ -20,11 +24,21 @@ jobs:
       - name: Install Dependencies
         shell: bash
         run: |
-          sudo apt-get update
-          sudo apt-get install -y zsh
+          if [ "${{ runner.os }}" = "Linux" ]; then
+            sudo apt-get update
+            sudo apt-get install -y zsh
+          fi
           python -m pip install --upgrade pip
           python -m pip install --index-url https://download.pytorch.org/whl/cpu "torch==2.10.0+cpu"
           python -m pip install -e ".[dev]"
+
+      - name: Prepare zsh for CI
+        shell: bash
+        run: |
+          touch "$HOME/.zshrc" "$HOME/.zprofile"
+          export ZDOTDIR="$HOME"
+          printenv ZDOTDIR || true
+          zsh -lc 'echo zsh-ready'
 
       - name: Static Syntax Checks
         shell: bash
