@@ -72,7 +72,7 @@ class ProviderRoutingTests(unittest.TestCase):
             history_file="",
             cwd="/tmp",
             buffer="rm ",
-            shell="zsh",
+            shell="bash",
         )
         suggestions, pool, pool_meta, used_ai = asyncio.run(
             self.engine.get_suggestions({"provider": "openai"}, ctx, allow_ai=True)

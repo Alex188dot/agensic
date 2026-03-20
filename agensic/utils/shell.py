@@ -1,5 +1,6 @@
 import os
 import shlex
+import sys
 
 BLOCKED_EXECUTABLES = {
     "rm",
@@ -40,12 +41,20 @@ GIT_GLOBAL_OPTIONS_WITH_VALUE = {
 }
 
 
+def _default_shell_name() -> str:
+    if sys.platform.startswith("linux"):
+        return "bash"
+    return "zsh"
+
+
 def normalize_shell_name(value: str) -> str:
     raw = str(value or "").strip().lower()
     if not raw:
-        return "zsh"
+        return _default_shell_name()
 
     base = os.path.basename(raw)
+    if sys.platform.startswith("linux") and base == "zsh":
+        return "bash"
     if base in {"bash", "zsh", "sh", "fish"}:
         return base
     if base in {"pwsh", "powershell", "powershell.exe", "pwsh.exe"}:
@@ -54,10 +63,10 @@ def normalize_shell_name(value: str) -> str:
         return "powershell"
     if base.endswith(".exe") and base[:-4] in {"bash", "zsh", "fish"}:
         return base[:-4]
-    return base or "zsh"
+    return base or _default_shell_name()
 
 
-def current_shell_name(env: dict[str, str] | None = None, default: str = "zsh") -> str:
+def current_shell_name(env: dict[str, str] | None = None, default: str | None = None) -> str:
     source_env = env or os.environ
     raw = str(source_env.get("SHELL", "") or "").strip()
     if not raw:
@@ -65,7 +74,7 @@ def current_shell_name(env: dict[str, str] | None = None, default: str = "zsh") 
     normalized = normalize_shell_name(raw)
     if normalized:
         return normalized
-    return normalize_shell_name(default)
+    return normalize_shell_name(default or _default_shell_name())
 
 
 def normalize_command_pattern(raw: str) -> str:

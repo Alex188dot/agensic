@@ -76,7 +76,7 @@ class CliTrackTests(unittest.TestCase):
     def _temp_app_paths(self):
         with tempfile.TemporaryDirectory() as temp_dir:
             home_path = Path(temp_dir)
-            for filename in (".zshenv", ".zprofile", ".zshrc"):
+            for filename in (".bash_profile", ".bashrc"):
                 (home_path / filename).write_text("", encoding="utf-8")
             env = {
                 "HOME": temp_dir,
@@ -201,11 +201,11 @@ class CliTrackTests(unittest.TestCase):
             queue_two = ctx.Queue()
             worker_one = ctx.Process(
                 target=_run_tracked_command_in_child,
-                args=(env, ["--", "zsh", "-lc", "sleep 30"], queue_one),
+                args=(env, ["--", "bash", "-lc", "sleep 30"], queue_one),
             )
             worker_two = ctx.Process(
                 target=_run_tracked_command_in_child,
-                args=(env, ["--", "zsh", "-lc", "sleep 30"], queue_two),
+                args=(env, ["--", "bash", "-lc", "sleep 30"], queue_two),
             )
             worker_one.start()
             worker_two.start()
@@ -240,11 +240,11 @@ class CliTrackTests(unittest.TestCase):
             queue_two = ctx.Queue()
             worker_one = ctx.Process(
                 target=_run_tracked_command_in_child,
-                args=(env, ["--", "zsh", "-lc", "sleep 30"], queue_one),
+                args=(env, ["--", "bash", "-lc", "sleep 30"], queue_one),
             )
             worker_two = ctx.Process(
                 target=_run_tracked_command_in_child,
-                args=(env, ["--", "zsh", "-lc", "sleep 30"], queue_two),
+                args=(env, ["--", "bash", "-lc", "sleep 30"], queue_two),
             )
             worker_one.start()
             worker_two.start()
@@ -698,11 +698,11 @@ class CliTrackTests(unittest.TestCase):
             "run_tracked_command",
             return_value=0,
         ) as run_mock:
-            result = self.runner.invoke(app, ["run", "--", "zsh", "-lc", "echo hi"])
+            result = self.runner.invoke(app, ["run", "--", "bash", "-lc", "echo hi"])
 
         self.assertEqual(result.exit_code, 2)
         output = ANSI_RE.sub("", result.stdout)
-        self.assertIn("Agent 'zsh' is not recognized", output)
+        self.assertIn("Agent 'bash' is not recognized", output)
         run_mock.assert_not_called()
 
     def test_track_alias_launch_honors_explicit_model_override(self):
@@ -732,7 +732,7 @@ class CliTrackTests(unittest.TestCase):
 
     def test_build_tracked_child_env_only_injects_tracking_metadata(self):
         with self._temp_app_paths():
-            launch = _make_test_launch(["zsh", "-lc", "echo hi"])
+            launch = _make_test_launch(["bash", "-lc", "echo hi"])
             child_env = track_module._build_tracked_child_env(launch, "session-policy")
 
             self.assertEqual(child_env["AGENSIC_TRACK_ACTIVE"], "1")
@@ -756,7 +756,7 @@ class CliTrackTests(unittest.TestCase):
     def test_escape_primitive_detector_matches_nohup_and_terminal_automation(self):
         self.assertTrue(
             track_module._looks_like_escape_primitive(
-                {"comm": "zsh", "args": "zsh -ic 'nohup sleep 5 >/tmp/x 2>&1 & disown'"}
+                {"comm": "bash", "args": "bash -ic 'nohup sleep 5 >/tmp/x 2>&1 & disown'"}
             )
         )
         self.assertTrue(
@@ -780,7 +780,7 @@ class CliTrackTests(unittest.TestCase):
 
     def test_run_tracked_command_records_transcript_and_provenance(self):
         with self._temp_app_paths() as (_, temp_paths), self._mock_track_daemon(temp_paths):
-            launch = _make_test_launch(["zsh", "-lc", "echo hi; sleep 0.8 & wait"])
+            launch = _make_test_launch(["bash", "-lc", "echo hi; sleep 0.8 & wait"])
             code = track_module.run_tracked_command(launch)
 
             self.assertEqual(code, 0)
@@ -799,7 +799,7 @@ class CliTrackTests(unittest.TestCase):
             commands = [str(row.get("command", "") or "") for row in runs]
             payloads = [dict(row.get("payload", {}) or {}) for row in runs]
             self.assertIn("AI_EXECUTED", labels)
-            self.assertTrue(any(command.startswith("zsh -lc ") for command in commands))
+            self.assertTrue(any(command.startswith("bash -lc ") for command in commands))
             self.assertTrue(any(command.startswith("sleep 0.8") for command in commands))
             self.assertTrue(any(str(item.get("track_session_id", "") or "").strip() for item in payloads))
             self.assertTrue(any(item.get("track_launch_mode") == "raw_command" for item in payloads))
@@ -836,7 +836,7 @@ class CliTrackTests(unittest.TestCase):
 
             with patch("os.getcwd", return_value=repo_dir):
                 launch = _make_test_launch(
-                    ["zsh", "-lc", "echo changed > README.md; git add README.md; git commit -m 'update readme'"],
+                    ["bash", "-lc", "echo changed > README.md; git add README.md; git commit -m 'update readme'"],
                 )
             code = track_module.run_tracked_command(launch)
 
@@ -863,7 +863,7 @@ class CliTrackTests(unittest.TestCase):
 
     def test_run_tracked_command_records_time_travel_startup_banner_in_transcript(self):
         with self._temp_app_paths() as (_, temp_paths):
-            launch = _make_test_launch(["zsh", "-lc", "echo hi"])
+            launch = _make_test_launch(["bash", "-lc", "echo hi"])
             code = track_module.run_tracked_command(
                 launch,
                 replay_metadata={"fork_branch": "agensic/time-travel/sess-1-2"},
@@ -903,7 +903,7 @@ class CliTrackTests(unittest.TestCase):
 
             with patch("os.getcwd", return_value=repo_dir):
                 launch = _make_test_launch(
-                    ["zsh", "-lc", "echo changed > README.md; git add README.md; git commit -m 'update readme'"],
+                    ["bash", "-lc", "echo changed > README.md; git add README.md; git commit -m 'update readme'"],
                 )
             code = track_module.run_tracked_command(launch)
 
@@ -944,7 +944,7 @@ class CliTrackTests(unittest.TestCase):
             worker.start()
             try:
                 with patch("os.getcwd", return_value=repo_dir):
-                    launch = _make_test_launch(["zsh", "-lc", "sleep 1"])
+                    launch = _make_test_launch(["bash", "-lc", "sleep 1"])
                 code = track_module.run_tracked_command(launch)
                 self.assertEqual(code, 0)
             finally:
@@ -1034,7 +1034,7 @@ class CliTrackTests(unittest.TestCase):
 
     def test_run_tracked_command_uses_app_scoped_provenance_keys(self):
         with self._temp_app_paths() as (_, temp_paths):
-            launch = _make_test_launch(["zsh", "-lc", "true"])
+            launch = _make_test_launch(["bash", "-lc", "true"])
             code = track_module.run_tracked_command(launch)
 
             self.assertEqual(code, 0)
@@ -1043,7 +1043,7 @@ class CliTrackTests(unittest.TestCase):
 
     def test_run_tracked_command_records_short_lived_child_process(self):
         with self._temp_app_paths() as (_, temp_paths), self._mock_track_daemon(temp_paths):
-            launch = _make_test_launch(["zsh", "-lc", "echo hi; sleep 0.2 & wait"])
+            launch = _make_test_launch(["bash", "-lc", "echo hi; sleep 0.2 & wait"])
             code = track_module.run_tracked_command(launch)
 
             self.assertEqual(code, 0)
@@ -1062,7 +1062,7 @@ class CliTrackTests(unittest.TestCase):
                 "os.setsid();"
                 "time.sleep(1.5)\""
             )
-            launch = _make_test_launch(["zsh", "-lc", daemonize])
+            launch = _make_test_launch(["bash", "-lc", daemonize])
             code = track_module.run_tracked_command(launch)
 
             self.assertEqual(code, 0)
@@ -1077,7 +1077,7 @@ class CliTrackTests(unittest.TestCase):
     def test_run_tracked_command_observes_escape_primitives_without_blocking(self):
         with self._temp_app_paths() as (_, temp_paths), self._mock_track_daemon(temp_paths):
             launch = _make_test_launch(
-                ["zsh", "-ic", "nohup sleep 5 >/tmp/agensic-track-test.log 2>&1 & disown; echo should-not-print"]
+                ["bash", "-ic", "nohup sleep 5 >/tmp/agensic-track-test.log 2>&1 & disown; echo should-not-print"]
             )
             code = track_module.run_tracked_command(launch)
 
@@ -1088,7 +1088,7 @@ class CliTrackTests(unittest.TestCase):
             self.assertEqual(str(session.get("status", "") or ""), "exited")
             rows = store.list_command_runs(limit=20)
             commands = [str(row.get("command", "") or "") for row in rows]
-            self.assertTrue(any(command.startswith("zsh -ic ") for command in commands), msg=commands)
+            self.assertTrue(any(command.startswith("bash -ic ") for command in commands), msg=commands)
 
     def test_track_stop_uses_sqlite_when_cache_file_is_missing(self):
         with self._temp_app_paths() as (env, temp_paths):
@@ -1096,7 +1096,7 @@ class CliTrackTests(unittest.TestCase):
             result_queue = ctx.Queue()
             worker = ctx.Process(
                 target=_run_tracked_command_in_child,
-                args=(env, ["--", "zsh", "-lc", "sleep 30"], result_queue),
+                args=(env, ["--", "bash", "-lc", "sleep 30"], result_queue),
             )
             worker.start()
             active = self._wait_for_active_session(temp_paths)
@@ -1119,7 +1119,7 @@ class CliTrackTests(unittest.TestCase):
         with self._temp_app_paths() as (env, temp_paths), patch.object(
             cli_app, "_run_storage_preflight_if_enabled"
         ), self._mock_track_daemon(temp_paths):
-            launch = _make_test_launch(["zsh", "-lc", "echo hi"])
+            launch = _make_test_launch(["bash", "-lc", "echo hi"])
             code = track_module.run_tracked_command(launch)
             self.assertEqual(code, 0)
 

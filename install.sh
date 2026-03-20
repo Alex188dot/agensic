@@ -77,7 +77,9 @@ legacy_bash_block_marker() {
 }
 
 # 2. Copy shell integration assets
-cp agensic.zsh "$INSTALL_DIR/"
+if [ "$(uname -s 2>/dev/null)" != "Linux" ] && [ -f agensic.zsh ]; then
+    cp agensic.zsh "$INSTALL_DIR/"
+fi
 cp agensic.bash "$INSTALL_DIR/"
 cp shell_client.py "$INSTALL_DIR/"
 mkdir -p "$INSTALL_DIR/shell"
@@ -293,23 +295,30 @@ EOF
 chmod 700 "$SESSION_STOP_LAUNCHER"
 
 # 3. Add Agensic to PATH and source shell integration (idempotent)
-TARGET_SHELL="$(basename "${SHELL:-zsh}")"
-INTEGRATION_FILE="$INSTALL_DIR/agensic.zsh"
-PATH_FILE="$HOME/.zprofile"
-RC_FILE="$HOME/.zshrc"
+TARGET_OS="$(uname -s 2>/dev/null)"
+TARGET_SHELL="$(basename "${SHELL:-bash}")"
+INTEGRATION_FILE="$INSTALL_DIR/agensic.bash"
+PATH_FILE="$HOME/.bashrc"
+RC_FILE="$HOME/.bashrc"
 
-case "$TARGET_SHELL" in
-  bash)
-    INTEGRATION_FILE="$INSTALL_DIR/agensic.bash"
-    PATH_FILE="$HOME/.bashrc"
-    RC_FILE="$HOME/.bashrc"
-    ;;
-  zsh|*)
-    INTEGRATION_FILE="$INSTALL_DIR/agensic.zsh"
-    PATH_FILE="$HOME/.zprofile"
-    RC_FILE="$HOME/.zshrc"
-    ;;
-esac
+if [ "$TARGET_OS" != "Linux" ]; then
+  INTEGRATION_FILE="$INSTALL_DIR/agensic.zsh"
+  PATH_FILE="$HOME/.zprofile"
+  RC_FILE="$HOME/.zshrc"
+
+  case "$TARGET_SHELL" in
+    bash)
+      INTEGRATION_FILE="$INSTALL_DIR/agensic.bash"
+      PATH_FILE="$HOME/.bashrc"
+      RC_FILE="$HOME/.bashrc"
+      ;;
+    zsh|*)
+      INTEGRATION_FILE="$INSTALL_DIR/agensic.zsh"
+      PATH_FILE="$HOME/.zprofile"
+      RC_FILE="$HOME/.zshrc"
+      ;;
+  esac
+fi
 
 PATH_START_MARKER="# >>> agensic path >>>"
 PATH_END_MARKER="# <<< agensic path <<<"

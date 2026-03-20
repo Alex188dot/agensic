@@ -7,7 +7,7 @@ from agensic.engine.provenance import inspect_process_lineage
 class ProvenanceLineageTests(unittest.TestCase):
     def test_lineage_detects_known_agent_hints(self):
         fake_rows = {
-            100: {"pid": 100, "ppid": 90, "comm": "zsh", "command": "zsh"},
+            100: {"pid": 100, "ppid": 90, "comm": "bash", "command": "bash"},
             90: {"pid": 90, "ppid": 1, "comm": "Cursor", "command": "Cursor --type=renderer"},
             1: {"pid": 1, "ppid": 0, "comm": "launchd", "command": "/sbin/launchd"},
         }
@@ -24,7 +24,7 @@ class ProvenanceLineageTests(unittest.TestCase):
 
     def test_lineage_handles_loops_safely(self):
         fake_rows = {
-            50: {"pid": 50, "ppid": 50, "comm": "zsh", "command": "zsh"},
+            50: {"pid": 50, "ppid": 50, "comm": "bash", "command": "bash"},
         }
 
         with patch(

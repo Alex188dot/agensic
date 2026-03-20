@@ -29,7 +29,7 @@ class HistorySyncPolicyTests(unittest.TestCase):
         )
 
         with tempfile.TemporaryDirectory() as tmp:
-            history_file = str(Path(tmp) / ".zsh_history")
+            history_file = str(Path(tmp) / ".bash_history")
             Path(history_file).write_text("git status\nls\n", encoding="utf-8")
 
             result = db.initialize_from_history(history_file)
@@ -51,7 +51,7 @@ class HistorySyncPolicyTests(unittest.TestCase):
         db._read_history_commands_from_offset = Mock()
 
         with tempfile.TemporaryDirectory() as tmp:
-            history_file = str(Path(tmp) / ".zsh_history")
+            history_file = str(Path(tmp) / ".bash_history")
             Path(history_file).write_text("git status\n", encoding="utf-8")
 
             result = db.initialize_from_history(history_file)
@@ -72,7 +72,7 @@ class HistorySyncPolicyTests(unittest.TestCase):
         )
 
         with tempfile.TemporaryDirectory() as tmp:
-            history_file = str(Path(tmp) / ".zsh_history")
+            history_file = str(Path(tmp) / ".bash_history")
             Path(history_file).write_text("git status\ngit status\ngit status\nls\nls\n", encoding="utf-8")
 
             result = db.resync_history(history_file)

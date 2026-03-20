@@ -552,9 +552,7 @@ def _print_daemon_auth_hint() -> None:
 
 
 def _default_shell_name() -> str:
-    shell_path = str(os.environ.get("SHELL", "") or "").strip()
-    shell_name = os.path.basename(shell_path).strip()
-    return shell_name or "zsh"
+    return current_shell_name(default="bash" if sys.platform.startswith("linux") else "zsh")
 
 
 def _decode_common_escapes(text: str) -> str:
@@ -3472,23 +3470,6 @@ def doctor():
     else:
         issues.append("helper_missing")
         console.print(f"[red]✗ Helper:[/red] missing at {SHELL_CLIENT_SCRIPT}")
-
-    try:
-        binding = subprocess.run(
-            ["zsh", "-ic", "bindkey '^@'"],
-            capture_output=True,
-            text=True,
-            check=False,
-            timeout=3,
-        )
-        if "_agensic_manual_trigger" not in (binding.stdout or ""):
-            warnings.append("zsh_widget_not_bound")
-            console.print("[yellow]⚠ Zsh binding:[/yellow] zsh_widget_not_bound")
-        else:
-            console.print("[green]✓ Zsh binding:[/green] Ctrl+Space mapped")
-    except Exception:
-        warnings.append("zsh_widget_not_bound")
-        console.print("[yellow]⚠ Zsh binding:[/yellow] could not verify")
 
     plugin_log = PLUGIN_LOG_FILE
     if os.path.exists(plugin_log):

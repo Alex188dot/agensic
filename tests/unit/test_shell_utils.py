@@ -22,7 +22,7 @@ class ShellUtilsTests(unittest.TestCase):
         self.assertEqual(normalize_command_pattern("/usr/bin/git status"), "git")
 
     def test_normalize_shell_name(self):
-        self.assertEqual(normalize_shell_name("/bin/zsh"), "zsh")
+        self.assertEqual(normalize_shell_name("/bin/bash"), "bash")
         self.assertEqual(normalize_shell_name("/usr/bin/bash"), "bash")
         self.assertEqual(normalize_shell_name("pwsh.exe"), "powershell")
 

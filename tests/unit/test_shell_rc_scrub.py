@@ -9,7 +9,7 @@ cli_app = importlib.import_module("agensic.cli.app")
 class ShellRcScrubTests(unittest.TestCase):
     def test_scrub_removes_managed_block_and_stale_path_wiring(self):
         with TemporaryDirectory() as tmpdir:
-            rc_path = Path(tmpdir) / ".zshrc"
+            rc_path = Path(tmpdir) / ".bashrc"
             rc_path.write_text(
                 "\n".join(
                     [

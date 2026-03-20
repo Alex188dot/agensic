@@ -223,9 +223,14 @@ def check_and_track_llm_rate_limit(config: dict, client_id: str) -> tuple[bool, 
 
 def get_history_file(shell: str) -> str:
     home = os.path.expanduser("~")
-    if "zsh" in shell:
+    shell_name = str(shell or "").strip().lower()
+    if sys.platform.startswith("linux"):
+        if not shell_name or any(name in shell_name for name in ("bash", "zsh", "sh")):
+            return os.path.join(home, ".bash_history")
+        return ""
+    if "zsh" in shell_name:
         return os.path.join(home, ".zsh_history")
-    if "bash" in shell:
+    if "bash" in shell_name:
         return os.path.join(home, ".bash_history")
     return ""
 

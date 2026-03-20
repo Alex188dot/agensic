@@ -88,6 +88,7 @@ def get_app_paths() -> AppPaths:
         user_bin_dir = _env_path("XDG_BIN_HOME", _home_child(".local", "bin"))
 
     install_bin_dir = os.path.join(install_dir, "bin")
+    primary_shell_integration = "agensic.bash" if sys.platform.startswith("linux") else "agensic.zsh"
     shell_support_dir = os.path.join(install_dir, "shell")
     return AppPaths(
         config_dir=config_dir,
@@ -111,7 +112,7 @@ def get_app_paths() -> AppPaths:
         server_log_file=os.path.join(state_dir, "server.log"),
         plugin_log_file=os.path.join(state_dir, "plugin.log"),
         shell_support_dir=shell_support_dir,
-        shell_integration_path=os.path.join(install_dir, "agensic.zsh"),
+        shell_integration_path=os.path.join(install_dir, primary_shell_integration),
         shell_bash_integration_path=os.path.join(install_dir, "agensic.bash"),
         shell_shared_helpers_path=os.path.join(shell_support_dir, "agensic_shared.sh"),
         shell_client_path=os.path.join(install_dir, "shell_client.py"),
@@ -162,11 +163,15 @@ def migrate_legacy_layout() -> None:
         (legacy_root / "provenance_ed25519.pub.pem", Path(APP_PATHS.provenance_public_key_path)),
         (legacy_root / "agent_registry.local.json", Path(APP_PATHS.agent_registry_local_override_path)),
         (legacy_root / "last_indexed_line", Path(APP_PATHS.last_indexed_path)),
-        (legacy_root / "agensic.zsh", Path(APP_PATHS.shell_integration_path)),
         (legacy_root / "agensic.bash", Path(APP_PATHS.shell_bash_integration_path)),
         (legacy_root / "shell" / "agensic_shared.sh", Path(APP_PATHS.shell_shared_helpers_path)),
         (legacy_root / "shell_client.py", Path(APP_PATHS.shell_client_path)),
     )
+    if not sys.platform.startswith("linux"):
+        file_migrations = (
+            (legacy_root / "agensic.zsh", Path(APP_PATHS.shell_integration_path)),
+            *file_migrations,
+        )
     for source, dest in file_migrations:
         if not source.exists() or dest.exists():
             continue

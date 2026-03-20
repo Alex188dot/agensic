@@ -47,7 +47,7 @@ class ShellClientAuthTests(unittest.TestCase):
             "command_buffer": "git st",
             "cursor_position": 6,
             "working_directory": "/tmp",
-            "shell": "zsh",
+            "shell": "bash",
             "allow_ai": False,
             "trigger_source": "test",
         }
@@ -68,7 +68,7 @@ class ShellClientAuthTests(unittest.TestCase):
             "command_buffer": "git st",
             "cursor_position": 6,
             "working_directory": "/tmp",
-            "shell": "zsh",
+            "shell": "bash",
             "allow_ai": False,
             "trigger_source": "test",
         }
@@ -112,7 +112,7 @@ class ShellClientAuthTests(unittest.TestCase):
                     "--working-directory",
                     "/tmp",
                     "--shell",
-                    "zsh",
+                    "bash",
                     "--terminal",
                     "xterm-256color",
                     "--platform",
@@ -147,7 +147,7 @@ class ShellClientAuthTests(unittest.TestCase):
                     "--working-directory",
                     "/tmp",
                     "--shell",
-                    "zsh",
+                    "bash",
                 ]
             )
         self.assertEqual(len(lines), 12)
@@ -178,7 +178,7 @@ class ShellClientAuthTests(unittest.TestCase):
                     "--working-directory",
                     "/tmp",
                     "--shell",
-                    "zsh",
+                    "bash",
                 ]
             )
         self.assertEqual(lines[0], "agensic_shell_lines_v1")
@@ -211,7 +211,7 @@ class ShellClientAuthTests(unittest.TestCase):
                     "--working-directory",
                     "/tmp",
                     "--shell",
-                    "zsh",
+                    "bash",
                 ]
             )
         self.assertEqual(lines[4], "ok")
@@ -235,7 +235,7 @@ class ShellClientAuthTests(unittest.TestCase):
                     "--working-directory",
                     "/tmp",
                     "--shell",
-                    "zsh",
+                    "bash",
                 ]
             )
         self.assertEqual(result.get("ok"), True)
@@ -253,7 +253,7 @@ class ShellClientAuthTests(unittest.TestCase):
                     "--working-directory",
                     "/tmp",
                     "--shell",
-                    "zsh",
+                    "bash",
                 ]
             )
         self.assertEqual(result.get("ok"), True)
@@ -273,7 +273,7 @@ class ShellClientAuthTests(unittest.TestCase):
                     "--working-directory",
                     "/tmp",
                     "--shell",
-                    "zsh",
+                    "bash",
                 ]
             )
         self.assertEqual(lines[0], "agensic_shell_lines_v1")
@@ -296,7 +296,7 @@ class ShellClientAuthTests(unittest.TestCase):
                     "--working-directory",
                     "/tmp",
                     "--shell",
-                    "zsh",
+                    "bash",
                 ]
             )
         self.assertEqual(lines[0], "agensic_shell_lines_v1")

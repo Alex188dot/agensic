@@ -338,7 +338,7 @@ class StateBackendTests(unittest.TestCase):
             db_path = os.path.join(tmp, "state.sqlite")
             store = SQLiteStateStore(db_path, journal=None)
 
-            history_file = "/tmp/.zsh_history"
+            history_file = "/tmp/.bash_history"
             store.set_history_index_state(
                 history_file=history_file,
                 inode=123,

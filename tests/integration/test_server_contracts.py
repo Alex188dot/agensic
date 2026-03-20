@@ -137,7 +137,7 @@ class ServerContractTests(unittest.TestCase):
                     "command_buffer": "git",
                     "cursor_position": 3,
                     "working_directory": "/tmp",
-                    "shell": "zsh",
+                    "shell": "bash",
                     "allow_ai": False,
                 },
             )
@@ -181,7 +181,7 @@ class ServerContractTests(unittest.TestCase):
                     "command_buffer": "git",
                     "cursor_position": 3,
                     "working_directory": "/tmp",
-                    "shell": "zsh",
+                    "shell": "bash",
                     "allow_ai": True,
                 },
             )
@@ -207,7 +207,7 @@ class ServerContractTests(unittest.TestCase):
                     "command_buffer": "git",
                     "cursor_position": 3,
                     "working_directory": "/tmp",
-                    "shell": "zsh",
+                    "shell": "bash",
                     "allow_ai": True,
                 },
             )
@@ -242,7 +242,7 @@ class ServerContractTests(unittest.TestCase):
                 json={
                     "intent_text": "list files",
                     "working_directory": "/tmp",
-                    "shell": "zsh",
+                    "shell": "bash",
                 },
             )
             self.assertEqual(intent_response.status_code, 200)
@@ -253,7 +253,7 @@ class ServerContractTests(unittest.TestCase):
                 json={
                     "prompt_text": "hi",
                     "working_directory": "/tmp",
-                    "shell": "zsh",
+                    "shell": "bash",
                 },
             )
             self.assertEqual(assist_response.status_code, 200)
@@ -405,7 +405,7 @@ class ServerContractTests(unittest.TestCase):
                 json={
                     "intent_text": "list files",
                     "working_directory": "/tmp",
-                    "shell": "zsh",
+                    "shell": "bash",
                 },
             )
             self.assertEqual(response.status_code, 200)
@@ -428,7 +428,7 @@ class ServerContractTests(unittest.TestCase):
                 json={
                     "prompt_text": "hi",
                     "working_directory": "/tmp",
-                    "shell": "zsh",
+                    "shell": "bash",
                 },
             )
             self.assertEqual(response.status_code, 200)
@@ -450,7 +450,7 @@ class ServerContractTests(unittest.TestCase):
                 json={
                     "intent_text": "list files",
                     "working_directory": "/tmp",
-                    "shell": "zsh",
+                    "shell": "bash",
                 },
             )
             self.assertEqual(response.status_code, 200)
@@ -473,7 +473,7 @@ class ServerContractTests(unittest.TestCase):
                 json={
                     "prompt_text": "hi",
                     "working_directory": "/tmp",
-                    "shell": "zsh",
+                    "shell": "bash",
                 },
             )
             self.assertEqual(response.status_code, 200)
@@ -493,7 +493,7 @@ class ServerContractTests(unittest.TestCase):
                 json={
                     "prompt_text": "hi",
                     "working_directory": "/tmp",
-                    "shell": "zsh",
+                    "shell": "bash",
                 },
             )
             self.assertEqual(response.status_code, 429)
@@ -504,7 +504,7 @@ class ServerContractTests(unittest.TestCase):
             json={
                 "prompt_text": "x" * 5001,
                 "working_directory": "/tmp",
-                "shell": "zsh",
+                "shell": "bash",
             },
         )
         self.assertEqual(response.status_code, 422)
@@ -523,14 +523,14 @@ class ServerContractTests(unittest.TestCase):
 
             remove_response = self.client.post(
                 "/command_store/remove",
-                json={"commands": ["git status"], "shell": "zsh"},
+                json={"commands": ["git status"], "shell": "bash"},
             )
             self.assertEqual(remove_response.status_code, 200)
             self.assertEqual(remove_response.json()["status"], "ok")
 
             resync_response = self.client.post(
                 "/command_store/resync_history",
-                json={"shell": "zsh"},
+                json={"shell": "bash"},
             )
             self.assertEqual(resync_response.status_code, 200)
             self.assertEqual(resync_response.json()["status"], "ok")
@@ -563,7 +563,7 @@ class ServerContractTests(unittest.TestCase):
 
             remove = self.client.post(
                 "/command_store/remove",
-                json={"commands": ["git status"], "shell": "zsh"},
+                json={"commands": ["git status"], "shell": "bash"},
             )
             self.assertEqual(remove.status_code, 200)
             self.assertEqual(remove.json().get("status"), "ignored")
@@ -571,7 +571,7 @@ class ServerContractTests(unittest.TestCase):
 
             resync = self.client.post(
                 "/command_store/resync_history",
-                json={"shell": "zsh"},
+                json={"shell": "bash"},
             )
             self.assertEqual(resync.status_code, 200)
             self.assertEqual(resync.json().get("status"), "ignored")
@@ -749,7 +749,7 @@ class ServerContractTests(unittest.TestCase):
                 "command_buffer": "git",
                 "cursor_position": 3,
                 "working_directory": "/tmp",
-                "shell": "zsh",
+                "shell": "bash",
                 "allow_ai": False,
             },
         )
@@ -761,7 +761,7 @@ class ServerContractTests(unittest.TestCase):
             json={
                 "prompt_text": "hi",
                 "working_directory": "/tmp",
-                "shell": "zsh",
+                "shell": "bash",
             },
         )
         self.assertEqual(assist.status_code, 503)
@@ -772,7 +772,7 @@ class ServerContractTests(unittest.TestCase):
             json={
                 "intent_text": "list files",
                 "working_directory": "/tmp",
-                "shell": "zsh",
+                "shell": "bash",
             },
         )
         self.assertEqual(intent.status_code, 503)
@@ -811,14 +811,14 @@ class ServerContractTests(unittest.TestCase):
 
         remove_response = self.client.post(
             "/command_store/remove",
-            json={"commands": ["git status"], "shell": "zsh"},
+            json={"commands": ["git status"], "shell": "bash"},
         )
         self.assertEqual(remove_response.status_code, 503)
         self.assertEqual(remove_response.json().get("detail"), "daemon_shutting_down")
 
         resync_response = self.client.post(
             "/command_store/resync_history",
-            json={"shell": "zsh"},
+            json={"shell": "bash"},
         )
         self.assertEqual(resync_response.status_code, 503)
         self.assertEqual(resync_response.json().get("detail"), "daemon_shutting_down")

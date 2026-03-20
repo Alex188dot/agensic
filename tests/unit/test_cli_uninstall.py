@@ -17,7 +17,7 @@ class CliUninstallTests(unittest.TestCase):
         self.runner = CliRunner()
 
     def test_uninstall_removes_shell_wiring_and_state(self):
-        rc_paths = [Path("/tmp/.zshrc"), Path("/tmp/.bashrc")]
+        rc_paths = [Path("/tmp/.bash_profile"), Path("/tmp/.bashrc")]
 
         with TemporaryDirectory() as tmpdir:
             sentinel = Path(tmpdir) / "agensic-shell-uninstalled-1"
