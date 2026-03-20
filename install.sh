@@ -1,6 +1,6 @@
 #!/bin/bash
 
-echo "🚀 Installing Agensic 🫆..."
+echo "🚀 Installing Agensic..."
 
 # 1. Create directory
 CONFIG_HOME="${XDG_CONFIG_HOME:-$HOME/.config}"

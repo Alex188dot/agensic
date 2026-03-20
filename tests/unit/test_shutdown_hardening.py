@@ -1,6 +1,7 @@
 import threading
 import unittest
 from unittest.mock import patch
+import os
 
 from fastapi.testclient import TestClient
 
@@ -48,6 +49,22 @@ class ShutdownLifespanTests(unittest.TestCase):
             1,
         )
         close_mock.assert_called_once_with(join_timeout_seconds=20.0, shutdown_reason="lifespan")
+
+    def test_get_history_file_linux_prefers_bash_history_for_bash_and_sh(self):
+        home = os.path.expanduser("~")
+
+        with patch.object(deps.sys, "platform", "linux"):
+            self.assertEqual(deps.get_history_file("bash"), os.path.join(home, ".bash_history"))
+            self.assertEqual(deps.get_history_file("sh"), os.path.join(home, ".bash_history"))
+            self.assertEqual(deps.get_history_file(""), os.path.join(home, ".bash_history"))
+
+    def test_get_history_file_non_linux_distinguishes_zsh_and_bash(self):
+        home = os.path.expanduser("~")
+
+        with patch.object(deps.sys, "platform", "darwin"):
+            self.assertEqual(deps.get_history_file("zsh"), os.path.join(home, ".zsh_history"))
+            self.assertEqual(deps.get_history_file("bash"), os.path.join(home, ".bash_history"))
+            self.assertEqual(deps.get_history_file("fish"), "")
 
 
 class SuggestionEngineCloseTests(unittest.TestCase):
