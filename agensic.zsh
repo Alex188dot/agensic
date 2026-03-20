@@ -260,9 +260,7 @@ _agensic_get_config_mtime() {
         print -r -- ""
         return
     fi
-    local mtime
-    mtime="$(stat -f '%m' "$AGENSIC_CONFIG_PATH" 2>/dev/null)"
-    print -r -- "$mtime"
+    _agensic_get_file_mtime "$AGENSIC_CONFIG_PATH"
 }
 
 _agensic_get_auth_mtime() {
@@ -270,9 +268,7 @@ _agensic_get_auth_mtime() {
         print -r -- ""
         return
     fi
-    local mtime
-    mtime="$(stat -f '%m' "$AGENSIC_AUTH_PATH" 2>/dev/null)"
-    print -r -- "$mtime"
+    _agensic_get_file_mtime "$AGENSIC_AUTH_PATH"
 }
 
 _agensic_get_agent_registry_state() {
@@ -282,10 +278,10 @@ _agensic_get_agent_registry_state() {
     local local_mtime=""
 
     if [[ -f "$builtin_path" ]]; then
-        builtin_mtime="$(stat -f '%m' "$builtin_path" 2>/dev/null)"
+        builtin_mtime="$(_agensic_get_file_mtime "$builtin_path")"
     fi
     if [[ -f "$local_override_path" ]]; then
-        local_mtime="$(stat -f '%m' "$local_override_path" 2>/dev/null)"
+        local_mtime="$(_agensic_get_file_mtime "$local_override_path")"
     fi
     print -r -- "${builtin_mtime}|${local_mtime}"
 }

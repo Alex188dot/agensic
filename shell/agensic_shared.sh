@@ -92,16 +92,7 @@ _agensic_canonicalize_buffer_spacing() {
     esac
 
     value=$(printf '%s' "$value" | tr '\t' ' ')
-    while :; do
-        case "$value" in
-            *"  "*)
-                value=$(printf '%s' "$value" | sed 's/  \+/ /g')
-                ;;
-            *)
-                break
-                ;;
-        esac
-    done
+    value=$(printf '%s' "$value" | tr -s ' ')
 
     while [ "${value# }" != "$value" ]; do
         value="${value# }"
@@ -111,6 +102,64 @@ _agensic_canonicalize_buffer_spacing() {
     done
 
     printf '%s\n' "$value"
+}
+
+_agensic_get_file_mtime() {
+    local path="${1:-}"
+    local python_bin="${AGENSIC_RUNTIME_PYTHON:-python3}"
+
+    if [ -z "$path" ] || [ ! -e "$path" ]; then
+        printf '%s\n' ""
+        return
+    fi
+
+    if command stat -f '%m' "$path" >/dev/null 2>&1; then
+        command stat -f '%m' "$path" 2>/dev/null || printf '%s\n' ""
+        return
+    fi
+
+    if command stat -c '%Y' "$path" >/dev/null 2>&1; then
+        command stat -c '%Y' "$path" 2>/dev/null || printf '%s\n' ""
+        return
+    fi
+
+    if [ -n "$python_bin" ] && command -v "$python_bin" >/dev/null 2>&1; then
+        "$python_bin" - "$path" <<'PY' 2>/dev/null
+import os
+import sys
+
+path = str(sys.argv[1] or "").strip()
+if not path:
+    print("")
+    raise SystemExit(0)
+
+try:
+    print(int(os.path.getmtime(path)))
+except Exception:
+    print("")
+PY
+        return
+    fi
+
+    if command -v python3 >/dev/null 2>&1; then
+        python3 - "$path" <<'PY' 2>/dev/null
+import os
+import sys
+
+path = str(sys.argv[1] or "").strip()
+if not path:
+    print("")
+    raise SystemExit(0)
+
+try:
+    print(int(os.path.getmtime(path)))
+except Exception:
+    print("")
+PY
+        return
+    fi
+
+    printf '%s\n' ""
 }
 
 _agensic_reset_provenance_line_state() {

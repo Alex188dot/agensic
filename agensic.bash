@@ -42,8 +42,12 @@ AGENSIC_LAST_NL_INPUT=""
 AGENSIC_LAST_NL_KIND=""
 AGENSIC_LAST_NL_COMMAND=""
 AGENSIC_LAST_NL_ASSIST=""
+AGENSIC_LAST_NL_AI_AGENT=""
+AGENSIC_LAST_NL_AI_PROVIDER=""
+AGENSIC_LAST_NL_AI_MODEL=""
 AGENSIC_LAST_EXECUTED_CMD=""
 AGENSIC_LAST_EXECUTED_STARTED_AT_MS=0
+AGENSIC_CONFIG_MTIME=""
 AGENSIC_AUTH_MTIME=""
 AGENSIC_AUTH_TOKEN=""
 AGENSIC_LAST_BUFFER=""
@@ -52,8 +56,54 @@ AGENSIC_SUGGESTIONS=()
 AGENSIC_DISPLAY_TEXTS=()
 AGENSIC_ACCEPT_MODES=()
 AGENSIC_SUGGESTION_KINDS=()
+AGENSIC_AUTOCOMPLETE_ENABLED=1
+AGENSIC_AUTO_SESSIONS_ENABLED=1
+AGENSIC_DISABLED_PATTERNS=()
+AGENSIC_LINE_LAST_ACTION=""
+AGENSIC_LINE_ACCEPTED_ORIGIN=""
+AGENSIC_LINE_ACCEPTED_MODE=""
+AGENSIC_LINE_ACCEPTED_KIND=""
+AGENSIC_LINE_MANUAL_EDIT_AFTER_ACCEPT=0
+AGENSIC_LINE_ACCEPTED_AI_AGENT=""
+AGENSIC_LINE_ACCEPTED_AI_PROVIDER=""
+AGENSIC_LINE_ACCEPTED_AI_MODEL=""
+AGENSIC_PENDING_LAST_ACTION=""
+AGENSIC_PENDING_ACCEPTED_ORIGIN=""
+AGENSIC_PENDING_ACCEPTED_MODE=""
+AGENSIC_PENDING_ACCEPTED_KIND=""
+AGENSIC_PENDING_MANUAL_EDIT_AFTER_ACCEPT=0
+AGENSIC_PENDING_AI_AGENT=""
+AGENSIC_PENDING_AI_PROVIDER=""
+AGENSIC_PENDING_AI_MODEL=""
+AGENSIC_PENDING_AGENT_NAME=""
+AGENSIC_PENDING_AGENT_HINT=""
+AGENSIC_PENDING_MODEL_RAW=""
+AGENSIC_PENDING_WRAPPER_ID=""
+AGENSIC_PENDING_PROOF_LABEL=""
+AGENSIC_PENDING_PROOF_AGENT=""
+AGENSIC_PENDING_PROOF_MODEL=""
+AGENSIC_PENDING_PROOF_TRACE=""
+AGENSIC_PENDING_PROOF_TIMESTAMP=0
+AGENSIC_PENDING_PROOF_SIGNATURE=""
+AGENSIC_PENDING_PROOF_SIGNER_SCOPE=""
+AGENSIC_PENDING_PROOF_KEY_FINGERPRINT=""
+AGENSIC_PENDING_PROOF_HOST_FINGERPRINT=""
+AGENSIC_NEXT_PROOF_LABEL=""
+AGENSIC_NEXT_PROOF_AGENT=""
+AGENSIC_NEXT_PROOF_MODEL=""
+AGENSIC_NEXT_PROOF_TRACE=""
+AGENSIC_NEXT_PROOF_TIMESTAMP=0
+AGENSIC_NEXT_PROOF_SIGNATURE=""
+AGENSIC_NEXT_PROOF_SIGNER_SCOPE=""
+AGENSIC_NEXT_PROOF_KEY_FINGERPRINT=""
+AGENSIC_NEXT_PROOF_HOST_FINGERPRINT=""
+AGENSIC_AUTO_SESSION_REGISTRY_STATE=""
+AGENSIC_AUTO_SESSION_WRAPPERS=()
+AGENSIC_AUTO_SESSION_RESERVED_WORDS=(continue)
 AGENSIC_PATH_HEAVY_EXECUTABLES=(cd ls cat less more head tail vi vim nvim nano code source open cp mv mkdir rmdir touch find grep rg sed awk bat)
 AGENSIC_SCRIPT_EXECUTABLES=(python python3 python3.11 python3.12 node bash sh zsh ruby perl php lua)
+AGENSIC_BLOCKED_EXECUTABLES=(rm dd wipefs shred fdisk sfdisk cfdisk parted diskutil mkfs newfs mdadm zpool lvremove vgremove pvremove cryptsetup passwd chpasswd usermod userdel groupdel)
+AGENSIC_BLOCKED_EXECUTABLE_PREFIXES=(mkfs. mkfs_ newfs)
 AGENSIC_BASH_AT_PROMPT=1
 AGENSIC_BASH_IN_PROMPT_HOOK=0
 AGENSIC_BASH_ORIGINAL_PS1="${PS1-}"
@@ -75,8 +125,35 @@ if [[ ! -x "$AGENSIC_RUNTIME_PYTHON" ]]; then
     AGENSIC_RUNTIME_PYTHON="python3"
 fi
 
+_agensic_bash_get_config_mtime() {
+    if [[ ! -f "$AGENSIC_CONFIG_PATH" ]]; then
+        printf '%s\n' ""
+        return
+    fi
+    _agensic_get_file_mtime "$AGENSIC_CONFIG_PATH"
+}
+
+_agensic_bash_get_agent_registry_state() {
+    local builtin_path="${AGENSIC_SOURCE_DIR}/agensic/engine/data/agents_builtin.json"
+    local local_override_path="${AGENSIC_CONFIG_HOME}/agensic/agent_registry.local.json"
+    local builtin_mtime=""
+    local local_mtime=""
+
+    if [[ -f "$builtin_path" ]]; then
+        builtin_mtime="$(_agensic_get_file_mtime "$builtin_path")"
+    fi
+    if [[ -f "$local_override_path" ]]; then
+        local_mtime="$(_agensic_get_file_mtime "$local_override_path")"
+    fi
+    printf '%s\n' "${builtin_mtime}|${local_mtime}"
+}
+
 _agensic_bash_is_interactive() {
     [[ "$-" == *i* ]]
+}
+
+_agensic_bash_lower() {
+    printf '%s\n' "${1:-}" | tr '[:upper:]' '[:lower:]'
 }
 
 _agensic_bash_log() {
@@ -93,7 +170,11 @@ _agensic_bash_log() {
 
 _agensic_bash_last_history_entry() {
     local last=""
-    last="$(builtin fc -ln -1 2>/dev/null)" || return 1
+    last="$(builtin fc -ln -1 2>/dev/null)" || last=""
+    if [[ -z "$last" ]]; then
+        last="$(history 1 2>/dev/null)"
+        last="$(printf '%s\n' "$last" | sed 's/^[[:space:]]*[0-9][0-9]*[[:space:]]*//')"
+    fi
     last="${last#"${last%%[![:space:]]*}"}"
     last="${last%"${last##*[![:space:]]}"}"
     if [[ -z "$last" ]]; then
@@ -149,11 +230,146 @@ _agensic_bash_extract_executable_token() {
                 ;;
             *)
                 lower="${token##*/}"
-                printf '%s\n' "${lower,,}"
+                _agensic_bash_lower "$lower"
                 return 0
                 ;;
         esac
     done
+
+    return 1
+}
+
+_agensic_is_blocked_runtime_command() {
+    local command="${1:-}"
+    local -a tokens=()
+    local token=""
+    local exe=""
+    local exe_index=0
+    local i=0
+    local lower=""
+    local prefix=""
+
+    read -r -a tokens <<< "$command"
+    while (( i < ${#tokens[@]} )); do
+        token="${tokens[$i]}"
+        if [[ -z "$token" ]]; then
+            ((i++))
+            continue
+        fi
+        case "$token" in
+            sudo|command)
+                ((i++))
+                continue
+                ;;
+            env|/usr/bin/env)
+                ((i++))
+                while (( i < ${#tokens[@]} )); do
+                    token="${tokens[$i]}"
+                    if [[ -z "$token" || "$token" == -* || "$token" == *=* ]]; then
+                        ((i++))
+                        continue
+                    fi
+                    break
+                done
+                continue
+                ;;
+            -*|*=*)
+                ((i++))
+                continue
+                ;;
+            *)
+                exe="${token##*/}"
+                exe="$(_agensic_bash_lower "$exe")"
+                exe_index=$i
+                break
+                ;;
+        esac
+    done
+
+    if [[ -z "$exe" ]]; then
+        return 1
+    fi
+    if _agensic_value_in_array "$exe" "${AGENSIC_BLOCKED_EXECUTABLES[@]}"; then
+        return 0
+    fi
+    for prefix in "${AGENSIC_BLOCKED_EXECUTABLE_PREFIXES[@]}"; do
+        if [[ "$exe" == "$prefix"* ]]; then
+            return 0
+        fi
+    done
+
+    if [[ "$exe" == "history" ]]; then
+        for (( i = exe_index + 1; i < ${#tokens[@]}; i++ )); do
+            lower="$(_agensic_bash_lower "${tokens[$i]}")"
+            if [[ -z "$lower" ]]; then
+                continue
+            fi
+            if [[ "$lower" == "--clear" ]]; then
+                return 0
+            fi
+            if _agensic_token_has_short_flag "$lower" "c"; then
+                return 0
+            fi
+        done
+        return 1
+    fi
+
+    if [[ "$exe" == "git" ]]; then
+        local j=$((exe_index + 1))
+        local subcmd=""
+        while (( j < ${#tokens[@]} )); do
+            token="${tokens[$j]}"
+            if [[ -z "$token" ]]; then
+                ((j++))
+                continue
+            fi
+            case "$token" in
+                --)
+                    ((j++))
+                    break
+                    ;;
+                -C|-c|--exec-path|--git-dir|--work-tree|--namespace|--super-prefix|--config-env)
+                    ((j+=2))
+                    continue
+                    ;;
+                --exec-path=*|--git-dir=*|--work-tree=*|--namespace=*|--super-prefix=*|--config-env=*|-C*|-c*)
+                    ((j++))
+                    continue
+                    ;;
+                -*)
+                    ((j++))
+                    continue
+                    ;;
+                *)
+                    subcmd="$(_agensic_bash_lower "$token")"
+                    ((j++))
+                    break
+                    ;;
+            esac
+        done
+
+        if [[ "$subcmd" == "reset" ]]; then
+            for (( ; j < ${#tokens[@]}; j++ )); do
+                lower="$(_agensic_bash_lower "${tokens[$j]}")"
+                if [[ "$lower" == "--hard" ]]; then
+                    return 0
+                fi
+            done
+            return 1
+        fi
+
+        if [[ "$subcmd" == "clean" ]]; then
+            for (( ; j < ${#tokens[@]}; j++ )); do
+                lower="$(_agensic_bash_lower "${tokens[$j]}")"
+                if [[ "$lower" == "--force" || "$lower" == --force=* ]]; then
+                    return 0
+                fi
+                if _agensic_token_has_short_flag "$lower" "f"; then
+                    return 0
+                fi
+            done
+        fi
+    fi
 
     return 1
 }
@@ -189,12 +405,302 @@ _agensic_bash_should_preserve_native_tab() {
     return 1
 }
 
+_agensic_print_manual_session_hint() {
+    local executable="${1:-}"
+    case "$(_agensic_bash_lower "$executable")" in
+        ollama)
+            printf '%s\n' "To enable Agensic Sessions with Ollama, use: agensic run ollama" >&2
+            ;;
+    esac
+}
+
+_agensic_auto_session_wrapper_is_valid() {
+    local executable=""
+    executable="$(_agensic_bash_lower "$1")"
+    if [[ -z "$executable" ]]; then
+        return 1
+    fi
+    if [[ ! "$executable" =~ ^[A-Za-z_][A-Za-z0-9._-]*$ ]]; then
+        return 1
+    fi
+    if _agensic_value_in_array "$executable" "${AGENSIC_AUTO_SESSION_RESERVED_WORDS[@]}"; then
+        return 1
+    fi
+    return 0
+}
+
+_agensic_unregister_auto_session_wrappers() {
+    local wrapper=""
+    for wrapper in "${AGENSIC_AUTO_SESSION_WRAPPERS[@]}"; do
+        unset -f "$wrapper" 2>/dev/null || true
+    done
+    AGENSIC_AUTO_SESSION_WRAPPERS=()
+}
+
+_agensic_define_auto_session_wrapper() {
+    local executable=""
+    local mode=""
+    executable="$(_agensic_bash_lower "$1")"
+    mode="$(_agensic_bash_lower "$2")"
+    local quoted_executable=""
+    local quoted_mode=""
+    if ! _agensic_auto_session_wrapper_is_valid "$executable"; then
+        return
+    fi
+    printf -v quoted_executable '%q' "$executable"
+    printf -v quoted_mode '%q' "$mode"
+    eval "${executable}() { _agensic_auto_session_exec ${quoted_executable} ${quoted_mode} \"\$@\"; }"
+    AGENSIC_AUTO_SESSION_WRAPPERS+=("$executable")
+}
+
+_agensic_load_auto_session_wrappers() {
+    if [[ -z "$AGENSIC_RUNTIME_PYTHON" ]]; then
+        return 1
+    fi
+    "$AGENSIC_RUNTIME_PYTHON" -c "
+from collections import OrderedDict
+
+try:
+    from agensic.engine.agent_registry import AgentRegistry
+except Exception:
+    raise SystemExit(0)
+
+try:
+    registry = AgentRegistry()
+except Exception:
+    raise SystemExit(0)
+
+entries = OrderedDict()
+for agent in registry.list_agents():
+    if not isinstance(agent, dict):
+        continue
+    agent_id = str(agent.get('agent_id', '') or '').strip().lower()
+    mode = 'manual_hint' if agent_id == 'ollama' else 'track'
+    for raw_executable in (agent.get('executables') or []):
+        executable = str(raw_executable or '').strip().lower()
+        if not executable or executable in entries:
+            continue
+        entries[executable] = mode
+
+for executable, mode in entries.items():
+    print(f'{mode}\t{executable}')
+" 2>/dev/null
+}
+
+_agensic_refresh_auto_session_wrappers_if_needed() {
+    local state=""
+    local entries=""
+    local -a entry_lines=()
+    local line=""
+    local mode=""
+    local executable=""
+
+    _agensic_reload_disabled_patterns_if_needed
+    state="$(_agensic_bash_get_agent_registry_state)"
+    if [[ "$state" == "$AGENSIC_AUTO_SESSION_REGISTRY_STATE" && ${#AGENSIC_AUTO_SESSION_WRAPPERS[@]} -gt 0 ]]; then
+        return
+    fi
+
+    entries="$(_agensic_load_auto_session_wrappers)"
+    _agensic_unregister_auto_session_wrappers
+    AGENSIC_AUTO_SESSION_REGISTRY_STATE="$state"
+    if [[ -z "$entries" ]]; then
+        return
+    fi
+
+    _agensic_bash_split_lines_to_array entry_lines "$entries"
+    for line in "${entry_lines[@]}"; do
+        mode="${line%%$'\t'*}"
+        executable="${line#*$'\t'}"
+        if [[ -z "$mode" || -z "$executable" ]]; then
+            continue
+        fi
+        _agensic_define_auto_session_wrapper "$executable" "$mode"
+    done
+}
+
+_agensic_auto_session_exec() {
+    local executable=""
+    local mode=""
+    executable="$(_agensic_bash_lower "$1")"
+    mode="$(_agensic_bash_lower "$2")"
+    shift 2
+
+    _agensic_reload_disabled_patterns_if_needed
+    if [[ "${AGENSIC_TRACK_ACTIVE:-0}" == "1" || "${AGENSIC_AUTO_SESSIONS_ENABLED:-1}" != "1" ]]; then
+        command "$executable" "$@"
+        return $?
+    fi
+
+    case "$mode" in
+        track)
+            agensic run "$executable" "$@"
+            return $?
+            ;;
+        manual_hint)
+            _agensic_print_manual_session_hint "$executable"
+            command "$executable" "$@"
+            return $?
+            ;;
+    esac
+
+    command "$executable" "$@"
+    return $?
+}
+
+_agensic_command_forces_human_provenance() {
+    local command="${1:-}"
+    local -a tokens=()
+    local token=""
+    local idx=0
+    local subcmd=""
+
+    read -r -a tokens <<< "$command"
+    if (( ${#tokens[@]} == 0 )); then
+        return 1
+    fi
+
+    while (( idx < ${#tokens[@]} )); do
+        token="${tokens[$idx]}"
+        if [[ "$token" == [A-Za-z_][A-Za-z0-9_]*=* ]]; then
+            ((idx++))
+            continue
+        fi
+        break
+    done
+
+    if (( idx >= ${#tokens[@]} )); then
+        return 1
+    fi
+    if [[ "${tokens[$idx]##*/}" != "agensic" ]]; then
+        return 1
+    fi
+
+    ((idx++))
+    if (( idx >= ${#tokens[@]} )); then
+        return 1
+    fi
+
+    subcmd="${tokens[$idx]}"
+    [[ "$subcmd" == "run" || "$subcmd" == "provenance" ]]
+}
+
+_agensic_force_pending_human_typed_command() {
+    _agensic_clear_pending_execution
+    AGENSIC_PENDING_LAST_ACTION="human_typed"
+    AGENSIC_PENDING_MANUAL_EDIT_AFTER_ACCEPT=0
+    _agensic_clear_next_proof_fields
+}
+
 _agensic_bash_get_auth_mtime() {
     if [[ ! -f "$AGENSIC_AUTH_PATH" ]]; then
         printf '%s\n' ""
         return
     fi
-    stat -c '%Y' "$AGENSIC_AUTH_PATH" 2>/dev/null || printf '%s\n' ""
+    _agensic_get_file_mtime "$AGENSIC_AUTH_PATH"
+}
+
+_agensic_reload_disabled_patterns_if_needed() {
+    local current_mtime=""
+    current_mtime="$(_agensic_bash_get_config_mtime)"
+    if [[ "$current_mtime" == "$AGENSIC_CONFIG_MTIME" ]]; then
+        return
+    fi
+
+    AGENSIC_CONFIG_MTIME="$current_mtime"
+    AGENSIC_DISABLED_PATTERNS=()
+    AGENSIC_AUTOCOMPLETE_ENABLED=1
+    AGENSIC_AUTO_SESSIONS_ENABLED=1
+
+    if [[ -z "$current_mtime" || ! -f "$AGENSIC_CONFIG_PATH" ]]; then
+        return
+    fi
+
+    local response=""
+    local sep=$'\x1f'
+    response="$(
+        AGENSIC_BASH_CONFIG_PATH="$AGENSIC_CONFIG_PATH" python3 -c "
+import json, os, shlex
+
+path = str(os.environ.get('AGENSIC_BASH_CONFIG_PATH', '') or '').strip()
+try:
+    with open(path, 'r', encoding='utf-8') as fh:
+        payload = json.load(fh)
+except Exception:
+    payload = {}
+
+def normalize(value):
+    raw = str(value or '').strip()
+    if not raw:
+        return ''
+    try:
+        parts = shlex.split(raw, posix=True)
+    except Exception:
+        parts = raw.split()
+    token = parts[0] if parts else ''
+    return os.path.basename(token).strip().lower()
+
+patterns = []
+seen = set()
+for value in (payload.get('disabled_command_patterns') or []):
+    normalized = normalize(value)
+    if normalized and normalized not in seen:
+        seen.add(normalized)
+        patterns.append(normalized)
+
+print('1' if bool(payload.get('autocomplete_enabled', True)) else '0')
+print('1' if bool(payload.get('automatic_agensic_sessions_enabled', True)) else '0')
+print('\x1f'.join(patterns))
+" 2>/dev/null
+    )"
+
+    local -a response_lines=()
+    _agensic_bash_split_lines_to_array response_lines "$response"
+    if [[ "${response_lines[0]:-}" == "0" ]]; then
+        AGENSIC_AUTOCOMPLETE_ENABLED=0
+    fi
+    if [[ "${response_lines[1]:-}" == "0" ]]; then
+        AGENSIC_AUTO_SESSIONS_ENABLED=0
+    fi
+    if [[ -n "${response_lines[2]:-}" ]]; then
+        IFS="$sep" read -r -a AGENSIC_DISABLED_PATTERNS <<< "${response_lines[2]}"
+    fi
+}
+
+_agensic_matches_disabled_pattern() {
+    local command="${1:-}"
+    local exe=""
+    local pattern=""
+
+    _agensic_reload_disabled_patterns_if_needed
+    if (( ${#AGENSIC_DISABLED_PATTERNS[@]} == 0 )); then
+        return 1
+    fi
+
+    exe="$(_agensic_bash_extract_executable_token "$command")"
+    if [[ -z "$exe" ]]; then
+        return 1
+    fi
+
+    for pattern in "${AGENSIC_DISABLED_PATTERNS[@]}"; do
+        if [[ "$exe" == "$pattern"* || "$pattern" == "$exe"* ]]; then
+            return 0
+        fi
+    done
+    return 1
+}
+
+_agensic_bash_autocomplete_is_disabled() {
+    _agensic_reload_disabled_patterns_if_needed
+    [[ "${AGENSIC_AUTOCOMPLETE_ENABLED:-1}" != "1" ]]
+}
+
+_agensic_bash_should_skip_agensic_for_buffer() {
+    local buffer="${1:-$(_agensic_bash_current_buffer)}"
+    if _agensic_matches_disabled_pattern "$buffer"; then
+        return 0
+    fi
+    _agensic_is_blocked_runtime_command "$buffer"
 }
 
 _agensic_reload_auth_token_if_needed() {
@@ -366,6 +872,19 @@ except Exception:
 " 2>/dev/null && return 0
     fi
     printf '%s\n' "$text"
+}
+
+_agensic_bash_split_lines_to_array() {
+    local array_name="$1"
+    local data="${2:-}"
+    local line=""
+    local escaped=""
+
+    eval "$array_name=()"
+    while IFS= read -r line || [[ -n "$line" ]]; do
+        printf -v escaped '%q' "$line"
+        eval "$array_name+=($escaped)"
+    done <<< "$data"
 }
 
 _agensic_bash_now_epoch_ms() {
@@ -619,6 +1138,10 @@ _agensic_bash_fetch_suggestions() {
         _agensic_bash_clear_suggestions
         return
     fi
+    if _agensic_bash_autocomplete_is_disabled || _agensic_bash_should_skip_agensic_for_buffer "$buffer"; then
+        _agensic_bash_clear_suggestions
+        return
+    fi
     if [[ "$trigger_source" != manual_* ]] && _agensic_bash_should_preserve_native_tab "$buffer"; then
         _agensic_bash_clear_suggestions
         return
@@ -692,7 +1215,7 @@ print('kinds=' + sep.join(kinds))
     )"
 
     local -a lines=()
-    mapfile -t lines <<< "$parsed"
+    _agensic_bash_split_lines_to_array lines "$parsed"
     if [[ "${lines[0]:-}" != "ok=1" ]]; then
         if (( preserve_existing == 1 && ${#old_suggestions[@]} > 0 )); then
             AGENSIC_SUGGESTIONS=("${old_suggestions[@]}")
@@ -753,20 +1276,34 @@ _agensic_bash_accept_current_suggestion() {
     local idx=$((AGENSIC_SUGGESTION_INDEX - 1))
     local current="${AGENSIC_SUGGESTIONS[$idx]}"
     local mode="${AGENSIC_ACCEPT_MODES[$idx]:-suffix_append}"
+    local kind="${AGENSIC_SUGGESTION_KINDS[$idx]:-normal}"
     local buffer=""
+    local origin="ag"
+    local ai_agent=""
+    local ai_provider=""
+    local ai_model=""
     buffer="$(_agensic_bash_current_buffer)"
 
     if _agensic_bash_is_status_suggestion "$current"; then
         return 1
     fi
 
+    if [[ "${AGENSIC_LAST_FETCH_USED_AI:-0}" == "1" ]]; then
+        origin="ai"
+        ai_agent="$AGENSIC_LAST_FETCH_AI_AGENT"
+        ai_provider="$AGENSIC_LAST_FETCH_AI_PROVIDER"
+        ai_model="$AGENSIC_LAST_FETCH_AI_MODEL"
+    fi
+
     if [[ "$mode" == "replace_full" ]]; then
         _agensic_bash_set_buffer "$(_agensic_canonicalize_buffer_spacing "$current")"
+        _agensic_set_suggestion_accept_state "$origin" "replace_full" "$kind" "$ai_agent" "$ai_provider" "$ai_model"
     else
         local typed_since_fetch="${buffer#"$AGENSIC_LAST_BUFFER"}"
         local to_add="${current#"$typed_since_fetch"}"
         to_add="$(_agensic_merge_suffix "$buffer" "$to_add")"
         _agensic_bash_set_buffer "$(_agensic_canonicalize_buffer_spacing "${buffer}${to_add}")"
+        _agensic_set_suggestion_accept_state "$origin" "suffix_append" "$kind" "$ai_agent" "$ai_provider" "$ai_model"
     fi
 
     _agensic_bash_clear_suggestions
@@ -781,17 +1318,29 @@ _agensic_bash_partial_accept_current_suggestion() {
     local idx=$((AGENSIC_SUGGESTION_INDEX - 1))
     local current="${AGENSIC_SUGGESTIONS[$idx]}"
     local mode="${AGENSIC_ACCEPT_MODES[$idx]:-suffix_append}"
+    local kind="${AGENSIC_SUGGESTION_KINDS[$idx]:-normal}"
     local buffer=""
     local typed_since_fetch=""
     local remaining=""
     local first_word=""
+    local origin="ag"
+    local ai_agent=""
+    local ai_provider=""
+    local ai_model=""
 
     buffer="$(_agensic_bash_current_buffer)"
     if _agensic_bash_is_status_suggestion "$current"; then
         return 1
     fi
+    if [[ "${AGENSIC_LAST_FETCH_USED_AI:-0}" == "1" ]]; then
+        origin="ai"
+        ai_agent="$AGENSIC_LAST_FETCH_AI_AGENT"
+        ai_provider="$AGENSIC_LAST_FETCH_AI_PROVIDER"
+        ai_model="$AGENSIC_LAST_FETCH_AI_MODEL"
+    fi
     if [[ "$mode" == "replace_full" ]]; then
         _agensic_bash_set_buffer "$(_agensic_canonicalize_buffer_spacing "$current")"
+        _agensic_set_suggestion_accept_state "$origin" "replace_full" "$kind" "$ai_agent" "$ai_provider" "$ai_model"
         _agensic_bash_clear_suggestions
         return 0
     fi
@@ -805,6 +1354,7 @@ _agensic_bash_partial_accept_current_suggestion() {
     else
         _agensic_bash_set_buffer "$(_agensic_canonicalize_buffer_spacing "${buffer}${first_word} ")"
     fi
+    _agensic_set_suggestion_accept_state "$origin" "suffix_append" "$kind" "$ai_agent" "$ai_provider" "$ai_model"
     _agensic_bash_clear_suggestions
     return 0
 }
@@ -851,7 +1401,12 @@ _agensic_bash_handle_enter() {
 _agensic_bash_after_self_insert() {
     local buffer=""
     buffer="$(_agensic_bash_current_buffer)"
+    _agensic_mark_manual_line_edit "human_typed"
     if [[ "$buffer" == '#'* ]]; then
+        _agensic_bash_clear_suggestions
+        return 0
+    fi
+    if _agensic_bash_autocomplete_is_disabled || _agensic_bash_should_skip_agensic_for_buffer "$buffer"; then
         _agensic_bash_clear_suggestions
         return 0
     fi
@@ -875,8 +1430,18 @@ _agensic_bash_after_self_insert() {
 }
 
 _agensic_bash_after_delete() {
+    local buffer=""
     _agensic_bash_clear_suggestions
-    return 0
+    buffer="$(_agensic_bash_current_buffer)"
+    _agensic_mark_manual_line_edit "human_edit"
+    if [[ "$buffer" == '#'* ]]; then
+        return 0
+    fi
+    if [[ ${#buffer} -lt 2 ]] || _agensic_bash_should_preserve_native_tab "$buffer"; then
+        return 0
+    fi
+    AGENSIC_LAST_BUFFER="$buffer"
+    _agensic_bash_fetch_suggestions 1 "delete_auto" 1
 }
 
 _agensic_bash_resolve_intent_command() {
@@ -885,6 +1450,10 @@ _agensic_bash_resolve_intent_command() {
     body="${body#"${body%%[![:space:]]*}"}"
     if [[ -z "$body" ]]; then
         _agensic_bash_render_info "Add a terminal request after '#'."
+        return 1
+    fi
+    if _agensic_bash_autocomplete_is_disabled; then
+        _agensic_bash_render_info "Autocomplete is turned off. Turn it on in 'agensic setup' to use '#' intent mode."
         return 1
     fi
 
@@ -908,7 +1477,7 @@ _agensic_bash_resolve_intent_command() {
     response="$("${helper_cmd[@]}" 2>/dev/null)"
 
     local -a lines=()
-    mapfile -t lines <<< "$response"
+    _agensic_bash_split_lines_to_array lines "$response"
     if [[ "${lines[0]:-}" != "agensic_shell_lines_v1" || "${lines[1]:-}" != "intent" ]]; then
         _agensic_bash_render_info "Could not resolve command mode right now."
         return 1
@@ -917,6 +1486,9 @@ _agensic_bash_resolve_intent_command() {
     local status="${lines[4]:-error}"
     local primary="${lines[5]:-}"
     local explanation="${lines[6]:-Could not resolve command mode right now.}"
+    local ai_agent="${lines[9]:-}"
+    local ai_provider="${lines[10]:-}"
+    local ai_model="${lines[11]:-}"
     if [[ "$status" != "ok" || -z "$primary" ]]; then
         _agensic_bash_render_info "$explanation"
         return 1
@@ -926,6 +1498,10 @@ _agensic_bash_resolve_intent_command() {
     AGENSIC_LAST_NL_INPUT="$raw"
     AGENSIC_LAST_NL_KIND="intent"
     AGENSIC_LAST_NL_COMMAND="$primary"
+    AGENSIC_LAST_NL_AI_AGENT="$ai_agent"
+    AGENSIC_LAST_NL_AI_PROVIDER="$ai_provider"
+    AGENSIC_LAST_NL_AI_MODEL="$ai_model"
+    _agensic_set_suggestion_accept_state "ai" "replace_full" "intent_command" "$ai_agent" "$ai_provider" "$ai_model"
     printf '\nAgensic command mode (#)\nQuestion: %s\n\n%s\n' "$body" "$primary" >&2
     return 0
 }
@@ -936,6 +1512,11 @@ _agensic_bash_resolve_general_assist() {
     body="${body#"${body%%[![:space:]]*}"}"
     if [[ -z "$body" ]]; then
         _agensic_bash_render_info "Add a question after '##'."
+        return 1
+    fi
+    if _agensic_bash_autocomplete_is_disabled; then
+        _agensic_bash_render_markdown_or_plain "Autocomplete is turned off. Turn it on in 'agensic setup' to use '##' assistant mode." >&2
+        _agensic_bash_set_buffer ""
         return 1
     fi
 
@@ -959,7 +1540,7 @@ _agensic_bash_resolve_general_assist() {
     response="$("${helper_cmd[@]}" 2>/dev/null)"
 
     local -a lines=()
-    mapfile -t lines <<< "$response"
+    _agensic_bash_split_lines_to_array lines "$response"
     if [[ "${lines[0]:-}" != "agensic_shell_lines_v1" || "${lines[1]:-}" != "assist" ]]; then
         _agensic_bash_render_info "Could not fetch assistant reply right now."
         return 1
@@ -990,14 +1571,63 @@ _agensic_bash_resolve_general_assist() {
 _agensic_bash_build_log_command_json() {
     local command="$1"
     local exit_code="$2"
-    local duration_ms="${3:-}"
+    local source="${3:-runtime}"
+    local duration_ms="${4:-}"
+    local log_cwd="$PWD"
+    local log_shell_pid="$$"
+    local log_last_action="$AGENSIC_PENDING_LAST_ACTION"
+    local log_accept_origin="$AGENSIC_PENDING_ACCEPTED_ORIGIN"
+    local log_accept_mode="$AGENSIC_PENDING_ACCEPTED_MODE"
+    local log_suggestion_kind="$AGENSIC_PENDING_ACCEPTED_KIND"
+    local log_manual_after_accept="$AGENSIC_PENDING_MANUAL_EDIT_AFTER_ACCEPT"
+    local log_ai_agent="$AGENSIC_PENDING_AI_AGENT"
+    local log_ai_provider="$AGENSIC_PENDING_AI_PROVIDER"
+    local log_ai_model="$AGENSIC_PENDING_AI_MODEL"
+    local log_agent_name="$AGENSIC_PENDING_AGENT_NAME"
+    local log_agent_hint="$AGENSIC_PENDING_AGENT_HINT"
+    local log_model_raw="$AGENSIC_PENDING_MODEL_RAW"
+    local log_wrapper_id="$AGENSIC_PENDING_WRAPPER_ID"
+    local log_proof_label="$AGENSIC_PENDING_PROOF_LABEL"
+    local log_proof_agent="$AGENSIC_PENDING_PROOF_AGENT"
+    local log_proof_model="$AGENSIC_PENDING_PROOF_MODEL"
+    local log_proof_trace="$AGENSIC_PENDING_PROOF_TRACE"
+    local log_proof_timestamp="$AGENSIC_PENDING_PROOF_TIMESTAMP"
+    local log_proof_signature="$AGENSIC_PENDING_PROOF_SIGNATURE"
+    local log_proof_signer_scope="$AGENSIC_PENDING_PROOF_SIGNER_SCOPE"
+    local log_proof_key_fingerprint="$AGENSIC_PENDING_PROOF_KEY_FINGERPRINT"
+    local log_proof_host_fingerprint="$AGENSIC_PENDING_PROOF_HOST_FINGERPRINT"
     AGENSIC_LOG_COMMAND="$command" \
     AGENSIC_LOG_EXIT="$exit_code" \
+    AGENSIC_LOG_SOURCE="$source" \
     AGENSIC_LOG_DURATION_MS="$duration_ms" \
-    AGENSIC_LOG_CWD="$PWD" \
+    AGENSIC_LOG_CWD="$log_cwd" \
+    AGENSIC_LOG_SHELL_PID="$log_shell_pid" \
+    AGENSIC_LOG_LAST_ACTION="$log_last_action" \
+    AGENSIC_LOG_ACCEPT_ORIGIN="$log_accept_origin" \
+    AGENSIC_LOG_ACCEPT_MODE="$log_accept_mode" \
+    AGENSIC_LOG_SUGGESTION_KIND="$log_suggestion_kind" \
+    AGENSIC_LOG_MANUAL_AFTER_ACCEPT="$log_manual_after_accept" \
+    AGENSIC_LOG_AI_AGENT="$log_ai_agent" \
+    AGENSIC_LOG_AI_PROVIDER="$log_ai_provider" \
+    AGENSIC_LOG_AI_MODEL="$log_ai_model" \
+    AGENSIC_LOG_AGENT_NAME="$log_agent_name" \
+    AGENSIC_LOG_AGENT_HINT="$log_agent_hint" \
+    AGENSIC_LOG_MODEL_RAW="$log_model_raw" \
+    AGENSIC_LOG_WRAPPER_ID="$log_wrapper_id" \
+    AGENSIC_LOG_PROOF_LABEL="$log_proof_label" \
+    AGENSIC_LOG_PROOF_AGENT="$log_proof_agent" \
+    AGENSIC_LOG_PROOF_MODEL="$log_proof_model" \
+    AGENSIC_LOG_PROOF_TRACE="$log_proof_trace" \
+    AGENSIC_LOG_PROOF_TIMESTAMP="$log_proof_timestamp" \
+    AGENSIC_LOG_PROOF_SIGNATURE="$log_proof_signature" \
+    AGENSIC_LOG_PROOF_SIGNER_SCOPE="$log_proof_signer_scope" \
+    AGENSIC_LOG_PROOF_KEY_FINGERPRINT="$log_proof_key_fingerprint" \
+    AGENSIC_LOG_PROOF_HOST_FINGERPRINT="$log_proof_host_fingerprint" \
     python3 - <<'PY' 2>/dev/null
 import json
 import os
+
+MAX_COMMAND_DURATION_MS = 86400000
 
 def as_int(value, default=None):
     try:
@@ -1005,13 +1635,42 @@ def as_int(value, default=None):
     except (TypeError, ValueError):
         return default
 
+duration_ms = as_int(os.environ.get("AGENSIC_LOG_DURATION_MS", None), None)
+if duration_ms is not None:
+    duration_ms = min(MAX_COMMAND_DURATION_MS, max(0, duration_ms))
+
+manual_after_accept = str(
+    os.environ.get("AGENSIC_LOG_MANUAL_AFTER_ACCEPT", "0") or "0"
+).strip() in {"1", "true", "True"}
+
 payload = {
     "command": str(os.environ.get("AGENSIC_LOG_COMMAND", "") or ""),
     "exit_code": as_int(os.environ.get("AGENSIC_LOG_EXIT", None), None),
-    "duration_ms": as_int(os.environ.get("AGENSIC_LOG_DURATION_MS", None), None),
-    "source": "runtime",
+    "duration_ms": duration_ms,
+    "source": str(os.environ.get("AGENSIC_LOG_SOURCE", "runtime") or "runtime"),
     "working_directory": str(os.environ.get("AGENSIC_LOG_CWD", "") or ""),
-    "shell_pid": as_int(os.getpid(), None),
+    "shell_pid": as_int(os.environ.get("AGENSIC_LOG_SHELL_PID", None), None),
+    "provenance_last_action": str(os.environ.get("AGENSIC_LOG_LAST_ACTION", "") or ""),
+    "provenance_accept_origin": str(os.environ.get("AGENSIC_LOG_ACCEPT_ORIGIN", "") or ""),
+    "provenance_accept_mode": str(os.environ.get("AGENSIC_LOG_ACCEPT_MODE", "") or ""),
+    "provenance_suggestion_kind": str(os.environ.get("AGENSIC_LOG_SUGGESTION_KIND", "") or ""),
+    "provenance_manual_edit_after_accept": manual_after_accept,
+    "provenance_ai_agent": str(os.environ.get("AGENSIC_LOG_AI_AGENT", "") or ""),
+    "provenance_ai_provider": str(os.environ.get("AGENSIC_LOG_AI_PROVIDER", "") or ""),
+    "provenance_ai_model": str(os.environ.get("AGENSIC_LOG_AI_MODEL", "") or ""),
+    "provenance_agent_name": str(os.environ.get("AGENSIC_LOG_AGENT_NAME", "") or ""),
+    "provenance_agent_hint": str(os.environ.get("AGENSIC_LOG_AGENT_HINT", "") or ""),
+    "provenance_model_raw": str(os.environ.get("AGENSIC_LOG_MODEL_RAW", "") or ""),
+    "provenance_wrapper_id": str(os.environ.get("AGENSIC_LOG_WRAPPER_ID", "") or ""),
+    "proof_label": str(os.environ.get("AGENSIC_LOG_PROOF_LABEL", "") or ""),
+    "proof_agent": str(os.environ.get("AGENSIC_LOG_PROOF_AGENT", "") or ""),
+    "proof_model": str(os.environ.get("AGENSIC_LOG_PROOF_MODEL", "") or ""),
+    "proof_trace": str(os.environ.get("AGENSIC_LOG_PROOF_TRACE", "") or ""),
+    "proof_timestamp": as_int(os.environ.get("AGENSIC_LOG_PROOF_TIMESTAMP", None), None),
+    "proof_signature": str(os.environ.get("AGENSIC_LOG_PROOF_SIGNATURE", "") or ""),
+    "proof_signer_scope": str(os.environ.get("AGENSIC_LOG_PROOF_SIGNER_SCOPE", "") or ""),
+    "proof_key_fingerprint": str(os.environ.get("AGENSIC_LOG_PROOF_KEY_FINGERPRINT", "") or ""),
+    "proof_host_fingerprint": str(os.environ.get("AGENSIC_LOG_PROOF_HOST_FINGERPRINT", "") or ""),
 }
 print(json.dumps(payload, separators=(",", ":")))
 PY
@@ -1020,9 +1679,10 @@ PY
 _agensic_bash_log_command() {
     local command="$1"
     local exit_code="$2"
-    local duration_ms="${3:-}"
+    local source="${3:-runtime}"
+    local duration_ms="${4:-}"
     local json_data=""
-    json_data="$(_agensic_bash_build_log_command_json "$command" "$exit_code" "$duration_ms")"
+    json_data="$(_agensic_bash_build_log_command_json "$command" "$exit_code" "$source" "$duration_ms")"
     if [[ -z "$json_data" ]]; then
         return
     fi
@@ -1058,6 +1718,13 @@ _agensic_bash_preexec_trap() {
     if _agensic_bash_should_ignore_debug_command "$command"; then
         return 0
     fi
+    if _agensic_command_forces_human_provenance "$command"; then
+        _agensic_force_pending_human_typed_command
+    elif _agensic_pending_execution_has_provenance; then
+        _agensic_refresh_pending_proof_fields
+    else
+        _agensic_snapshot_pending_execution
+    fi
     AGENSIC_BASH_AT_PROMPT=0
     AGENSIC_LAST_EXECUTED_CMD="$command"
     AGENSIC_LAST_EXECUTED_STARTED_AT_MS="$(_agensic_bash_now_epoch_ms)"
@@ -1077,9 +1744,15 @@ _agensic_bash_precmd() {
                 duration_ms=0
             fi
         fi
-        _agensic_bash_log_command "$AGENSIC_LAST_EXECUTED_CMD" "$exit_code" "$duration_ms"
+        if ! _agensic_is_blocked_runtime_command "$AGENSIC_LAST_EXECUTED_CMD" \
+            && ! _agensic_matches_disabled_pattern "$AGENSIC_LAST_EXECUTED_CMD"; then
+            _agensic_bash_log_command "$AGENSIC_LAST_EXECUTED_CMD" "$exit_code" "runtime" "$duration_ms"
+        fi
     fi
+    _agensic_refresh_auto_session_wrappers_if_needed
     _agensic_bash_clear_suggestions
+    _agensic_clear_pending_execution
+    _agensic_reset_provenance_line_state
     AGENSIC_LAST_EXECUTED_CMD=""
     AGENSIC_LAST_EXECUTED_STARTED_AT_MS=0
     AGENSIC_BASH_AT_PROMPT=1
@@ -1357,6 +2030,7 @@ _agensic_initialize_bash_adapter() {
     if ! _agensic_bash_is_interactive; then
         return 0
     fi
+    _agensic_refresh_auto_session_wrappers_if_needed >/dev/null 2>&1 || true
     _agensic_bash_prepare_prompt >/dev/null 2>&1 || true
     if _agensic_register_readline_widgets >/dev/null 2>&1; then
         AGENSIC_BASH_ADAPTER_READY=1
@@ -1370,4 +2044,6 @@ _agensic_initialize_bash_adapter() {
     return 1
 }
 
+_agensic_reload_disabled_patterns_if_needed >/dev/null 2>&1 || true
+_agensic_refresh_auto_session_wrappers_if_needed >/dev/null 2>&1 || true
 _agensic_initialize_bash_adapter >/dev/null 2>&1 || true

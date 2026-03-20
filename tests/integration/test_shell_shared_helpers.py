@@ -1,4 +1,5 @@
 import subprocess
+import tempfile
 import textwrap
 import unittest
 from pathlib import Path
@@ -61,6 +62,23 @@ class SharedShellHelpersTests(unittest.TestCase):
         )
         self.assertEqual(result.returncode, 0, msg=result.stderr)
         self.assertEqual(result.stdout.strip(), "suggestion_accept|ai|codex|Planner A")
+
+    def test_get_file_mtime_supports_temp_file(self):
+        with tempfile.NamedTemporaryFile("w", encoding="utf-8", delete=False) as handle:
+            handle.write("hello\n")
+            path = handle.name
+        try:
+            result = self._run_bash(
+                f"""
+                value="$(_agensic_get_file_mtime "{path}")"
+                printf '%s\\n' "$value"
+                """
+            )
+        finally:
+            Path(path).unlink(missing_ok=True)
+
+        self.assertEqual(result.returncode, 0, msg=result.stderr)
+        self.assertRegex(result.stdout.strip(), r"^[0-9]+$")
 
 
 if __name__ == "__main__":

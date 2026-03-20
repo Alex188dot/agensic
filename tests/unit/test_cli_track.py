@@ -731,6 +731,16 @@ class CliTrackTests(unittest.TestCase):
             self.assertNotIn("ZDOTDIR", child_env)
             self.assertNotIn("BASH_ENV", child_env)
 
+    def test_ensure_track_supported_allows_linux_posix_with_openpty(self):
+        with patch.object(track_module.sys, "platform", "linux"), patch.object(track_module.os, "name", "posix"):
+            with patch.object(track_module.os, "openpty", create=True):
+                track_module.ensure_track_supported()
+
+    def test_ensure_track_supported_rejects_windows(self):
+        with patch.object(track_module.sys, "platform", "win32"):
+            with self.assertRaisesRegex(RuntimeError, "POSIX shells"):
+                track_module.ensure_track_supported()
+
     def test_escape_primitive_detector_matches_nohup_and_terminal_automation(self):
         self.assertTrue(
             track_module._looks_like_escape_primitive(
@@ -743,6 +753,18 @@ class CliTrackTests(unittest.TestCase):
             )
         )
         self.assertTrue(track_module._looks_like_escape_primitive({"comm": "launchctl", "args": "launchctl submit -l demo -- sleep 60"}))
+
+    def test_unmanaged_terminal_detector_matches_linux_terminal_launchers(self):
+        self.assertTrue(
+            track_module._looks_like_unmanaged_terminal_launch(
+                {"comm": "gnome-terminal", "args": "gnome-terminal -- bash -lc 'sleep 60'"}
+            )
+        )
+        self.assertTrue(
+            track_module._looks_like_unmanaged_terminal_launch(
+                {"comm": "kitty", "args": "kitty sh -lc 'sleep 60'"}
+            )
+        )
 
     def test_run_tracked_command_records_transcript_and_provenance(self):
         with self._temp_app_paths() as (_, temp_paths), self._mock_track_daemon(temp_paths):

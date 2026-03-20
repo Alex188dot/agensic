@@ -54,6 +54,15 @@ TRACK_UNMANAGED_WINDOW_TOKENS = (
     "iterm.app",
     "warp.app",
     "ghostty",
+    "gnome-terminal",
+    "konsole",
+    "alacritty",
+    "kitty",
+    "wezterm",
+    "xterm",
+    "tilix",
+    "xfce4-terminal",
+    "terminator",
 )
 TRACK_ESCAPE_PRIMITIVE_TOKENS = (
     "nohup ",
@@ -398,8 +407,12 @@ def _track_public_key_path() -> str:
 
 
 def ensure_track_supported() -> None:
-    if sys.platform != "darwin":
-        raise RuntimeError("agensic run is currently supported on macOS only.")
+    if sys.platform.startswith("win"):
+        raise RuntimeError("agensic run currently requires POSIX shells with PTY support.")
+    if os.name != "posix":
+        raise RuntimeError("agensic run currently requires a POSIX environment.")
+    if not hasattr(os, "openpty"):
+        raise RuntimeError("agensic run requires PTY support on this platform.")
 
 
 def _ensure_track_layout() -> None:
