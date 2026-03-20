@@ -137,6 +137,28 @@ class AgensicBashAdapterTests(unittest.TestCase):
             "\x1b[32m[Agensic]\x1b[0m (3/6, Ctrl+P/N) \x1b[38;5;245magensic provenance --tui\x1b[0m",
         )
 
+    def test_keyseq_from_bytes_encodes_del_for_readline_binding(self):
+        result = self._run_bash(
+            """
+            raw=$'\\177'
+            printf '%s\\n' "$(_agensic_bash_keyseq_from_bytes "$raw")"
+            """
+        )
+
+        self.assertEqual(result.returncode, 0, msg=result.stderr)
+        self.assertEqual(result.stdout.strip(), "\\x7f")
+
+    def test_keyseq_from_bytes_encodes_delete_escape_sequence(self):
+        result = self._run_bash(
+            """
+            raw=$'\\e[3~'
+            printf '%s\\n' "$(_agensic_bash_keyseq_from_bytes "$raw")"
+            """
+        )
+
+        self.assertEqual(result.returncode, 0, msg=result.stderr)
+        self.assertEqual(result.stdout.strip(), "\\x1b\\x5b\\x33\\x7e")
+
     def test_readline_manual_trigger_fetches_suggestions(self):
         with tempfile.TemporaryDirectory() as tmpdir:
             helper_path = Path(tmpdir) / "helper.py"
@@ -293,7 +315,7 @@ class AgensicBashAdapterTests(unittest.TestCase):
         self.assertEqual(result.returncode, 0, msg=result.stderr)
         self.assertEqual(result.stdout.strip(), "git st|6|atus|git status")
 
-    def test_readline_delete_backward_char_refetches_for_shorter_prefix(self):
+    def test_readline_delete_backward_char_clears_suggestions_without_refetch(self):
         with tempfile.TemporaryDirectory() as tmpdir:
             helper_path = Path(tmpdir) / "helper.py"
             helper_path.write_text(
@@ -323,14 +345,70 @@ class AgensicBashAdapterTests(unittest.TestCase):
                 AGENSIC_RUNTIME_PYTHON="python3"
                 READLINE_LINE="git stu"
                 READLINE_POINT=${#READLINE_LINE}
+                AGENSIC_LAST_BUFFER="git stu"
+                AGENSIC_SUGGESTIONS=("atus")
+                AGENSIC_DISPLAY_TEXTS=("atus")
+                AGENSIC_ACCEPT_MODES=("suffix_append")
+                AGENSIC_SUGGESTION_KINDS=("normal")
+                AGENSIC_SUGGESTION_INDEX=1
                 _agensic_readline_delete_backward_char
-                printf '%s\\n' "${READLINE_LINE}|${READLINE_POINT}|${AGENSIC_SUGGESTIONS[0]}|${AGENSIC_BASH_LAST_INFO_MESSAGE}"
+                printf '%s\\n' "${READLINE_LINE}|${READLINE_POINT}|${#AGENSIC_SUGGESTIONS[@]}|${AGENSIC_BASH_LAST_INFO_MESSAGE}"
                 """,
                 env={"TEST_HELPER": str(helper_path)},
             )
 
         self.assertEqual(result.returncode, 0, msg=result.stderr)
-        self.assertEqual(result.stdout.strip(), "git st|6|atus|git status")
+        self.assertEqual(result.stdout.strip(), "git st|6|0|")
+
+    def test_readline_escape_clears_visible_suggestion_without_mutating_buffer(self):
+        result = self._run_bash(
+            """
+            AGENSIC_BASH_READLINE_AVAILABLE=1
+            READLINE_LINE="git st"
+            READLINE_POINT=${#READLINE_LINE}
+            AGENSIC_LAST_BUFFER="git st"
+            AGENSIC_SUGGESTIONS=("atus")
+            AGENSIC_DISPLAY_TEXTS=("atus")
+            AGENSIC_ACCEPT_MODES=("suffix_append")
+            AGENSIC_SUGGESTION_KINDS=("normal")
+            AGENSIC_SUGGESTION_INDEX=1
+            _agensic_readline_escape
+            printf '%s\\n' "${READLINE_LINE}|${READLINE_POINT}|${#AGENSIC_SUGGESTIONS[@]}|${AGENSIC_BASH_LAST_INFO_MESSAGE}"
+            """
+        )
+
+        self.assertEqual(result.returncode, 0, msg=result.stderr)
+        self.assertEqual(result.stdout.strip(), "git st|6|0|")
+
+    def test_readline_delete_char_clears_visible_suggestion_at_end_of_line(self):
+        result = self._run_bash(
+            """
+            AGENSIC_BASH_READLINE_AVAILABLE=1
+            READLINE_LINE="git st"
+            READLINE_POINT=${#READLINE_LINE}
+            AGENSIC_LAST_BUFFER="git st"
+            AGENSIC_SUGGESTIONS=("atus")
+            AGENSIC_DISPLAY_TEXTS=("atus")
+            AGENSIC_ACCEPT_MODES=("suffix_append")
+            AGENSIC_SUGGESTION_KINDS=("normal")
+            AGENSIC_SUGGESTION_INDEX=1
+            _agensic_readline_delete_char
+            printf '%s\\n' "${READLINE_LINE}|${READLINE_POINT}|${#AGENSIC_SUGGESTIONS[@]}|${AGENSIC_BASH_LAST_INFO_MESSAGE}"
+            """
+        )
+
+        self.assertEqual(result.returncode, 0, msg=result.stderr)
+        self.assertEqual(result.stdout.strip(), "git st|6|0|")
+
+    def test_common_delete_bindings_include_vte_modifier_variant(self):
+        result = self._run_bash(
+            """
+            _agensic_register_readline_widgets >/dev/null 2>&1 || true
+            bind -X | grep -F '"\\e[3;2~": "_agensic_readline_delete_char"'
+            """
+        )
+
+        self.assertEqual(result.returncode, 0, msg=result.stderr)
 
     def test_readline_partial_accept_does_not_depend_on_ble(self):
         result = self._run_bash(

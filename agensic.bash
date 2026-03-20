@@ -388,6 +388,23 @@ _agensic_bash_clear_suggestions() {
     _agensic_bash_clear_info
 }
 
+_agensic_bash_has_visible_suggestion() {
+    if (( ${#AGENSIC_SUGGESTIONS[@]} == 0 || AGENSIC_SUGGESTION_INDEX <= 0 )); then
+        return 1
+    fi
+
+    local idx=$((AGENSIC_SUGGESTION_INDEX - 1))
+    local current="${AGENSIC_SUGGESTIONS[$idx]}"
+    local display_text="${AGENSIC_DISPLAY_TEXTS[$idx]}"
+    local mode="${AGENSIC_ACCEPT_MODES[$idx]:-suffix_append}"
+    local buffer=""
+    local visible_len=0
+
+    buffer="$(_agensic_bash_current_buffer)"
+    visible_len="$(_agensic_bash_candidate_visible_length "$current" "$mode" "$buffer" "$display_text")"
+    (( visible_len > 0 ))
+}
+
 _agensic_bash_candidate_visible_length() {
     local suggestion="$1"
     local mode="$2"
@@ -858,17 +875,8 @@ _agensic_bash_after_self_insert() {
 }
 
 _agensic_bash_after_delete() {
-    local buffer=""
     _agensic_bash_clear_suggestions
-    buffer="$(_agensic_bash_current_buffer)"
-    if [[ "$buffer" == '#'* ]]; then
-        return 0
-    fi
-    if [[ ${#buffer} -lt 2 ]] || _agensic_bash_should_preserve_native_tab "$buffer"; then
-        return 0
-    fi
-    AGENSIC_LAST_BUFFER="$buffer"
-    _agensic_bash_fetch_suggestions 1 "delete_auto" 1
+    return 0
 }
 
 _agensic_bash_resolve_intent_command() {
@@ -1155,6 +1163,7 @@ _agensic_readline_insert_space() {
 _agensic_readline_delete_backward_char() {
     local point="${READLINE_POINT:-0}"
     if (( point <= 0 )); then
+        _agensic_bash_clear_suggestions
         return 0
     fi
     local left="${READLINE_LINE:0:$((point - 1))}"
@@ -1164,12 +1173,130 @@ _agensic_readline_delete_backward_char() {
     _agensic_bash_after_delete
 }
 
+_agensic_readline_delete_char() {
+    local point="${READLINE_POINT:-0}"
+    local length=${#READLINE_LINE}
+    if (( point >= length )); then
+        _agensic_bash_clear_suggestions
+        return 0
+    fi
+    local left="${READLINE_LINE:0:$point}"
+    local right="${READLINE_LINE:$((point + 1))}"
+    READLINE_LINE="${left}${right}"
+    _agensic_bash_after_delete
+}
+
+_agensic_readline_escape() {
+    if _agensic_bash_has_visible_suggestion; then
+        _agensic_bash_clear_suggestions
+    fi
+    return 0
+}
+
 _agensic_register_readline_command() {
     local keyseq="$1"
     local command="$2"
 
     bind -m emacs-standard -x "\"${keyseq}\":${command}" >/dev/null 2>&1 || return 1
     bind -m vi-insert -x "\"${keyseq}\":${command}" >/dev/null 2>&1 || return 1
+}
+
+_agensic_register_readline_emacs_command() {
+    local keyseq="$1"
+    local command="$2"
+
+    bind -m emacs-standard -x "\"${keyseq}\":${command}" >/dev/null 2>&1 || return 1
+}
+
+_agensic_bash_keyseq_from_bytes() {
+    local raw="$1"
+    local hex=""
+    local keyseq=""
+    local chunk=""
+
+    if [[ -z "$raw" ]]; then
+        return 1
+    fi
+
+    while IFS= read -r chunk; do
+        for hex in $chunk; do
+            [[ -n "$hex" ]] || continue
+            keyseq+="\\x${hex}"
+        done
+    done < <(LC_ALL=C printf '%s' "$raw" | od -An -tx1 -v 2>/dev/null)
+
+    if [[ -z "$keyseq" ]]; then
+        return 1
+    fi
+    printf '%s\n' "$keyseq"
+}
+
+_agensic_register_readline_raw_command() {
+    local raw="$1"
+    local command="$2"
+    local keyseq=""
+
+    keyseq="$(_agensic_bash_keyseq_from_bytes "$raw")" || return 1
+    _agensic_register_readline_command "$keyseq" "$command"
+}
+
+_agensic_register_readline_raw_emacs_command() {
+    local raw="$1"
+    local command="$2"
+    local keyseq=""
+
+    keyseq="$(_agensic_bash_keyseq_from_bytes "$raw")" || return 1
+    _agensic_register_readline_emacs_command "$keyseq" "$command"
+}
+
+_agensic_register_readline_terminfo_command() {
+    local capability="$1"
+    local command="$2"
+    local raw=""
+
+    raw="$(tput "$capability" 2>/dev/null || true)"
+    [[ -n "$raw" ]] || return 1
+    _agensic_register_readline_raw_command "$raw" "$command"
+}
+
+_agensic_register_readline_terminfo_emacs_command() {
+    local capability="$1"
+    local command="$2"
+    local raw=""
+
+    raw="$(tput "$capability" 2>/dev/null || true)"
+    [[ -n "$raw" ]] || return 1
+    _agensic_register_readline_raw_emacs_command "$raw" "$command"
+}
+
+_agensic_register_readline_common_delete_bindings() {
+    local keyseq=""
+    local -a backward_delete_sequences=(
+        '\x7f'
+        '\177'
+        '\C-?'
+        '\C-h'
+    )
+    local -a forward_delete_sequences=(
+        '\e[3~'
+        '\e[3;2~'
+        '\e[3;3~'
+        '\e[3;4~'
+        '\e[3;5~'
+        '\e[3;6~'
+        '\e[3;7~'
+        '\e[3;8~'
+        '\e[3$~'
+        '\e[3^~'
+        '\e[3@~'
+    )
+
+    for keyseq in "${backward_delete_sequences[@]}"; do
+        _agensic_register_readline_command "$keyseq" "_agensic_readline_delete_backward_char" || true
+    done
+    for keyseq in "${forward_delete_sequences[@]}"; do
+        _agensic_register_readline_command "$keyseq" "_agensic_readline_delete_char" || true
+    done
 }
 
 _agensic_register_readline_self_insert_bindings() {
@@ -1199,8 +1326,11 @@ _agensic_register_readline_widgets() {
     _agensic_register_readline_command '\C-n' "_agensic_readline_cycle_next" || return 1
     _agensic_register_readline_command '\C-p' "_agensic_readline_cycle_prev" || return 1
     _agensic_register_readline_command '\ef' "_agensic_readline_partial_accept" || return 1
-    _agensic_register_readline_command '\C-?' "_agensic_readline_delete_backward_char" || true
-    _agensic_register_readline_command '\C-h' "_agensic_readline_delete_backward_char" || true
+    _agensic_register_readline_terminfo_command kbs "_agensic_readline_delete_backward_char" || true
+    _agensic_register_readline_terminfo_command kdch1 "_agensic_readline_delete_char" || true
+    _agensic_register_readline_terminfo_command kDC "_agensic_readline_delete_char" || true
+    _agensic_register_readline_common_delete_bindings
+    _agensic_register_readline_emacs_command '\e' "_agensic_readline_escape" || true
     _agensic_register_readline_command '\t' "_agensic_readline_accept" || return 1
 
     AGENSIC_BASH_READLINE_AVAILABLE=1
