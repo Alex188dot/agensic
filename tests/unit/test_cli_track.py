@@ -75,6 +75,9 @@ class CliTrackTests(unittest.TestCase):
     @contextmanager
     def _temp_app_paths(self):
         with tempfile.TemporaryDirectory() as temp_dir:
+            home_path = Path(temp_dir)
+            for filename in (".zshenv", ".zprofile", ".zshrc"):
+                (home_path / filename).write_text("", encoding="utf-8")
             env = {
                 "HOME": temp_dir,
                 "XDG_CONFIG_HOME": str(Path(temp_dir) / ".config"),
