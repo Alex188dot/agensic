@@ -27,7 +27,7 @@ use reqwest::Method;
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 use std::cmp::{max, min};
-use std::collections::{BTreeSet, HashMap};
+use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::fs::{self, File};
 use std::io::{self, Read, Write};
 use std::path::Path;
@@ -398,6 +398,7 @@ struct DetailState {
     replay_step: usize,
     replay_text: String,
     replay_visible: bool,
+    changes_scroll: u16,
     replay_scroll: u16,
     replay_scroll_x: u16,
     replay_follow_end: bool,
@@ -459,6 +460,7 @@ impl DetailState {
             replay_step: 0,
             replay_text: String::new(),
             replay_visible: false,
+            changes_scroll: 0,
             replay_scroll: 0,
             replay_scroll_x: 0,
             replay_follow_end: true,
@@ -807,6 +809,18 @@ impl DetailState {
         self.replay_fullscreen = !self.replay_fullscreen;
         self.focus = FocusPane::Replay;
         self.ensure_terminal_replay_cache();
+    }
+
+    fn scroll_changes_by(&mut self, delta: i32, area: Rect) {
+        let max_scroll = changes_max_scroll(self, area);
+        if delta < 0 {
+            self.changes_scroll = self
+                .changes_scroll
+                .saturating_sub(delta.unsigned_abs() as u16);
+        } else {
+            self.changes_scroll = self.changes_scroll.saturating_add(delta as u16);
+        }
+        self.changes_scroll = self.changes_scroll.min(max_scroll);
     }
 
     fn scroll_replay_horizontal(&mut self, delta: i32) {
@@ -1900,8 +1914,52 @@ fn handle_key(app: &mut App, key: KeyEvent) -> Result<bool, String> {
                     KeyCode::Right if detail.focus == FocusPane::Replay => {
                         detail.scroll_replay_horizontal(4)
                     }
-                    KeyCode::Up | KeyCode::Char('k') => detail.move_selection(-1),
-                    KeyCode::Down | KeyCode::Char('j') => detail.move_selection(1),
+                    KeyCode::Up | KeyCode::Char('k') => {
+                        if detail.focus == FocusPane::Changes {
+                            if let Some(changes_area) =
+                                session_detail_layout(detail).map(|layout| layout.changes)
+                            {
+                                detail.scroll_changes_by(-1, changes_area);
+                            }
+                        } else {
+                            detail.move_selection(-1);
+                        }
+                    }
+                    KeyCode::Down | KeyCode::Char('j') => {
+                        if detail.focus == FocusPane::Changes {
+                            if let Some(changes_area) =
+                                session_detail_layout(detail).map(|layout| layout.changes)
+                            {
+                                detail.scroll_changes_by(1, changes_area);
+                            }
+                        } else {
+                            detail.move_selection(1);
+                        }
+                    }
+                    KeyCode::PageUp if detail.focus == FocusPane::Changes => {
+                        if let Some(changes_area) =
+                            session_detail_layout(detail).map(|layout| layout.changes)
+                        {
+                            detail.scroll_changes_by(-10, changes_area);
+                        }
+                    }
+                    KeyCode::PageDown if detail.focus == FocusPane::Changes => {
+                        if let Some(changes_area) =
+                            session_detail_layout(detail).map(|layout| layout.changes)
+                        {
+                            detail.scroll_changes_by(10, changes_area);
+                        }
+                    }
+                    KeyCode::Home if detail.focus == FocusPane::Changes => {
+                        detail.changes_scroll = 0
+                    }
+                    KeyCode::End if detail.focus == FocusPane::Changes => {
+                        if let Some(changes_area) =
+                            session_detail_layout(detail).map(|layout| layout.changes)
+                        {
+                            detail.changes_scroll = changes_max_scroll(detail, changes_area);
+                        }
+                    }
                     KeyCode::BackTab if detail.focus == FocusPane::Timeline => {
                         detail.page_selection(-1)
                     }
@@ -2183,12 +2241,12 @@ fn draw_detail(frame: &mut ratatui::Frame<'_>, app: &App, detail: &DetailState) 
             layout.timeline,
             &mut timeline_state,
         );
-        frame.render_widget(build_changes(detail), layout.changes);
+        frame.render_widget(build_changes(detail, layout.changes), layout.changes);
     }
     frame.render_widget(build_replay(app, detail, layout.replay), layout.replay);
     let mut footer_lines = vec![
         Line::from(Span::styled(
-            "Space: Play/Pause   ↑↓: Move  ←/→: Horiz. Scroll  Tab/Shift+Tab: Jump 500  c: Copy  D: Delete  T: Time Travel  e: Export Conv(jsonl)  E: Export TL(csv)  f: Fullscreen  s: Switch pane  Enter: Details  Esc: Back",
+            detail_footer_hints(),
             Style::default().fg(Color::Yellow),
         )),
         Line::from(app.status_text().to_string()),
@@ -2460,7 +2518,7 @@ fn format_timeline_ordinal(value: usize) -> String {
     )
 }
 
-fn build_changes(detail: &DetailState) -> Paragraph<'static> {
+fn build_changes_lines(detail: &DetailState) -> Vec<Line<'static>> {
     let push_metric = detail
         .session
         .aggregate
@@ -2538,45 +2596,76 @@ fn build_changes(detail: &DetailState) -> Paragraph<'static> {
         .map(sanitize_multiline_text)
         .filter(|value| value != "-")
         .unwrap_or_default();
-    if files.is_empty() && committed_diff.is_empty() && worktree_diff.is_empty() {
+    let committed_stats = parse_diff_stat(&committed_diff);
+    let worktree_stats = parse_diff_stat(&worktree_diff);
+    let preferred_stats = if !committed_stats.files.is_empty() || committed_stats.summary.is_some()
+    {
+        committed_stats
+    } else {
+        worktree_stats
+    };
+
+    if files.is_empty() && preferred_stats.files.is_empty() && preferred_stats.summary.is_none() {
         lines.push(Line::from(""));
         lines.push(Line::from("No repo changes recorded."));
     } else {
-        if !files.is_empty() {
-            lines.push(Line::from(""));
-            lines.push(Line::from(Span::styled(
-                "Files changed",
-                Style::default()
-                    .fg(Color::Cyan)
-                    .add_modifier(Modifier::BOLD),
-            )));
-            for file in files {
+        lines.push(Line::from(""));
+        lines.push(Line::from(Span::styled(
+            "Files changed",
+            Style::default()
+                .fg(Color::Cyan)
+                .add_modifier(Modifier::BOLD),
+        )));
+        let mut rendered_files = BTreeSet::new();
+        for file in files {
+            rendered_files.insert(file.clone());
+            if let Some(stat) = preferred_stats.files.get(&file) {
+                lines.push(diff_stat_line(&format!("- {} | {}", file, stat)));
+            } else {
                 lines.push(Line::from(format!("- {}", file)));
             }
         }
-        if !committed_diff.is_empty() {
-            lines.push(Line::from(""));
-            lines.push(Line::from(Span::styled(
-                "Committed diff stat",
-                Style::default()
-                    .fg(Color::Cyan)
-                    .add_modifier(Modifier::BOLD),
-            )));
-            push_diff_stat_block(&mut lines, &committed_diff);
+        for (file, stat) in &preferred_stats.files {
+            if rendered_files.insert(file.clone()) {
+                lines.push(diff_stat_line(&format!("- {} | {}", file, stat)));
+            }
         }
-        if !worktree_diff.is_empty() {
+        if let Some(summary) = preferred_stats.summary.as_ref() {
             lines.push(Line::from(""));
-            lines.push(Line::from(Span::styled(
-                "Worktree diff stat",
-                Style::default()
-                    .fg(Color::Cyan)
-                    .add_modifier(Modifier::BOLD),
-            )));
-            push_diff_stat_block(&mut lines, &worktree_diff);
+            lines.push(diff_stat_line(summary));
         }
     }
-    Paragraph::new(lines)
+
+    lines
+}
+
+fn changes_plain_text(lines: &[Line<'_>]) -> String {
+    lines
+        .iter()
+        .map(ToString::to_string)
+        .collect::<Vec<_>>()
+        .join("\n")
+}
+
+fn changes_max_scroll(detail: &DetailState, area: Rect) -> u16 {
+    let lines = build_changes_lines(detail);
+    let content_lines = rendered_text_height(
+        &changes_plain_text(&lines),
+        area.width.saturating_sub(2).max(1) as usize,
+    );
+    let visible_lines = area.height.saturating_sub(2).max(1) as usize;
+    content_lines
+        .saturating_sub(visible_lines)
+        .min(u16::MAX as usize) as u16
+}
+
+fn build_changes(detail: &DetailState, area: Rect) -> Paragraph<'static> {
+    Paragraph::new(build_changes_lines(detail))
         .block(pane_block("Changes", detail.focus == FocusPane::Changes))
+        .scroll((
+            detail.changes_scroll.min(changes_max_scroll(detail, area)),
+            0,
+        ))
         .wrap(Wrap { trim: true })
 }
 
@@ -3291,6 +3380,16 @@ fn detail_footer_height(detail: &DetailState) -> u16 {
     }
 }
 
+#[cfg(target_os = "linux")]
+fn detail_footer_hints() -> &'static str {
+    "Space Play  ↑↓ Move/Scroll  ←→ Replay X  Tab Jump  c Copy  D Delete  T Time Travel  e/E Export  f Fullscreen  s Pane  Enter Details  Esc Back"
+}
+
+#[cfg(not(target_os = "linux"))]
+fn detail_footer_hints() -> &'static str {
+    "Space: Play/Pause   ↑↓: Move  ←/→: Horiz. Scroll  Tab/Shift+Tab: Jump 500  c: Copy  D: Delete  T: Time Travel  e: Export Conv(jsonl)  E: Export TL(csv)  f: Fullscreen  s: Switch pane  Enter: Details  Esc: Back"
+}
+
 fn changes_panel_constraints(detail: &DetailState) -> [Constraint; 2] {
     if detail_has_meaningful_changes(detail) {
         [Constraint::Percentage(40), Constraint::Percentage(60)]
@@ -3984,13 +4083,38 @@ fn push_text_block(lines: &mut Vec<Line<'static>>, text: &str) {
     }
 }
 
-fn push_diff_stat_block(lines: &mut Vec<Line<'static>>, text: &str) {
-    for line in text.lines() {
-        lines.push(diff_stat_line(line));
+#[derive(Clone, Debug, Default)]
+struct ParsedDiffStat {
+    files: BTreeMap<String, String>,
+    summary: Option<String>,
+}
+
+fn parse_diff_stat(text: &str) -> ParsedDiffStat {
+    let mut out = ParsedDiffStat::default();
+    for raw_line in text
+        .lines()
+        .map(str::trim_end)
+        .filter(|line| !line.is_empty())
+    {
+        if raw_line.contains('|') {
+            if let Some((path, stat)) = raw_line.split_once('|') {
+                let path = sanitize_inline_text(path.trim());
+                let stat = sanitize_inline_text(stat.trim());
+                if !path.is_empty() && !stat.is_empty() {
+                    out.files.insert(path, stat);
+                }
+            }
+            continue;
+        }
+        if raw_line.contains("file changed")
+            || raw_line.contains("files changed")
+            || raw_line.contains("insertion")
+            || raw_line.contains("deletion")
+        {
+            out.summary = Some(sanitize_inline_text(raw_line.trim()));
+        }
     }
-    if text.lines().next().is_none() {
-        lines.push(Line::from("-"));
-    }
+    out
 }
 
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -4550,6 +4674,12 @@ fn handle_mouse(app: &mut App, mouse: MouseEvent) {
                     MouseEventKind::ScrollDown => {
                         if app.event_modal_open {
                             app.event_modal_scroll = app.event_modal_scroll.saturating_add(1);
+                        } else if changes_mouse_hit(mouse, detail) {
+                            if let Some(changes_area) =
+                                session_detail_layout(detail).map(|layout| layout.changes)
+                            {
+                                detail.scroll_changes_by(1, changes_area);
+                            }
                         } else {
                             detail.move_selection(1);
                         }
@@ -4557,6 +4687,12 @@ fn handle_mouse(app: &mut App, mouse: MouseEvent) {
                     MouseEventKind::ScrollUp => {
                         if app.event_modal_open {
                             app.event_modal_scroll = app.event_modal_scroll.saturating_sub(1);
+                        } else if changes_mouse_hit(mouse, detail) {
+                            if let Some(changes_area) =
+                                session_detail_layout(detail).map(|layout| layout.changes)
+                            {
+                                detail.scroll_changes_by(-1, changes_area);
+                            }
                         } else {
                             detail.move_selection(-1);
                         }
@@ -4782,6 +4918,12 @@ fn replay_toggle_hit(mouse: MouseEvent, detail: &DetailState) -> Option<bool> {
     .then_some(true)
 }
 
+fn changes_mouse_hit(mouse: MouseEvent, detail: &DetailState) -> bool {
+    session_detail_layout(detail)
+        .map(|layout| rect_contains(layout.changes, mouse.column, mouse.row))
+        .unwrap_or(false)
+}
+
 fn replay_status_label(autoplay: bool) -> &'static str {
     if autoplay {
         "playing ▶"
@@ -4800,17 +4942,18 @@ fn rect_contains(rect: Rect, column: u16, row: u16) -> bool {
 #[cfg(test)]
 mod tests {
     use super::{
-        build_conversation_export_rows, build_display_model, build_terminal_replay_frames,
-        collect_terminal_lines, diff_stat_line, export_conversation_jsonl, export_timeline_rows,
-        format_duration, format_header_outcome, format_outcome, format_timeline_ordinal,
-        handle_key, load_transcript_chunks, rendered_text_height, replay_max_scroll,
-        repo_display_name, sanitize_inline_text, sanitize_terminal_output,
-        session_detail_layout_in_area, strip_inline_progress_noise, terminal_replay_end_padding,
-        terminal_replay_max_scroll_x, terminal_replay_scroll, timeline_category_color,
-        timeline_kind_style, vt100_color_to_ratatui, App, DeleteModalState, DetailState, FocusPane,
-        ReplayMode, SessionEvent, SessionFilters, SessionSummary, SessionsArgs, TerminalReplayFrame,
-        TimeTravelModalState, TimeTravelPreviewResponse, TimelineCategory, TimelineEntry,
-        TranscriptChunk, TEXT_REPLAY_TICK_MS,
+        build_changes_lines, build_conversation_export_rows, build_display_model,
+        build_terminal_replay_frames, changes_max_scroll, collect_terminal_lines, diff_stat_line,
+        export_conversation_jsonl, export_timeline_rows, format_duration, format_header_outcome,
+        format_outcome, format_timeline_ordinal, handle_key, load_transcript_chunks,
+        rendered_text_height, replay_max_scroll, repo_display_name, sanitize_inline_text,
+        sanitize_terminal_output, session_detail_layout_in_area, strip_inline_progress_noise,
+        terminal_replay_end_padding, terminal_replay_max_scroll_x, terminal_replay_scroll,
+        timeline_category_color, timeline_kind_style, vt100_color_to_ratatui, App,
+        DeleteModalState, DetailState, FocusPane, ReplayMode, SessionEvent, SessionFilters,
+        SessionSummary, SessionsArgs, TerminalReplayFrame, TimeTravelModalState,
+        TimeTravelPreviewResponse, TimelineCategory, TimelineEntry, TranscriptChunk,
+        TEXT_REPLAY_TICK_MS,
     };
     use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
     use flate2::write::GzEncoder;
@@ -5457,6 +5600,7 @@ mod tests {
             replay_step: 0,
             replay_text: String::new(),
             replay_visible: false,
+            changes_scroll: 0,
             replay_scroll: 0,
             replay_scroll_x: 0,
             replay_follow_end: false,
@@ -5496,6 +5640,56 @@ mod tests {
             fullscreen.replay.height + split.header.height + split.footer.height,
             40
         );
+    }
+
+    #[test]
+    fn changes_pane_merges_file_list_with_committed_diff_stat() {
+        let mut session = SessionSummary::default();
+        session.changes = json!({
+            "files_changed": ["agensic.bash", "rust/provenance_tui/src/main.rs", "tests/integration/test_agensic_bash_sessions.py"],
+            "committed_diff_stat": "agensic.bash | 11 +++++++++++\nrust/provenance_tui/src/main.rs | 23 +++++++++++++++++++++++---\ntests/integration/test_agensic_bash_sessions.py | 27 +++++++++++++++++++++++++++\n3 files changed, 58 insertions(+), 3 deletions(-)"
+        });
+        let detail = DetailState::new(session, Vec::new(), false);
+
+        let rendered = build_changes_lines(&detail)
+            .iter()
+            .map(ToString::to_string)
+            .collect::<Vec<_>>();
+
+        assert!(rendered.iter().any(|line| line == "Files changed"));
+        assert!(rendered
+            .iter()
+            .any(|line| line.contains("- agensic.bash | 11 +++++++++++")));
+        assert!(rendered
+            .iter()
+            .any(|line| { line.contains("3 files changed, 58 insertions(+), 3 deletions(-)") }));
+        assert!(!rendered.iter().any(|line| line == "Committed diff stat"));
+    }
+
+    #[test]
+    fn changes_pane_scrolls_without_affecting_timeline_selection() {
+        let mut session = SessionSummary::default();
+        session.changes = json!({
+            "files_changed": (0..30).map(|idx| format!("file-{idx}.rs")).collect::<Vec<_>>(),
+        });
+        let events = vec![SessionEvent {
+            session_id: "sess-1".to_string(),
+            seq: 1,
+            ts_wall: 0.0,
+            ts_monotonic_ms: 0,
+            event_type: "command.recorded".to_string(),
+            payload: json!({"command": "pwd"}),
+        }];
+        let mut detail = DetailState::new(session, events, false);
+        detail.focus = FocusPane::Changes;
+        let timeline_index_before = detail.timeline_index;
+        let changes_area = Rect::new(0, 0, 50, 10);
+
+        assert!(changes_max_scroll(&detail, changes_area) > 0);
+        detail.scroll_changes_by(3, changes_area);
+
+        assert_eq!(detail.timeline_index, timeline_index_before);
+        assert_eq!(detail.changes_scroll, 3);
     }
 
     #[test]
@@ -6219,6 +6413,7 @@ mod tests {
             replay_step: 0,
             replay_text: "/tmp".to_string(),
             replay_visible: true,
+            changes_scroll: 0,
             replay_scroll: 0,
             replay_scroll_x: 0,
             replay_follow_end: false,
