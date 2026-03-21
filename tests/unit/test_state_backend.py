@@ -177,6 +177,22 @@ class StateBackendTests(unittest.TestCase):
             self.assertEqual(len(runs), 1)
             self.assertEqual(runs[0]["duration_ms"], 86_400_000)
 
+    def test_command_run_strips_leading_agensic_hook_assignments(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            db_path = os.path.join(tmp, "state.sqlite")
+            store = SQLiteStateStore(db_path, journal=None)
+            store.record_command_provenance(
+                command="AGENSIC_BASH_RUNTIME_HOOKS_REGISTERED=1 AGENSIC_LOG_SHELL_PID=42 git status",
+                label="HUMAN_TYPED",
+                confidence=0.9,
+                ts=1700000000,
+                run_id="run-scrub",
+            )
+
+            runs = store.list_command_runs(limit=5)
+            self.assertEqual(len(runs), 1)
+            self.assertEqual(runs[0]["command"], "git status")
+
     def test_list_command_runs_keyset_pagination(self):
         with tempfile.TemporaryDirectory() as tmp:
             db_path = os.path.join(tmp, "state.sqlite")

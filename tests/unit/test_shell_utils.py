@@ -11,6 +11,7 @@ from agensic.utils.shell import (
     normalize_shell_name,
     normalize_command_pattern,
     sanitize_patterns,
+    strip_leading_agensic_env_assignments,
     tokenize_command,
     token_has_short_flag,
 )
@@ -37,6 +38,22 @@ class ShellUtilsTests(unittest.TestCase):
 
     def test_sanitize_patterns(self):
         self.assertEqual(sanitize_patterns(["git", "git", " docker "]), ["git", "docker"])
+
+    def test_strip_leading_agensic_env_assignments(self):
+        self.assertEqual(
+            strip_leading_agensic_env_assignments(
+                "AGENSIC_BASH_RUNTIME_HOOKS_REGISTERED=1 AGENSIC_LOG_SHELL_PID=123 git status"
+            ),
+            "git status",
+        )
+        self.assertEqual(
+            strip_leading_agensic_env_assignments("FOO=1 AGENSIC_BASH_RUNTIME_HOOKS_REGISTERED=1 git status"),
+            "FOO=1 AGENSIC_BASH_RUNTIME_HOOKS_REGISTERED=1 git status",
+        )
+        self.assertEqual(
+            strip_leading_agensic_env_assignments("AGENSIC_BASH_RUNTIME_HOOKS_REGISTERED=1"),
+            "",
+        )
 
     def test_command_matches_pattern(self):
         patterns = ["dock", "kubectl"]

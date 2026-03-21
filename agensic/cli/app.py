@@ -59,7 +59,7 @@ from agensic.utils import (
     ensure_private_dir,
     harden_private_tree,
 )
-from agensic.utils.shell import current_shell_name
+from agensic.utils.shell import current_shell_name, strip_leading_agensic_env_assignments
 
 try:
     import questionary
@@ -1119,7 +1119,7 @@ def _run_agents_tui(agents: list[dict[str, Any]]) -> bool:
 
 
 def _format_provenance_command_preview(command: object) -> str:
-    text = str(command or "")
+    text = strip_leading_agensic_env_assignments(str(command or ""))
     text = text.replace("\r", " ").replace("\n", " ").replace("\t", " ")
     return " ".join(part for part in text.split(" ") if part)
 

@@ -1487,12 +1487,73 @@ fn truncate_cell(value: &str, max: usize) -> String {
     out
 }
 
-fn display_command_text(value: &str) -> &str {
-    if value.trim().is_empty() {
+fn strip_leading_agensic_env_assignments(value: &str) -> String {
+    let trimmed = value.trim();
+    if trimmed.is_empty() {
+        return String::new();
+    }
+
+    let bytes = trimmed.as_bytes();
+    let mut index = 0usize;
+    let len = bytes.len();
+
+    loop {
+        while index < len && bytes[index].is_ascii_whitespace() {
+            index += 1;
+        }
+        if index >= len {
+            return String::new();
+        }
+
+        let start = index;
+        let mut in_single = false;
+        let mut in_double = false;
+        let mut token_end = len;
+        while index < len {
+            let byte = bytes[index];
+            if byte == b'\'' && !in_double {
+                in_single = !in_single;
+                index += 1;
+                continue;
+            }
+            if byte == b'"' && !in_single {
+                in_double = !in_double;
+                index += 1;
+                continue;
+            }
+            if !in_single && !in_double && byte.is_ascii_whitespace() {
+                token_end = index;
+                break;
+            }
+            index += 1;
+        }
+
+        let token = &trimmed[start..token_end];
+        let Some((name, _)) = token.split_once('=') else {
+            return trimmed[start..].trim().to_string();
+        };
+        if name.is_empty()
+            || !name.starts_with("AGENSIC_")
+            || !name.chars().all(|ch| ch.is_ascii_alphanumeric() || ch == '_')
+        {
+            return trimmed[start..].trim().to_string();
+        }
+
+        if token_end >= len {
+            return String::new();
+        }
+        index = token_end + 1;
+    }
+}
+
+fn display_command_text(value: &str) -> String {
+    let cleaned = strip_leading_agensic_env_assignments(value);
+    if cleaned.trim().is_empty() {
         "(empty command)"
     } else {
-        value
+        cleaned.as_str()
     }
+    .to_string()
 }
 
 fn centered_rect(percent_x: u16, percent_y: u16, r: Rect) -> Rect {
@@ -1617,8 +1678,8 @@ fn build_provenance_detail_content(
             sessions::copy_button_style(app.hovered_details_copy, app.details_copy_copied(), false),
         ),
     ]));
-    let wrapped_command_lines =
-        wrap_text_to_width(display_command_text(&row.command), content_width.max(1));
+    let command_display = display_command_text(&row.command);
+    let wrapped_command_lines = wrap_text_to_width(&command_display, content_width.max(1));
     let command_expandable = wrapped_command_lines.len() > DETAILS_COMMAND_PREVIEW_ROWS;
     let visible_command_lines = if app.details_command_expanded || !command_expandable {
         wrapped_command_lines.len()
@@ -1867,9 +1928,9 @@ fn draw_ui(terminal: &mut Terminal<CrosstermBackend<Stdout>>, app: &App) -> io::
                 };
                 let command_display = display_command_text(&row.command);
                 let command_text = if compact {
-                    truncate_cell(command_display, 40)
+                    truncate_cell(&command_display, 40)
                 } else {
-                    truncate_cell(command_display, 80)
+                    truncate_cell(&command_display, 80)
                 };
                 let copy_hovered = app.run_copy_hovered(global_idx);
                 let copy_copied = app.run_copy_copied(global_idx);
@@ -2963,6 +3024,20 @@ mod tests {
         assert_eq!(display_command_text(""), "(empty command)");
         assert_eq!(display_command_text("   "), "(empty command)");
         assert_eq!(display_command_text("git status"), "git status");
+    }
+
+    #[test]
+    fn display_command_text_strips_leading_agensic_hook_assignments() {
+        assert_eq!(
+            display_command_text(
+                "AGENSIC_BASH_RUNTIME_HOOKS_REGISTERED=1 AGENSIC_LOG_SHELL_PID=42 git status"
+            ),
+            "git status"
+        );
+        assert_eq!(
+            display_command_text("AGENSIC_BASH_RUNTIME_HOOKS_REGISTERED=1"),
+            "(empty command)"
+        );
     }
 
     fn temp_export_path(ext: &str) -> std::path::PathBuf {

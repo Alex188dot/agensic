@@ -9,6 +9,7 @@ from typing import Dict, Iterable, List, Optional, Tuple
 from .journal import EventJournal
 from .snapshot import SnapshotManager
 from agensic.utils import enforce_private_file, ensure_private_dir
+from agensic.utils.shell import strip_leading_agensic_env_assignments
 
 MAX_COMMAND_DURATION_MS = 86_400_000
 OUTPUT_CAPTURE_PAYLOAD_KEYS = {
@@ -299,7 +300,7 @@ class SQLiteStateStore:
 
     @staticmethod
     def _clean_command(value: str) -> str:
-        return str(value or "").strip()
+        return strip_leading_agensic_env_assignments(value)
 
     @staticmethod
     def _json_dumps(value: object, fallback: str) -> str:

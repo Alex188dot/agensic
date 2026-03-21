@@ -24,6 +24,7 @@ from agensic.utils.shell import (
     history_clears_state,
     is_blocked_command as shell_is_blocked_command,
     is_git_destructive_subcommand,
+    strip_leading_agensic_env_assignments,
     token_has_short_flag,
 )
 
@@ -297,7 +298,7 @@ class CommandVectorDB:
 
     @staticmethod
     def normalize_command(command: str) -> str:
-        return (command or "").strip()
+        return strip_leading_agensic_env_assignments(command)
 
     @staticmethod
     def _prefix_exec_key(command: str) -> str:

@@ -41,6 +41,44 @@ GIT_GLOBAL_OPTIONS_WITH_VALUE = {
 }
 
 
+def _is_env_assignment_token(token: str) -> bool:
+    value = str(token or "").strip()
+    if not value or value.startswith("=") or "=" not in value:
+        return False
+    name, _, _ = value.partition("=")
+    if not name:
+        return False
+    return all(char.isalnum() or char == "_" for char in name)
+
+
+def strip_leading_agensic_env_assignments(command: str) -> str:
+    raw = str(command or "").strip()
+    if not raw:
+        return ""
+    try:
+        tokens = shlex.split(raw, posix=True)
+    except Exception:
+        tokens = raw.split()
+    if not tokens:
+        return ""
+
+    index = 0
+    length = len(tokens)
+    while index < length:
+        token = str(tokens[index] or "").strip()
+        if not _is_env_assignment_token(token):
+            break
+        name, _, _ = token.partition("=")
+        if not name.startswith("AGENSIC_"):
+            break
+        index += 1
+    if index <= 0:
+        return raw
+    if index >= length:
+        return ""
+    return shlex.join(tokens[index:])
+
+
 def _default_shell_name() -> str:
     if sys.platform.startswith("linux"):
         return "bash"
