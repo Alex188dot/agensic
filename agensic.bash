@@ -110,6 +110,7 @@ AGENSIC_BASH_IN_PROMPT_HOOK=0
 AGENSIC_BASH_ORIGINAL_PS1="${PS1-}"
 AGENSIC_BASH_ORIGINAL_PROMPT_COMMAND="${PROMPT_COMMAND:-}"
 AGENSIC_BASH_RUNTIME_HOOKS_REGISTERED=0
+AGENSIC_BASH_TAB_BINDING_MODE="agensic"
 
 if [[ -f "$AGENSIC_SHARED_HELPERS_PATH" ]]; then
     # shellcheck disable=SC1090
@@ -1178,7 +1179,7 @@ _agensic_bash_fetch_suggestions() {
         _agensic_bash_clear_suggestions
         return
     fi
-    if [[ "$trigger_source" != manual_* ]] && _agensic_bash_should_preserve_native_tab "$buffer"; then
+    if _agensic_bash_should_preserve_native_tab "$buffer"; then
         _agensic_bash_clear_suggestions
         return
     fi
@@ -1449,6 +1450,7 @@ _agensic_bash_handle_enter() {
 _agensic_bash_after_self_insert() {
     local buffer=""
     buffer="$(_agensic_bash_current_buffer)"
+    _agensic_bash_sync_tab_binding_for_buffer "$buffer"
     _agensic_mark_manual_line_edit "human_typed"
     if [[ "$buffer" == '#'* ]]; then
         _agensic_bash_clear_suggestions
@@ -1481,6 +1483,7 @@ _agensic_bash_after_delete() {
     local buffer=""
     _agensic_bash_clear_suggestions
     buffer="$(_agensic_bash_current_buffer)"
+    _agensic_bash_sync_tab_binding_for_buffer "$buffer"
     _agensic_mark_manual_line_edit "human_edit"
     if [[ "$buffer" == '#'* ]]; then
         return 0
@@ -1826,6 +1829,7 @@ _agensic_readline_self_insert_char() {
 
 _agensic_readline_manual_trigger() {
     local buffer="${READLINE_LINE:-}"
+    _agensic_bash_sync_tab_binding_for_buffer "$buffer"
     if [[ ${#buffer} -lt 2 ]]; then
         _agensic_bash_clear_suggestions
         return 0
@@ -1836,6 +1840,10 @@ _agensic_readline_manual_trigger() {
 
 _agensic_readline_accept() {
     local buffer="${READLINE_LINE:-}"
+    _agensic_bash_sync_tab_binding_for_buffer "$buffer"
+    if _agensic_bash_should_preserve_native_tab "$buffer"; then
+        return 0
+    fi
     if (( ${#AGENSIC_SUGGESTIONS[@]} == 0 )); then
         if [[ ${#buffer} -ge 2 ]]; then
             AGENSIC_LAST_BUFFER="$buffer"
@@ -1875,6 +1883,7 @@ _agensic_readline_partial_accept() {
 
 _agensic_readline_insert_space() {
     _agensic_readline_insert_text " "
+    _agensic_bash_sync_tab_binding_for_buffer "${READLINE_LINE:-}"
     if [[ ${#READLINE_LINE} -lt 2 ]]; then
         _agensic_bash_clear_suggestions
         return 0
@@ -1922,6 +1931,35 @@ _agensic_register_readline_command() {
 
     bind -m emacs-standard -x "\"${keyseq}\":${command}" >/dev/null 2>&1 || return 1
     bind -m vi-insert -x "\"${keyseq}\":${command}" >/dev/null 2>&1 || return 1
+}
+
+_agensic_bash_bind_tab_to_accept() {
+    if [[ "${AGENSIC_BASH_TAB_BINDING_MODE:-}" == "agensic" ]]; then
+        return 0
+    fi
+    bind -m emacs-standard -x '"\t":_agensic_readline_accept' >/dev/null 2>&1 || return 1
+    bind -m vi-insert -x '"\t":_agensic_readline_accept' >/dev/null 2>&1 || return 1
+    AGENSIC_BASH_TAB_BINDING_MODE="agensic"
+    return 0
+}
+
+_agensic_bash_bind_tab_to_complete() {
+    if [[ "${AGENSIC_BASH_TAB_BINDING_MODE:-}" == "complete" ]]; then
+        return 0
+    fi
+    bind -m emacs-standard '"\t": complete' >/dev/null 2>&1 || return 1
+    bind -m vi-insert '"\t": complete' >/dev/null 2>&1 || return 1
+    AGENSIC_BASH_TAB_BINDING_MODE="complete"
+    return 0
+}
+
+_agensic_bash_sync_tab_binding_for_buffer() {
+    local buffer="${1:-}"
+    if _agensic_bash_should_preserve_native_tab "$buffer"; then
+        _agensic_bash_bind_tab_to_complete
+        return 0
+    fi
+    _agensic_bash_bind_tab_to_accept
 }
 
 _agensic_register_readline_emacs_command() {
@@ -2054,7 +2092,7 @@ _agensic_register_readline_widgets() {
     _agensic_register_readline_terminfo_command kDC "_agensic_readline_delete_char" || true
     _agensic_register_readline_common_delete_bindings
     _agensic_register_readline_emacs_command '\e' "_agensic_readline_escape" || true
-    _agensic_register_readline_command '\t' "_agensic_readline_accept" || return 1
+    _agensic_bash_bind_tab_to_accept || return 1
 
     AGENSIC_BASH_READLINE_AVAILABLE=1
     AGENSIC_BASH_BACKEND="readline"

@@ -159,6 +159,33 @@ class AgensicBashAdapterTests(unittest.TestCase):
         self.assertEqual(result.returncode, 0, msg=result.stderr)
         self.assertEqual(result.stdout.strip(), "\\x1b\\x5b\\x33\\x7e")
 
+    def test_script_context_switches_tab_binding_back_to_native_complete(self):
+        result = self._run_bash(
+            """
+            _agensic_register_readline_widgets >/dev/null 2>&1 || true
+            _agensic_bash_sync_tab_binding_for_buffer "python script.py"
+            printf '%s\\n' "${AGENSIC_BASH_TAB_BINDING_MODE}"
+            bind -q complete
+            """,
+        )
+
+        self.assertEqual(result.returncode, 0, msg=result.stderr)
+        self.assertEqual(result.stdout.splitlines()[0].strip(), "complete")
+
+    def test_non_script_context_restores_agensic_tab_binding(self):
+        result = self._run_bash(
+            """
+            _agensic_register_readline_widgets >/dev/null 2>&1 || true
+            _agensic_bash_sync_tab_binding_for_buffer "python script.py"
+            _agensic_bash_sync_tab_binding_for_buffer "git st"
+            printf '%s\\n' "${AGENSIC_BASH_TAB_BINDING_MODE}"
+            bind -X | grep -F '"\\C-i": "_agensic_readline_accept"'
+            """,
+        )
+
+        self.assertEqual(result.returncode, 0, msg=result.stderr)
+        self.assertEqual(result.stdout.splitlines()[0].strip(), "agensic")
+
     def test_readline_manual_trigger_fetches_suggestions(self):
         with tempfile.TemporaryDirectory() as tmpdir:
             helper_path = Path(tmpdir) / "helper.py"
@@ -198,6 +225,41 @@ class AgensicBashAdapterTests(unittest.TestCase):
         self.assertEqual(result.returncode, 0, msg=result.stderr)
         self.assertEqual(result.stdout.strip(), "atus|git status")
 
+    def test_readline_manual_trigger_does_not_fetch_suggestions_for_python_script_context(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            helper_path = Path(tmpdir) / "helper.py"
+            helper_path.write_text(
+                "\n".join(
+                    [
+                        "from pathlib import Path",
+                        "Path(r'$MARKER').write_text('fetched', encoding='utf-8')",
+                        "print('{\"ok\": true, \"pool\": [\" main.py\"], \"display\": [\" main.py\"], \"modes\": [\"suffix_append\"], \"kinds\": [\"normal\"], \"used_ai\": false, \"ai_agent\": \"\", \"ai_provider\": \"\", \"ai_model\": \"\"}')",
+                        "",
+                    ]
+                ).replace("$MARKER", str(Path(tmpdir) / "marker.txt")),
+                encoding="utf-8",
+            )
+            result = self._run_bash(
+                """
+                AGENSIC_BASH_READLINE_AVAILABLE=1
+                AGENSIC_CLIENT_HELPER="$TEST_HELPER"
+                AGENSIC_RUNTIME_PYTHON="python3"
+                READLINE_LINE="python script.py"
+                READLINE_POINT=${#READLINE_LINE}
+                _agensic_readline_manual_trigger
+                if [[ -f "$TEST_MARKER" ]]; then
+                    marker=1
+                else
+                    marker=0
+                fi
+                printf '%s\\n' "${#AGENSIC_SUGGESTIONS[@]}|${AGENSIC_BASH_LAST_INFO_MESSAGE}|${marker}"
+                """,
+                env={"TEST_HELPER": str(helper_path), "TEST_MARKER": str(Path(tmpdir) / "marker.txt")},
+            )
+
+        self.assertEqual(result.returncode, 0, msg=result.stderr)
+        self.assertEqual(result.stdout.strip(), "0||0")
+
     def test_readline_accept_fetches_and_accepts_suggestion(self):
         with tempfile.TemporaryDirectory() as tmpdir:
             helper_path = Path(tmpdir) / "helper.py"
@@ -236,6 +298,41 @@ class AgensicBashAdapterTests(unittest.TestCase):
 
         self.assertEqual(result.returncode, 0, msg=result.stderr)
         self.assertEqual(result.stdout.strip(), "git status|10|")
+
+    def test_readline_accept_does_not_fetch_suggestions_for_shell_script_context(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            helper_path = Path(tmpdir) / "helper.py"
+            helper_path.write_text(
+                "\n".join(
+                    [
+                        "from pathlib import Path",
+                        "Path(r'$MARKER').write_text('fetched', encoding='utf-8')",
+                        "print('{\"ok\": true, \"pool\": [\" ./install.sh\"], \"display\": [\" ./install.sh\"], \"modes\": [\"suffix_append\"], \"kinds\": [\"normal\"], \"used_ai\": false, \"ai_agent\": \"\", \"ai_provider\": \"\", \"ai_model\": \"\"}')",
+                        "",
+                    ]
+                ).replace("$MARKER", str(Path(tmpdir) / "marker.txt")),
+                encoding="utf-8",
+            )
+            result = self._run_bash(
+                """
+                AGENSIC_BASH_READLINE_AVAILABLE=1
+                AGENSIC_CLIENT_HELPER="$TEST_HELPER"
+                AGENSIC_RUNTIME_PYTHON="python3"
+                READLINE_LINE="bash install.sh"
+                READLINE_POINT=${#READLINE_LINE}
+                _agensic_readline_accept
+                if [[ -f "$TEST_MARKER" ]]; then
+                    marker=1
+                else
+                    marker=0
+                fi
+                printf '%s\\n' "${READLINE_LINE}|${#AGENSIC_SUGGESTIONS[@]}|${marker}"
+                """,
+                env={"TEST_HELPER": str(helper_path), "TEST_MARKER": str(Path(tmpdir) / "marker.txt")},
+            )
+
+        self.assertEqual(result.returncode, 0, msg=result.stderr)
+        self.assertEqual(result.stdout.strip(), "bash install.sh|0|0")
 
     def test_readline_cycle_next_fetches_when_pool_is_empty(self):
         with tempfile.TemporaryDirectory() as tmpdir:
