@@ -193,6 +193,9 @@ _agensic_bash_should_ignore_debug_command() {
             return 0
             ;;
     esac
+    if [[ "$command" == *"_agensic_bash_precmd"* ]]; then
+        return 0
+    fi
     return 1
 }
 
@@ -1802,7 +1805,8 @@ _agensic_bash_precmd() {
                 duration_ms=0
             fi
         fi
-        if ! _agensic_is_blocked_runtime_command "$AGENSIC_LAST_EXECUTED_CMD" \
+        if ! _agensic_bash_should_ignore_debug_command "$AGENSIC_LAST_EXECUTED_CMD" \
+            && ! _agensic_is_blocked_runtime_command "$AGENSIC_LAST_EXECUTED_CMD" \
             && ! _agensic_matches_disabled_pattern "$AGENSIC_LAST_EXECUTED_CMD"; then
             _agensic_bash_log_command "$AGENSIC_LAST_EXECUTED_CMD" "$exit_code" "runtime" "$duration_ms"
         fi

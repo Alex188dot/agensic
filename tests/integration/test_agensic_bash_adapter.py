@@ -684,6 +684,36 @@ class AgensicBashAdapterTests(unittest.TestCase):
         self.assertEqual(result.returncode, 0, msg=result.stderr)
         self.assertEqual(result.stdout.strip(), "agensic start")
 
+    def test_ignore_debug_command_matches_prompt_command_assignment_for_internal_precmd(self):
+        result = self._run_bash(
+            """
+            if _agensic_bash_should_ignore_debug_command 'PROMPT_COMMAND="_agensic_bash_precmd"'; then
+                printf 'ignored\\n'
+            else
+                printf 'logged\\n'
+            fi
+            """
+        )
+
+        self.assertEqual(result.returncode, 0, msg=result.stderr)
+        self.assertEqual(result.stdout.strip(), "ignored")
+
+    def test_precmd_does_not_log_internal_precmd_command(self):
+        result = self._run_bash(
+            """
+            _agensic_bash_log_command() {
+                printf 'logged:%s\\n' "$1"
+            }
+            AGENSIC_LAST_EXECUTED_CMD='PROMPT_COMMAND="_agensic_bash_precmd"'
+            AGENSIC_LAST_EXECUTED_STARTED_AT_MS=0
+            _agensic_bash_precmd
+            printf 'last:%s\\n' "${AGENSIC_LAST_EXECUTED_CMD}"
+            """
+        )
+
+        self.assertEqual(result.returncode, 0, msg=result.stderr)
+        self.assertEqual(result.stdout.strip(), "last:")
+
     def test_preexec_clears_visible_suggestions_before_command_runs(self):
         result = self._run_bash(
             """
