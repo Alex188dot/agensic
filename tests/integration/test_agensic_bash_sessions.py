@@ -211,6 +211,33 @@ EOF
         self.assertEqual(result.returncode, 0, msg=result.stderr)
         self.assertIn("human_edit|AI_EXECUTED|trace-preexec-proof|", result.stdout)
 
+    def test_handle_enter_defaults_plain_manual_command_to_human_typed(self):
+        result = self._run_bash(
+            """
+            READLINE_LINE="git status"
+            READLINE_POINT=${#READLINE_LINE}
+            _agensic_bash_handle_enter
+            printf '%s\\n' "${AGENSIC_PENDING_LAST_ACTION:-}|${AGENSIC_PENDING_ACCEPTED_ORIGIN:-}|${AGENSIC_PENDING_PROOF_LABEL:-}"
+            """
+        )
+        self.assertEqual(result.returncode, 0, msg=result.stderr)
+        self.assertEqual(result.stdout.strip(), "human_typed||")
+
+    def test_handle_enter_keeps_ai_acceptance_provenance(self):
+        result = self._run_bash(
+            """
+            READLINE_LINE="git status"
+            READLINE_POINT=${#READLINE_LINE}
+            AGENSIC_LINE_LAST_ACTION="suggestion_accept"
+            AGENSIC_LINE_ACCEPTED_ORIGIN="ai"
+            AGENSIC_LINE_ACCEPTED_MODE="replace_full"
+            _agensic_bash_handle_enter
+            printf '%s\\n' "${AGENSIC_PENDING_LAST_ACTION:-}|${AGENSIC_PENDING_ACCEPTED_ORIGIN:-}"
+            """
+        )
+        self.assertEqual(result.returncode, 0, msg=result.stderr)
+        self.assertEqual(result.stdout.strip(), "suggestion_accept|ai")
+
 
 if __name__ == "__main__":
     unittest.main()

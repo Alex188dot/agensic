@@ -1435,6 +1435,14 @@ fn truncate_cell(value: &str, max: usize) -> String {
     out
 }
 
+fn display_command_text(value: &str) -> &str {
+    if value.trim().is_empty() {
+        "(empty command)"
+    } else {
+        value
+    }
+}
+
 fn centered_rect(percent_x: u16, percent_y: u16, r: Rect) -> Rect {
     let popup_layout = Layout::default()
         .direction(Direction::Vertical)
@@ -1557,7 +1565,8 @@ fn build_provenance_detail_content(
             sessions::copy_button_style(app.hovered_details_copy, app.details_copy_copied(), false),
         ),
     ]));
-    let wrapped_command_lines = wrap_text_to_width(&row.command, content_width.max(1));
+    let wrapped_command_lines =
+        wrap_text_to_width(display_command_text(&row.command), content_width.max(1));
     let command_expandable = wrapped_command_lines.len() > DETAILS_COMMAND_PREVIEW_ROWS;
     let visible_command_lines = if app.details_command_expanded || !command_expandable {
         wrapped_command_lines.len()
@@ -1804,10 +1813,11 @@ fn draw_ui(terminal: &mut Terminal<CrosstermBackend<Stdout>>, app: &App) -> io::
                     Some(date) => date.format("%m/%d/%y %H:%M:%S").to_string(),
                     None => row.ts.to_string(),
                 };
+                let command_display = display_command_text(&row.command);
                 let command_text = if compact {
-                    truncate_cell(&row.command, 40)
+                    truncate_cell(command_display, 40)
                 } else {
-                    truncate_cell(&row.command, 80)
+                    truncate_cell(command_display, 80)
                 };
                 let copy_hovered = app.run_copy_hovered(global_idx);
                 let copy_copied = app.run_copy_copied(global_idx);
@@ -2894,6 +2904,13 @@ mod tests {
                 "example": "value"
             }),
         }
+    }
+
+    #[test]
+    fn display_command_text_uses_placeholder_for_blank_commands() {
+        assert_eq!(display_command_text(""), "(empty command)");
+        assert_eq!(display_command_text("   "), "(empty command)");
+        assert_eq!(display_command_text("git status"), "git status");
     }
 
     fn temp_export_path(ext: &str) -> std::path::PathBuf {

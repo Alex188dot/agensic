@@ -593,6 +593,15 @@ _agensic_force_pending_human_typed_command() {
     _agensic_clear_next_proof_fields
 }
 
+_agensic_bash_default_pending_human_typed() {
+    if [[ -n "${AGENSIC_PENDING_LAST_ACTION:-}" || -n "${AGENSIC_PENDING_ACCEPTED_ORIGIN:-}" || -n "${AGENSIC_PENDING_PROOF_LABEL:-}" ]]; then
+        return 0
+    fi
+    AGENSIC_PENDING_LAST_ACTION="human_typed"
+    AGENSIC_PENDING_MANUAL_EDIT_AFTER_ACCEPT=0
+    return 0
+}
+
 _agensic_bash_get_auth_mtime() {
     if [[ ! -f "$AGENSIC_AUTH_PATH" ]]; then
         printf '%s\n' ""
@@ -1430,6 +1439,7 @@ _agensic_bash_handle_enter() {
     fi
     if [[ -n "${buffer//[[:space:]]/}" ]]; then
         _agensic_snapshot_pending_execution
+        _agensic_bash_default_pending_human_typed
     else
         _agensic_clear_pending_execution
     fi
@@ -1763,6 +1773,7 @@ _agensic_bash_preexec_trap() {
         _agensic_refresh_pending_proof_fields
     else
         _agensic_snapshot_pending_execution
+        _agensic_bash_default_pending_human_typed
     fi
     AGENSIC_BASH_AT_PROMPT=0
     AGENSIC_LAST_EXECUTED_CMD="$command"
