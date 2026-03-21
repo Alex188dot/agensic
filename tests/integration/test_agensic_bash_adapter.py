@@ -186,6 +186,18 @@ class AgensicBashAdapterTests(unittest.TestCase):
         self.assertEqual(result.returncode, 0, msg=result.stderr)
         self.assertEqual(result.stdout.splitlines()[0].strip(), "agensic")
 
+    def test_register_readline_widgets_binds_tab_on_initialization(self):
+        result = self._run_bash(
+            """
+            _agensic_register_readline_widgets >/dev/null 2>&1 || true
+            printf '%s\\n' "${AGENSIC_BASH_TAB_BINDING_MODE}"
+            bind -X | grep -F '"\\C-i": "_agensic_readline_accept"'
+            """,
+        )
+
+        self.assertEqual(result.returncode, 0, msg=result.stderr)
+        self.assertEqual(result.stdout.splitlines()[0].strip(), "agensic")
+
     def test_readline_manual_trigger_fetches_suggestions(self):
         with tempfile.TemporaryDirectory() as tmpdir:
             helper_path = Path(tmpdir) / "helper.py"

@@ -92,7 +92,7 @@ pub(crate) fn copy_to_clipboard(text: &str) -> Result<(), String> {
         .status()
         .is_ok()
     {
-        ("wl-copy", Vec::<&str>::new())
+        Some(("wl-copy", Vec::<&str>::new()))
     } else if Command::new("xclip")
         .arg("-version")
         .stdout(Stdio::null())
@@ -100,34 +100,86 @@ pub(crate) fn copy_to_clipboard(text: &str) -> Result<(), String> {
         .status()
         .is_ok()
     {
-        ("xclip", vec!["-selection", "clipboard"])
+        Some(("xclip", vec!["-selection", "clipboard"]))
+    } else if Command::new("xsel")
+        .arg("--version")
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .status()
+        .is_ok()
+    {
+        Some(("xsel", vec!["--clipboard", "--input"]))
     } else {
-        return Err("No clipboard utility found".to_string());
+        None
     };
     #[cfg(target_os = "windows")]
     let program = ("clip", Vec::<&str>::new());
 
-    let mut child = Command::new(program.0)
-        .args(program.1)
-        .stdin(Stdio::piped())
-        .stdout(Stdio::null())
-        .stderr(Stdio::null())
-        .spawn()
-        .map_err(|err| format!("Clipboard copy failed: {}", err))?;
-    let Some(mut stdin) = child.stdin.take() else {
-        return Err("Clipboard pipe unavailable".to_string());
-    };
-    stdin
-        .write_all(text.as_bytes())
-        .map_err(|err| format!("Clipboard write failed: {}", err))?;
-    drop(stdin);
-    let status = child
-        .wait()
-        .map_err(|err| format!("Clipboard copy failed: {}", err))?;
-    if status.success() {
-        Ok(())
-    } else {
-        Err("Clipboard copy command failed".to_string())
+    #[cfg(target_os = "linux")]
+    if let Some(program) = program {
+        let mut child = Command::new(program.0)
+            .args(program.1)
+            .stdin(Stdio::piped())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .spawn()
+            .map_err(|err| format!("Clipboard copy failed: {}", err))?;
+        let Some(mut stdin) = child.stdin.take() else {
+            return Err("Clipboard pipe unavailable".to_string());
+        };
+        stdin
+            .write_all(text.as_bytes())
+            .map_err(|err| format!("Clipboard write failed: {}", err))?;
+        drop(stdin);
+        let status = child
+            .wait()
+            .map_err(|err| format!("Clipboard copy failed: {}", err))?;
+        if status.success() {
+            return Ok(());
+        }
+    }
+    #[cfg(target_os = "linux")]
+    {
+        use base64::Engine;
+        let encoded = base64::engine::general_purpose::STANDARD.encode(text.as_bytes());
+        let osc52 = format!("\x1b]52;c;{}\x07", encoded);
+        let mut tty = std::fs::OpenOptions::new()
+            .write(true)
+            .open("/dev/tty")
+            .map_err(|_| {
+                "No clipboard utility found and terminal clipboard fallback unavailable".to_string()
+            })?;
+        tty.write_all(osc52.as_bytes())
+            .map_err(|err| format!("Clipboard write failed: {}", err))?;
+        tty.flush()
+            .map_err(|err| format!("Clipboard write failed: {}", err))?;
+        return Ok(());
+    }
+
+    #[cfg(not(target_os = "linux"))]
+    {
+        let mut child = Command::new(program.0)
+            .args(program.1)
+            .stdin(Stdio::piped())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .spawn()
+            .map_err(|err| format!("Clipboard copy failed: {}", err))?;
+        let Some(mut stdin) = child.stdin.take() else {
+            return Err("Clipboard pipe unavailable".to_string());
+        };
+        stdin
+            .write_all(text.as_bytes())
+            .map_err(|err| format!("Clipboard write failed: {}", err))?;
+        drop(stdin);
+        let status = child
+            .wait()
+            .map_err(|err| format!("Clipboard copy failed: {}", err))?;
+        if status.success() {
+            Ok(())
+        } else {
+            Err("Clipboard copy command failed".to_string())
+        }
     }
 }
 
