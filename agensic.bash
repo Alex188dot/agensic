@@ -25,6 +25,7 @@ AGENSIC_BASH_READLINE_AVAILABLE=0
 AGENSIC_BASH_BACKEND="none"
 AGENSIC_BASH_WIDGETS_REGISTERED=0
 AGENSIC_BASH_LAST_INFO_MESSAGE=""
+AGENSIC_BASH_LAST_INFO_HINT=""
 AGENSIC_BASH_PROMPT_PREPARED=0
 AGENSIC_STATUS_PREFIX="__AGENSIC_STATUS__:"
 AGENSIC_BASH_LABEL_TEXT="[Agensic]"
@@ -781,10 +782,11 @@ _agensic_bash_print_readline_message() {
     fi
     message="${message//$'\r'/ }"
     message="${message//$'\n'/ }"
-    if [[ "$message" == "${AGENSIC_BASH_LAST_INFO_MESSAGE:-}" ]]; then
+    if [[ "$message" == "${AGENSIC_BASH_LAST_INFO_MESSAGE:-}" && "$hint" == "${AGENSIC_BASH_LAST_INFO_HINT:-}" ]]; then
         return 0
     fi
     AGENSIC_BASH_LAST_INFO_MESSAGE="$message"
+    AGENSIC_BASH_LAST_INFO_HINT="$hint"
     if ! _agensic_bash_overlay_supported; then
         return 0
     fi
@@ -1462,6 +1464,9 @@ _agensic_bash_after_self_insert() {
     fi
     if (( ${#AGENSIC_SUGGESTIONS[@]} > 0 )); then
         _agensic_bash_filter_pool
+        if _agensic_bash_has_visible_suggestion; then
+            return 0
+        fi
     fi
     if _agensic_bash_should_preserve_native_tab "$buffer"; then
         _agensic_bash_clear_suggestions
