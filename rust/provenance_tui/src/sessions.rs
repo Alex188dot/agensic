@@ -2610,6 +2610,10 @@ fn build_changes_lines(detail: &DetailState) -> Vec<Line<'static>> {
         lines.push(Line::from("No repo changes recorded."));
     } else {
         lines.push(Line::from(""));
+        if let Some(summary) = preferred_stats.summary.as_ref() {
+            lines.push(diff_stat_line(summary));
+            lines.push(Line::from(""));
+        }
         lines.push(Line::from(Span::styled(
             "Files changed",
             Style::default()
@@ -2629,10 +2633,6 @@ fn build_changes_lines(detail: &DetailState) -> Vec<Line<'static>> {
             if rendered_files.insert(file.clone()) {
                 lines.push(diff_stat_line(&format!("- {} | {}", file, stat)));
             }
-        }
-        if let Some(summary) = preferred_stats.summary.as_ref() {
-            lines.push(Line::from(""));
-            lines.push(diff_stat_line(summary));
         }
     }
 
@@ -5656,13 +5656,19 @@ mod tests {
             .map(ToString::to_string)
             .collect::<Vec<_>>();
 
-        assert!(rendered.iter().any(|line| line == "Files changed"));
+        let summary_idx = rendered
+            .iter()
+            .position(|line| line.contains("3 files changed, 58 insertions(+), 3 deletions(-)"))
+            .expect("summary should be rendered");
+        let files_changed_idx = rendered
+            .iter()
+            .position(|line| line == "Files changed")
+            .expect("Files changed heading should be rendered");
+
+        assert!(summary_idx < files_changed_idx);
         assert!(rendered
             .iter()
             .any(|line| line.contains("- agensic.bash | 11 +++++++++++")));
-        assert!(rendered
-            .iter()
-            .any(|line| { line.contains("3 files changed, 58 insertions(+), 3 deletions(-)") }));
         assert!(!rendered.iter().any(|line| line == "Committed diff stat"));
     }
 
