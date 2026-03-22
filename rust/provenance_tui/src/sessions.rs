@@ -2712,7 +2712,7 @@ fn build_changes_lines(detail: &DetailState) -> Vec<Line<'static>> {
             let marker = checkpoint_markers
                 .get(&file)
                 .cloned()
-                .unwrap_or_else(|| "-".to_string());
+                .unwrap_or_else(|| "•".to_string());
             if let Some(stat) = checkpoint_preferred_stats.files.get(&file) {
                 lines.push(diff_stat_line(&format!("{marker} {} | {}", file, stat)));
             } else {
@@ -2724,7 +2724,7 @@ fn build_changes_lines(detail: &DetailState) -> Vec<Line<'static>> {
                 let marker = checkpoint_markers
                     .get(file)
                     .cloned()
-                    .unwrap_or_else(|| "-".to_string());
+                    .unwrap_or_else(|| "•".to_string());
                 lines.push(diff_stat_line(&format!("{marker} {} | {}", file, stat)));
             }
         }
@@ -5860,7 +5860,7 @@ mod tests {
         assert!(summary_idx < files_changed_idx);
         assert!(rendered
             .iter()
-            .any(|line| line.contains("- agensic.bash | 11 +++++++++++")));
+            .any(|line| line.contains("• agensic.bash | 11 +++++++++++")));
         assert!(!rendered.iter().any(|line| line == "Committed diff stat"));
     }
 

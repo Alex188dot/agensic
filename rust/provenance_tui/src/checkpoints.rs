@@ -364,6 +364,21 @@ fn git_capture_lines(repo_root: &str, args: &[&str]) -> Vec<String> {
         .unwrap_or_default()
 }
 
+fn marker_for_git_status(status: &str) -> &'static str {
+    let first = status
+        .chars()
+        .find(|ch| !ch.is_whitespace())
+        .unwrap_or_default();
+    match first {
+        '?' | 'A' | 'C' => "+",
+        'D' => "-",
+        'R' => ">",
+        'M' => "~",
+        'U' => "!",
+        _ => "•",
+    }
+}
+
 fn marker_for_name_status(status: &str) -> &'static str {
     match status.chars().next().unwrap_or_default() {
         'A' | 'C' => "+",
@@ -394,6 +409,96 @@ fn parse_name_status_lines(lines: &[String]) -> (Vec<String>, BTreeMap<String, S
         markers.insert(clean_path, marker_for_name_status(status).to_string());
     }
     (files, markers)
+}
+
+fn parse_status_porcelain(text: &str) -> (Vec<String>, BTreeMap<String, String>) {
+    let mut files = Vec::new();
+    let mut markers = BTreeMap::new();
+    for raw_line in text
+        .lines()
+        .map(str::trim_end)
+        .filter(|line| !line.is_empty())
+    {
+        if raw_line.len() < 3 {
+            continue;
+        }
+        let status = raw_line.get(..2).unwrap_or_default();
+        let path_part = raw_line.get(3..).unwrap_or_default().trim();
+        if path_part.is_empty() {
+            continue;
+        }
+        let path = path_part
+            .split_once(" -> ")
+            .map(|(_, value)| value.trim())
+            .unwrap_or(path_part)
+            .trim();
+        if path.is_empty() {
+            continue;
+        }
+        let clean_path = path.to_string();
+        if !files.iter().any(|item| item == &clean_path) {
+            files.push(clean_path.clone());
+        }
+        markers.insert(clean_path, marker_for_git_status(status).to_string());
+    }
+    (files, markers)
+}
+
+fn parse_diff_stat_files(diff_stat: &str) -> (Vec<String>, BTreeMap<String, String>) {
+    let mut files = Vec::new();
+    let mut stats = BTreeMap::new();
+    for raw_line in diff_stat
+        .lines()
+        .map(str::trim_end)
+        .filter(|line| !line.is_empty())
+    {
+        if let Some((path, stat)) = raw_line.split_once('|') {
+            let clean_path = path.trim();
+            let clean_stat = stat.trim();
+            if clean_path.is_empty() || clean_stat.is_empty() {
+                continue;
+            }
+            let clean_path = clean_path.to_string();
+            if !files.iter().any(|item| item == &clean_path) {
+                files.push(clean_path.clone());
+            }
+            stats.insert(clean_path, clean_stat.to_string());
+        }
+    }
+    (files, stats)
+}
+
+fn merge_cumulative_file(
+    files: &mut Vec<String>,
+    markers: &mut BTreeMap<String, String>,
+    stats: &mut BTreeMap<String, String>,
+    path: &str,
+    marker: Option<&str>,
+    stat: Option<&str>,
+) {
+    let clean_path = path.trim();
+    if clean_path.is_empty() {
+        return;
+    }
+    if !files.iter().any(|item| item == clean_path) {
+        files.push(clean_path.to_string());
+    }
+    if let Some(value) = marker.map(str::trim).filter(|value| !value.is_empty()) {
+        markers.insert(clean_path.to_string(), value.to_string());
+    }
+    if let Some(value) = stat.map(str::trim).filter(|value| !value.is_empty()) {
+        stats.insert(clean_path.to_string(), value.to_string());
+    }
+}
+
+fn build_cumulative_diff_stat(files: &[String], stats: &BTreeMap<String, String>) -> String {
+    let mut lines = Vec::new();
+    for file in files {
+        if let Some(stat) = stats.get(file) {
+            lines.push(format!("{file} | {stat}"));
+        }
+    }
+    lines.join("\n")
 }
 
 pub fn load_git_checkpoint_records(path: &str) -> Vec<GitCheckpointRecord> {
@@ -458,29 +563,122 @@ pub fn load_git_checkpoint_records(path: &str) -> Vec<GitCheckpointRecord> {
 pub fn enrich_git_checkpoint_records(
     records: &mut [GitCheckpointRecord],
     repo_root: &str,
-    head_start: &str,
+    _head_start: &str,
 ) {
     let clean_repo_root = repo_root.trim();
-    let clean_head_start = head_start.trim();
-    if clean_repo_root.is_empty() || clean_head_start.is_empty() {
-        return;
-    }
+    let mut cumulative_files = Vec::new();
+    let mut cumulative_markers = BTreeMap::new();
+    let mut cumulative_stats = BTreeMap::new();
     for record in records {
         record.cumulative_diff_stat.clear();
         record.cumulative_files.clear();
         record.cumulative_file_markers.clear();
-        let clean_head = record.head.trim();
-        if clean_head.is_empty() || clean_head == clean_head_start {
-            continue;
+        let mut committed_files = record.committed_files.clone();
+        let mut committed_markers = BTreeMap::new();
+        let (_, committed_stats) = parse_diff_stat_files(&record.committed_diff_stat);
+        if !clean_repo_root.is_empty()
+            && !record.comparison_base_head.trim().is_empty()
+            && !record.head.trim().is_empty()
+            && record.comparison_base_head != record.head
+        {
+            let range = format!("{}..{}", record.comparison_base_head, record.head);
+            let name_status =
+                git_capture_lines(clean_repo_root, &["diff", "--name-status", &range]);
+            let (files, markers) = parse_name_status_lines(&name_status);
+            if !files.is_empty() {
+                committed_files = files;
+            }
+            committed_markers = markers;
         }
-        let range = format!("{clean_head_start}..{clean_head}");
-        if let Some(diff_stat) = git_capture(clean_repo_root, &["diff", "--stat", &range]) {
-            record.cumulative_diff_stat = diff_stat;
+        if committed_files.is_empty() {
+            committed_files = git_changed_files_from_diff_stat(&record.committed_diff_stat);
         }
-        let name_status = git_capture_lines(clean_repo_root, &["diff", "--name-status", &range]);
-        let (files, markers) = parse_name_status_lines(&name_status);
-        record.cumulative_files = files;
-        record.cumulative_file_markers = markers;
+        for file in &committed_files {
+            merge_cumulative_file(
+                &mut cumulative_files,
+                &mut cumulative_markers,
+                &mut cumulative_stats,
+                file,
+                committed_markers
+                    .get(file)
+                    .map(String::as_str)
+                    .or(Some("•")),
+                committed_stats.get(file).map(String::as_str),
+            );
+        }
+
+        let (status_files, status_markers) = parse_status_porcelain(&record.status_porcelain);
+        let (worktree_stat_files, worktree_stats) =
+            parse_diff_stat_files(&record.worktree_diff_stat);
+        for file in &status_files {
+            let fallback_marker = if record.untracked_paths.iter().any(|item| item == file) {
+                Some("+")
+            } else {
+                Some("•")
+            };
+            merge_cumulative_file(
+                &mut cumulative_files,
+                &mut cumulative_markers,
+                &mut cumulative_stats,
+                file,
+                status_markers
+                    .get(file)
+                    .map(String::as_str)
+                    .or(fallback_marker),
+                worktree_stats.get(file).map(String::as_str),
+            );
+        }
+        for file in &worktree_stat_files {
+            let fallback_marker = if record.untracked_paths.iter().any(|item| item == file) {
+                Some("+")
+            } else {
+                Some("•")
+            };
+            merge_cumulative_file(
+                &mut cumulative_files,
+                &mut cumulative_markers,
+                &mut cumulative_stats,
+                file,
+                status_markers
+                    .get(file)
+                    .map(String::as_str)
+                    .or(fallback_marker),
+                worktree_stats.get(file).map(String::as_str),
+            );
+        }
+        for file in &record.changed_files {
+            let fallback_marker = if record.untracked_paths.iter().any(|item| item == file) {
+                Some("+")
+            } else {
+                Some("•")
+            };
+            merge_cumulative_file(
+                &mut cumulative_files,
+                &mut cumulative_markers,
+                &mut cumulative_stats,
+                file,
+                status_markers
+                    .get(file)
+                    .map(String::as_str)
+                    .or(fallback_marker),
+                worktree_stats.get(file).map(String::as_str),
+            );
+        }
+        for file in &record.untracked_paths {
+            merge_cumulative_file(
+                &mut cumulative_files,
+                &mut cumulative_markers,
+                &mut cumulative_stats,
+                file,
+                status_markers.get(file).map(String::as_str).or(Some("+")),
+                worktree_stats.get(file).map(String::as_str),
+            );
+        }
+
+        record.cumulative_files = cumulative_files.clone();
+        record.cumulative_file_markers = cumulative_markers.clone();
+        record.cumulative_diff_stat =
+            build_cumulative_diff_stat(&cumulative_files, &cumulative_stats);
     }
 }
 
@@ -517,12 +715,13 @@ pub fn run_from_env(argv: &[String]) -> Result<(), String> {
 #[cfg(test)]
 mod tests {
     use super::{
-        checkpoint_path_for_transcript, decode_checkpoint_state, load_checkpoint_records,
-        CheckpointInputEvent, CheckpointRecorder,
+        checkpoint_path_for_transcript, decode_checkpoint_state, enrich_git_checkpoint_records,
+        load_checkpoint_records, CheckpointInputEvent, CheckpointRecorder, GitCheckpointRecord,
     };
     use base64::Engine;
     use flate2::write::GzEncoder;
     use flate2::Compression;
+    use std::collections::BTreeMap;
     use std::fs;
     use std::io::Write;
     use std::path::PathBuf;
@@ -629,5 +828,94 @@ mod tests {
         assert_eq!(records.len(), 1);
         assert_eq!(records[0].seq, 9);
         let _ = fs::remove_file(path);
+    }
+
+    #[test]
+    fn git_checkpoint_enrichment_accumulates_worktree_files_across_checkpoints() {
+        let suffix = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .map(|duration| duration.as_nanos())
+            .unwrap_or(0);
+        let repo_root = std::env::temp_dir().join(format!("git-checkpoint-accumulate-{suffix}"));
+        fs::create_dir_all(&repo_root).expect("create temp repo root");
+
+        let mut records = vec![
+            GitCheckpointRecord {
+                checkpoint_id: "chkpt-0003".to_string(),
+                seq: 3,
+                timestamp: 100,
+                reason: "first".to_string(),
+                repo_root: repo_root.to_string_lossy().into_owned(),
+                branch: "main".to_string(),
+                head: "base".to_string(),
+                comparison_base_head: "base".to_string(),
+                status_porcelain: " M agensic/cli/track.py\n".to_string(),
+                status_fingerprint: String::new(),
+                tracked_patch_sha256: String::new(),
+                committed_diff_stat: String::new(),
+                committed_files: Vec::new(),
+                worktree_diff_stat: "agensic/cli/track.py | 23 ++++++\n".to_string(),
+                changed_files: vec!["agensic/cli/track.py".to_string()],
+                untracked_paths: Vec::new(),
+                fingerprint: String::new(),
+                cumulative_diff_stat: String::new(),
+                cumulative_files: Vec::new(),
+                cumulative_file_markers: BTreeMap::new(),
+            },
+            GitCheckpointRecord {
+                checkpoint_id: "chkpt-0004".to_string(),
+                seq: 4,
+                timestamp: 101,
+                reason: "second".to_string(),
+                repo_root: repo_root.to_string_lossy().into_owned(),
+                branch: "main".to_string(),
+                head: "base".to_string(),
+                comparison_base_head: "base".to_string(),
+                status_porcelain: "?? modifications.md\n".to_string(),
+                status_fingerprint: String::new(),
+                tracked_patch_sha256: String::new(),
+                committed_diff_stat: String::new(),
+                committed_files: Vec::new(),
+                worktree_diff_stat: "modifications.md | 1 +\n".to_string(),
+                changed_files: vec!["modifications.md".to_string()],
+                untracked_paths: vec!["modifications.md".to_string()],
+                fingerprint: String::new(),
+                cumulative_diff_stat: String::new(),
+                cumulative_files: Vec::new(),
+                cumulative_file_markers: BTreeMap::new(),
+            },
+        ];
+
+        enrich_git_checkpoint_records(&mut records, repo_root.to_str().unwrap_or_default(), "base");
+
+        assert_eq!(
+            records[1].cumulative_files,
+            vec![
+                "agensic/cli/track.py".to_string(),
+                "modifications.md".to_string()
+            ]
+        );
+        assert_eq!(
+            records[1]
+                .cumulative_file_markers
+                .get("agensic/cli/track.py")
+                .map(String::as_str),
+            Some("~")
+        );
+        assert_eq!(
+            records[1]
+                .cumulative_file_markers
+                .get("modifications.md")
+                .map(String::as_str),
+            Some("+")
+        );
+        assert!(records[1]
+            .cumulative_diff_stat
+            .contains("agensic/cli/track.py | 23 ++++++"));
+        assert!(records[1]
+            .cumulative_diff_stat
+            .contains("modifications.md | 1 +"));
+
+        let _ = fs::remove_dir_all(repo_root);
     }
 }
