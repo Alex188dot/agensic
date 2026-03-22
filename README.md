@@ -38,7 +38,8 @@ Instead of flattening all terminal activity into a single ambiguous "shell histo
    - [Supported Providers](#-supported-providers)
 6. [Safety & Privacy](#-safety--privacy)
 7. [Project Creator](#-project-creator)
-8. [License](#-license)
+8. [Support](#-support)
+9. [License](#-license)
 
 ---
 
@@ -48,11 +49,9 @@ Agensic is designed to integrate deeply with your shell environment.
 
 - macOS (Zsh) — fully supported ✅
 
-- Linux (Bash/Zsh) — coming soon 🕐
+- Linux (Bash/Zsh) — fully supported ✅
 
-- Windows (PowerShell) — planned 🚧
-
-We are actively working on expanding cross-platform support while maintaining the same level of reliability and low-level integration.
+- Windows (PowerShell) — coming soon 🕐 (estimated end of April 2026)
 
 ---
 
@@ -233,6 +232,10 @@ Agensic operates on the principle of least privilege and maximum privacy:
 ## <a id="-project-creator"></a>👤 Project Creator
 
 Alessio Leodori
+
+## <a id="-support"></a>🤝 Support
+
+Find Agensic useful? Star ⭐️ the repo and tell a friend! This will help us grow 🌱
 
 ## 📄 <a id="-license"></a>License
 

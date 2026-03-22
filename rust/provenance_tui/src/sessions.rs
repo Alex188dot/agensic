@@ -1,6 +1,6 @@
 use crate::checkpoints::{
-    checkpoint_path_for_transcript, decode_checkpoint_state, load_checkpoint_records,
-    CheckpointRecord,
+    checkpoint_path_for_transcript, decode_checkpoint_state, git_checkpoint_path_for_transcript,
+    load_checkpoint_records, load_git_checkpoint_records, CheckpointRecord, GitCheckpointRecord,
 };
 use base64::engine::general_purpose::STANDARD as BASE64_STANDARD;
 use base64::Engine;
@@ -386,6 +386,7 @@ struct DetailState {
     text_replay_cached_step: Option<usize>,
     text_replay_cached_value: String,
     replay_timeline_indices: Vec<usize>,
+    git_checkpoint_records: Vec<GitCheckpointRecord>,
     transcript_chunks: Vec<TranscriptChunk>,
     checkpoint_records: Vec<CheckpointRecord>,
     terminal_replay_frames: Arc<Vec<TerminalReplayFrame>>,
@@ -408,6 +409,14 @@ struct DetailState {
 
 impl DetailState {
     fn new(session: SessionSummary, events: Vec<SessionEvent>, autoplay: bool) -> Self {
+        let git_checkpoint_records = load_git_checkpoint_records(
+            &git_checkpoint_path_for_transcript(&session.transcript_path),
+        );
+        let events = augment_events_with_git_checkpoints(
+            events,
+            &git_checkpoint_records,
+            &session.session_id,
+        );
         let (timeline_entries, text_replay_chunks, replay_timeline_indices) =
             build_display_model(&events);
         let transcript_chunks = load_transcript_chunks(&session.transcript_path);
@@ -448,6 +457,7 @@ impl DetailState {
             text_replay_cached_step: None,
             text_replay_cached_value: String::new(),
             replay_timeline_indices,
+            git_checkpoint_records,
             transcript_chunks,
             checkpoint_records,
             terminal_replay_frames: Arc::new(Vec::new()),
@@ -795,6 +805,17 @@ impl DetailState {
     fn selected_event(&self) -> Option<&SessionEvent> {
         self.selected_timeline_entry()
             .and_then(|entry| self.events.get(entry.event_index))
+    }
+
+    fn selected_git_checkpoint(&self) -> Option<&GitCheckpointRecord> {
+        let target_seq = self
+            .selected_timeline_entry()
+            .map(|entry| entry.seq_end.max(entry.seq_start))
+            .unwrap_or_default();
+        self.git_checkpoint_records
+            .iter()
+            .rposition(|record| record.seq <= target_seq)
+            .and_then(|idx| self.git_checkpoint_records.get(idx))
     }
 
     fn cycle_focus(&mut self) {
@@ -2461,6 +2482,7 @@ fn timeline_kind_style(event_type: &str) -> Style {
         "terminal.resize" => Color::Rgb(120, 170, 255),
         "git.snapshot.start" => Color::Rgb(232, 110, 255),
         "git.snapshot.end" => Color::Rgb(198, 124, 255),
+        "git.snapshot.chkpt" => Color::Rgb(216, 146, 255),
         "git.commit.created" => Color::Rgb(255, 126, 216),
         "git.commit.sess_sync" => Color::Rgb(232, 96, 186),
         "git.push.attempted" => Color::Rgb(224, 90, 188),
@@ -2565,7 +2587,7 @@ fn build_changes_lines(detail: &DetailState) -> Vec<Line<'static>> {
         },
     )));
 
-    let files: Vec<String> = detail
+    let session_files: Vec<String> = detail
         .session
         .changes
         .get("files_changed")
@@ -2598,38 +2620,70 @@ fn build_changes_lines(detail: &DetailState) -> Vec<Line<'static>> {
         .unwrap_or_default();
     let committed_stats = parse_diff_stat(&committed_diff);
     let worktree_stats = parse_diff_stat(&worktree_diff);
-    let preferred_stats = if !committed_stats.files.is_empty() || committed_stats.summary.is_some()
-    {
-        committed_stats
-    } else {
-        worktree_stats
-    };
+    let session_preferred_stats =
+        if !committed_stats.files.is_empty() || committed_stats.summary.is_some() {
+            committed_stats
+        } else {
+            worktree_stats
+        };
+    let selected_checkpoint = detail.selected_git_checkpoint();
+    let checkpoint_label = selected_checkpoint
+        .map(|record| sanitize_inline_text(&record.checkpoint_id))
+        .filter(|value| !value.is_empty())
+        .unwrap_or_else(|| "-".to_string());
+    let checkpoint_files: Vec<String> = selected_checkpoint
+        .map(|record| {
+            record
+                .changed_files
+                .iter()
+                .map(|item| sanitize_inline_text(item))
+                .filter(|item| !item.is_empty())
+                .collect()
+        })
+        .unwrap_or_else(|| session_files.clone());
+    let checkpoint_stats = selected_checkpoint
+        .map(|record| parse_diff_stat(&sanitize_multiline_text(&record.worktree_diff_stat)))
+        .unwrap_or_else(|| session_preferred_stats.clone());
 
-    if files.is_empty() && preferred_stats.files.is_empty() && preferred_stats.summary.is_none() {
-        lines.push(Line::from(""));
-        lines.push(Line::from("No repo changes recorded."));
+    lines.push(Line::from(""));
+    lines.push(Line::from(Span::styled(
+        "Recap in this session",
+        Style::default()
+            .fg(Color::Cyan)
+            .add_modifier(Modifier::BOLD),
+    )));
+    if let Some(summary) = session_preferred_stats.summary.as_ref() {
+        lines.push(diff_stat_line(summary));
+    } else if session_files.is_empty() && session_preferred_stats.files.is_empty() {
+        lines.push(Line::from("No repo changes recorded in this session."));
     } else {
-        lines.push(Line::from(""));
-        if let Some(summary) = preferred_stats.summary.as_ref() {
-            lines.push(diff_stat_line(summary));
-            lines.push(Line::from(""));
-        }
-        lines.push(Line::from(Span::styled(
-            "Files changed",
-            Style::default()
-                .fg(Color::Cyan)
-                .add_modifier(Modifier::BOLD),
+        lines.push(Line::from(format!(
+            "{} file(s) changed in this session.",
+            session_files.len().max(session_preferred_stats.files.len())
         )));
+    }
+    lines.push(Line::from(""));
+    lines.push(Line::from(Span::styled(
+        format!("Files changed at selected checkpoint ({checkpoint_label})"),
+        Style::default()
+            .fg(Color::Cyan)
+            .add_modifier(Modifier::BOLD),
+    )));
+    if checkpoint_files.is_empty() && checkpoint_stats.files.is_empty() {
+        lines.push(Line::from(
+            "No repo changes recorded at selected checkpoint.",
+        ));
+    } else {
         let mut rendered_files = BTreeSet::new();
-        for file in files {
+        for file in checkpoint_files {
             rendered_files.insert(file.clone());
-            if let Some(stat) = preferred_stats.files.get(&file) {
+            if let Some(stat) = checkpoint_stats.files.get(&file) {
                 lines.push(diff_stat_line(&format!("- {} | {}", file, stat)));
             } else {
                 lines.push(Line::from(format!("- {}", file)));
             }
         }
-        for (file, stat) in &preferred_stats.files {
+        for (file, stat) in &checkpoint_stats.files {
             if rendered_files.insert(file.clone()) {
                 lines.push(diff_stat_line(&format!("- {} | {}", file, stat)));
             }
@@ -3219,6 +3273,23 @@ fn inline_copy_line(label: &str, hovered: bool, copied: bool) -> Line<'static> {
 
 fn event_summary(event: &SessionEvent) -> String {
     match event.event_type.as_str() {
+        "git.snapshot.chkpt" => {
+            let checkpoint_id = event
+                .payload
+                .get("checkpoint_id")
+                .and_then(Value::as_str)
+                .map(sanitize_inline_text)
+                .filter(|value| !value.is_empty())
+                .unwrap_or_else(|| "chkpt".to_string());
+            let reason = checkpoint_reason_label(
+                event
+                    .payload
+                    .get("reason")
+                    .and_then(Value::as_str)
+                    .unwrap_or_default(),
+            );
+            truncate(&format!("{checkpoint_id} {reason}"), 52)
+        }
         "process.spawned" | "process.exited" | "command.recorded" | "git.push.attempted" => event
             .payload
             .get("command")
@@ -3400,6 +3471,7 @@ fn changes_panel_constraints(detail: &DetailState) -> [Constraint; 2] {
 
 fn detail_has_meaningful_changes(detail: &DetailState) -> bool {
     has_nonempty_array(detail.session.changes.get("files_changed"))
+        || !detail.git_checkpoint_records.is_empty()
         || has_nonempty_array(detail.session.changes.get("commits_created"))
         || detail
             .session
@@ -3422,6 +3494,85 @@ fn has_nonempty_array(value: Option<&Value>) -> bool {
         .and_then(Value::as_array)
         .map(|items| !items.is_empty())
         .unwrap_or(false)
+}
+
+fn augment_events_with_git_checkpoints(
+    events: Vec<SessionEvent>,
+    git_checkpoint_records: &[GitCheckpointRecord],
+    session_id: &str,
+) -> Vec<SessionEvent> {
+    if git_checkpoint_records.is_empty()
+        || events
+            .iter()
+            .any(|event| event.event_type == "git.snapshot.chkpt")
+    {
+        return events;
+    }
+    let mut inserts: BTreeMap<usize, Vec<SessionEvent>> = BTreeMap::new();
+    let mut prepend = Vec::new();
+    for record in git_checkpoint_records {
+        let payload = json!({
+            "checkpoint_id": record.checkpoint_id,
+            "reason": record.reason,
+            "branch": record.branch,
+            "head": record.head,
+            "worktree_diff_stat": record.worktree_diff_stat,
+            "changed_files": record.changed_files,
+            "untracked_paths": record.untracked_paths,
+        });
+        let ts_wall = if record.timestamp > 0 {
+            record.timestamp as f64
+        } else {
+            events
+                .iter()
+                .rfind(|event| event.seq <= record.seq)
+                .map(|event| event.ts_wall)
+                .unwrap_or_default()
+        };
+        let synthetic = SessionEvent {
+            session_id: session_id.to_string(),
+            seq: record.seq,
+            ts_wall,
+            ts_monotonic_ms: 0,
+            event_type: "git.snapshot.chkpt".to_string(),
+            payload,
+        };
+        if let Some(event_idx) = events.iter().rposition(|event| event.seq <= record.seq) {
+            inserts.entry(event_idx).or_default().push(synthetic);
+        } else {
+            prepend.push(synthetic);
+        }
+    }
+
+    let mut out = Vec::with_capacity(events.len().saturating_add(git_checkpoint_records.len()));
+    out.extend(prepend);
+    for (idx, event) in events.into_iter().enumerate() {
+        out.push(event);
+        if let Some(pending) = inserts.remove(&idx) {
+            out.extend(pending);
+        }
+    }
+    out
+}
+
+fn checkpoint_reason_label(reason: &str) -> String {
+    let clean = reason.trim();
+    if clean.is_empty() {
+        return "checkpoint".to_string();
+    }
+    if clean == "session_start" {
+        return "session start".to_string();
+    }
+    if clean == "session_end" {
+        return "session end".to_string();
+    }
+    if let Some(pid) = clean.strip_prefix("process_exit:") {
+        return format!("process exit {pid}");
+    }
+    if let Some(sha) = clean.strip_prefix("commit_created:") {
+        return format!("commit {sha}");
+    }
+    clean.replace('_', " ")
 }
 
 fn build_display_model(events: &[SessionEvent]) -> (Vec<TimelineEntry>, Vec<String>, Vec<usize>) {
@@ -5580,6 +5731,7 @@ mod tests {
             text_replay_cached_step: None,
             text_replay_cached_value: String::new(),
             replay_timeline_indices: vec![1],
+            git_checkpoint_records: Vec::new(),
             transcript_chunks: Vec::new(),
             checkpoint_records: Vec::new(),
             terminal_replay_frames: Arc::new(vec![TerminalReplayFrame {
@@ -5662,7 +5814,7 @@ mod tests {
             .expect("summary should be rendered");
         let files_changed_idx = rendered
             .iter()
-            .position(|line| line == "Files changed")
+            .position(|line| line.contains("Files changed at selected checkpoint"))
             .expect("Files changed heading should be rendered");
 
         assert!(summary_idx < files_changed_idx);
@@ -6399,6 +6551,7 @@ mod tests {
             text_replay_cached_step: None,
             text_replay_cached_value: String::new(),
             replay_timeline_indices: vec![1],
+            git_checkpoint_records: Vec::new(),
             transcript_chunks: Vec::new(),
             checkpoint_records: Vec::new(),
             terminal_replay_frames: Arc::new(vec![TerminalReplayFrame {

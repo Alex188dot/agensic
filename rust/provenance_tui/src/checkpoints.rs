@@ -36,6 +36,37 @@ pub struct CheckpointRecord {
     pub state_b64: String,
 }
 
+#[derive(Clone, Debug, Default, Serialize, Deserialize)]
+pub struct GitCheckpointRecord {
+    #[serde(default)]
+    pub checkpoint_id: String,
+    pub seq: i64,
+    #[serde(default)]
+    pub timestamp: i64,
+    #[serde(default)]
+    pub reason: String,
+    #[serde(default)]
+    pub repo_root: String,
+    #[serde(default)]
+    pub branch: String,
+    #[serde(default)]
+    pub head: String,
+    #[serde(default)]
+    pub status_porcelain: String,
+    #[serde(default)]
+    pub status_fingerprint: String,
+    #[serde(default)]
+    pub tracked_patch_sha256: String,
+    #[serde(default)]
+    pub worktree_diff_stat: String,
+    #[serde(default)]
+    pub changed_files: Vec<String>,
+    #[serde(default)]
+    pub untracked_paths: Vec<String>,
+    #[serde(default)]
+    pub fingerprint: String,
+}
+
 #[derive(Clone, Debug, Default, Deserialize)]
 struct CheckpointInputEvent {
     #[serde(default)]
@@ -241,6 +272,20 @@ pub fn checkpoint_path_for_transcript(transcript_path: &str) -> String {
     format!("{clean}.checkpoints.jsonl")
 }
 
+pub fn git_checkpoint_path_for_transcript(transcript_path: &str) -> String {
+    let clean = transcript_path.trim();
+    if clean.is_empty() {
+        return String::new();
+    }
+    if let Some(prefix) = clean.strip_suffix(".transcript.jsonl.gz") {
+        return format!("{prefix}.git-checkpoints.jsonl.gz");
+    }
+    if let Some(prefix) = clean.strip_suffix(".transcript.jsonl") {
+        return format!("{prefix}.git-checkpoints.jsonl");
+    }
+    format!("{clean}.git-checkpoints.jsonl")
+}
+
 pub fn decode_checkpoint_state(record: &CheckpointRecord) -> Vec<u8> {
     if record.state_b64.is_empty() {
         return Vec::new();
@@ -260,6 +305,47 @@ pub fn load_checkpoint_records(path: &str) -> Vec<CheckpointRecord> {
         .filter_map(|line| serde_json::from_str::<CheckpointRecord>(&line).ok())
         .filter(|record| record.rows > 0 && record.cols > 0 && !record.state_b64.is_empty())
         .collect()
+}
+
+fn git_changed_files_from_diff_stat(diff_stat: &str) -> Vec<String> {
+    let mut files = Vec::new();
+    for raw_line in diff_stat
+        .lines()
+        .map(str::trim_end)
+        .filter(|line| !line.is_empty())
+    {
+        if let Some((path, _)) = raw_line.split_once('|') {
+            let clean = path.trim();
+            if !clean.is_empty() && !files.iter().any(|item| item == clean) {
+                files.push(clean.to_string());
+            }
+        }
+    }
+    files
+}
+
+pub fn load_git_checkpoint_records(path: &str) -> Vec<GitCheckpointRecord> {
+    let Some(contents) = read_text_artifact(path) else {
+        return Vec::new();
+    };
+    let mut records: Vec<GitCheckpointRecord> = BufReader::new(contents.as_bytes())
+        .lines()
+        .enumerate()
+        .filter_map(|(idx, line)| {
+            let line = line.ok()?;
+            let mut record = serde_json::from_str::<GitCheckpointRecord>(&line).ok()?;
+            if record.checkpoint_id.trim().is_empty() {
+                record.checkpoint_id = format!("chkpt-{:04}", idx + 1);
+            }
+            if record.changed_files.is_empty() && !record.worktree_diff_stat.trim().is_empty() {
+                record.changed_files = git_changed_files_from_diff_stat(&record.worktree_diff_stat);
+            }
+            Some(record)
+        })
+        .filter(|record| record.seq > 0)
+        .collect();
+    records.sort_by_key(|record| (record.seq, record.timestamp));
+    records
 }
 
 pub fn run_from_env(argv: &[String]) -> Result<(), String> {

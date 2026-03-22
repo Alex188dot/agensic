@@ -1602,6 +1602,22 @@ def _git_binary_diff_against_head(repo_root: str) -> bytes:
     return stdout
 
 
+def _git_changed_files_from_diff_stat(diff_stat: str) -> list[str]:
+    files: list[str] = []
+    seen: set[str] = set()
+    for raw_line in str(diff_stat or "").splitlines():
+        clean = str(raw_line or "").rstrip()
+        if "|" not in clean:
+            continue
+        rel_path, _, _ = clean.partition("|")
+        clean_path = str(rel_path or "").strip()
+        if not clean_path or clean_path in seen:
+            continue
+        seen.add(clean_path)
+        files.append(clean_path)
+    return files
+
+
 def _git_list_untracked_files(repo_root: str) -> list[str]:
     code, stdout, _ = _run_git_capture(
         repo_root,
@@ -1820,9 +1836,26 @@ def _build_git_checkpoint_payload(repo_root: str, *, seq: int, reason: str = "")
 def _load_git_checkpoint_records(path: str) -> list[dict[str, Any]]:
     rows = _load_jsonl_artifact(path)
     records: list[dict[str, Any]] = []
-    for row in rows:
+    for idx, row in enumerate(rows, start=1):
+        worktree_diff_stat = str(row.get("worktree_diff_stat", "") or "")
+        changed_files = [str(item) for item in row.get("changed_files", []) if str(item)]
+        if not changed_files and worktree_diff_stat:
+            changed_files = _git_changed_files_from_diff_stat(worktree_diff_stat)
+        untracked_files = [
+            {
+                "path": str(item.get("path", "") or ""),
+                "data_b64": str(item.get("data_b64", "") or ""),
+                "sha256": str(item.get("sha256", "") or ""),
+            }
+            for item in row.get("untracked_files", [])
+            if isinstance(item, dict) and str(item.get("path", "") or "")
+        ]
+        untracked_paths = [str(item) for item in row.get("untracked_paths", []) if str(item)]
+        if not untracked_paths and untracked_files:
+            untracked_paths = [str(item.get("path", "") or "") for item in untracked_files if str(item.get("path", "") or "")]
         records.append(
             {
+                "checkpoint_id": str(row.get("checkpoint_id", "") or f"chkpt-{idx:04d}"),
                 "seq": int(row.get("seq", 0) or 0),
                 "timestamp": int(row.get("timestamp", 0) or 0),
                 "reason": str(row.get("reason", "") or ""),
@@ -1833,18 +1866,10 @@ def _load_git_checkpoint_records(path: str) -> list[dict[str, Any]]:
                 "status_fingerprint": str(row.get("status_fingerprint", "") or ""),
                 "tracked_patch_b64": str(row.get("tracked_patch_b64", "") or ""),
                 "tracked_patch_sha256": str(row.get("tracked_patch_sha256", "") or ""),
-                "worktree_diff_stat": str(row.get("worktree_diff_stat", "") or ""),
-                "changed_files": [str(item) for item in row.get("changed_files", []) if str(item)],
-                "untracked_files": [
-                    {
-                        "path": str(item.get("path", "") or ""),
-                        "data_b64": str(item.get("data_b64", "") or ""),
-                        "sha256": str(item.get("sha256", "") or ""),
-                    }
-                    for item in row.get("untracked_files", [])
-                    if isinstance(item, dict) and str(item.get("path", "") or "")
-                ],
-                "untracked_paths": [str(item) for item in row.get("untracked_paths", []) if str(item)],
+                "worktree_diff_stat": worktree_diff_stat,
+                "changed_files": changed_files,
+                "untracked_files": untracked_files,
+                "untracked_paths": untracked_paths,
                 "fingerprint": str(row.get("fingerprint", "") or ""),
             }
         )
@@ -2836,6 +2861,7 @@ class TrackRuntime:
         self.end_snapshot: dict[str, Any] = {}
         self.last_git_checkpoint_fingerprint = ""
         self.last_observed_head = str(self.start_snapshot.get("head", "") or "")
+        self.git_checkpoint_counter = 0
         self.emitted_commit_shas: set[str] = set()
         self.processes: dict[int, ObservedProcess] = {
             self.root_pid: ObservedProcess(
@@ -2854,6 +2880,10 @@ class TrackRuntime:
 
     def set_git_checkpoint_handle(self, handle: Any) -> None:
         self._git_checkpoint_handle = handle
+
+    def next_git_checkpoint_id(self) -> str:
+        self.git_checkpoint_counter += 1
+        return f"chkpt-{self.git_checkpoint_counter:04d}"
 
     def emit_event(self, event_type: str, payload: dict[str, Any] | None = None) -> int | None:
         handle = self._event_handle
@@ -2886,6 +2916,22 @@ class TrackRuntime:
         fingerprint = str(payload.get("fingerprint", "") or "")
         if fingerprint and fingerprint == self.last_git_checkpoint_fingerprint:
             return None
+        checkpoint_id = self.next_git_checkpoint_id()
+        event_seq = self.emit_event(
+            "git.snapshot.chkpt",
+            {
+                "checkpoint_id": checkpoint_id,
+                "reason": str(reason or "").strip(),
+                "branch": str(payload.get("branch", "") or ""),
+                "head": str(payload.get("head", "") or ""),
+                "worktree_diff_stat": str(payload.get("worktree_diff_stat", "") or ""),
+                "changed_files": [str(item) for item in payload.get("changed_files", []) if str(item)],
+                "untracked_paths": [str(item) for item in payload.get("untracked_paths", []) if str(item)],
+            },
+        )
+        payload["checkpoint_id"] = checkpoint_id
+        if event_seq is not None:
+            payload["seq"] = int(event_seq)
         _write_jsonl_record(handle, payload)
         self.last_git_checkpoint_fingerprint = fingerprint
         return payload
