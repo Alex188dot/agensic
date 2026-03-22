@@ -1841,6 +1841,10 @@ def _load_git_checkpoint_records(path: str) -> list[dict[str, Any]]:
         changed_files = [str(item) for item in row.get("changed_files", []) if str(item)]
         if not changed_files and worktree_diff_stat:
             changed_files = _git_changed_files_from_diff_stat(worktree_diff_stat)
+        committed_diff_stat = str(row.get("committed_diff_stat", "") or "")
+        committed_files = [str(item) for item in row.get("committed_files", []) if str(item)]
+        if not committed_files and committed_diff_stat:
+            committed_files = _git_changed_files_from_diff_stat(committed_diff_stat)
         untracked_files = [
             {
                 "path": str(item.get("path", "") or ""),
@@ -1862,10 +1866,13 @@ def _load_git_checkpoint_records(path: str) -> list[dict[str, Any]]:
                 "repo_root": str(row.get("repo_root", "") or ""),
                 "branch": str(row.get("branch", "") or ""),
                 "head": str(row.get("head", "") or ""),
+                "comparison_base_head": str(row.get("comparison_base_head", "") or ""),
                 "status_porcelain": str(row.get("status_porcelain", "") or ""),
                 "status_fingerprint": str(row.get("status_fingerprint", "") or ""),
                 "tracked_patch_b64": str(row.get("tracked_patch_b64", "") or ""),
                 "tracked_patch_sha256": str(row.get("tracked_patch_sha256", "") or ""),
+                "committed_diff_stat": committed_diff_stat,
+                "committed_files": committed_files,
                 "worktree_diff_stat": worktree_diff_stat,
                 "changed_files": changed_files,
                 "untracked_files": untracked_files,
@@ -2861,6 +2868,7 @@ class TrackRuntime:
         self.end_snapshot: dict[str, Any] = {}
         self.last_git_checkpoint_fingerprint = ""
         self.last_observed_head = str(self.start_snapshot.get("head", "") or "")
+        self.last_git_checkpoint_head = str(self.start_snapshot.get("head", "") or "")
         self.git_checkpoint_counter = 0
         self.emitted_commit_shas: set[str] = set()
         self.processes: dict[int, ObservedProcess] = {
@@ -2913,6 +2921,17 @@ class TrackRuntime:
         payload = _build_git_checkpoint_payload(repo_root, seq=int(seq or self._event_seq or 0), reason=reason)
         if payload is None:
             return None
+        current_head = str(payload.get("head", "") or "")
+        comparison_base_head = str(self.last_git_checkpoint_head or self.start_snapshot.get("head", "") or "")
+        payload["comparison_base_head"] = comparison_base_head
+        if repo_root and comparison_base_head and current_head and comparison_base_head != current_head:
+            payload["committed_files"] = _git_changed_files_between(repo_root, comparison_base_head, current_head)
+            payload["committed_diff_stat"] = _git_diff_stat_between(repo_root, comparison_base_head, current_head)
+            payload["commits_created"] = _git_commits_between(repo_root, comparison_base_head, current_head)
+        else:
+            payload["committed_files"] = []
+            payload["committed_diff_stat"] = ""
+            payload["commits_created"] = []
         fingerprint = str(payload.get("fingerprint", "") or "")
         if fingerprint and fingerprint == self.last_git_checkpoint_fingerprint:
             return None
@@ -2924,6 +2943,9 @@ class TrackRuntime:
                 "reason": str(reason or "").strip(),
                 "branch": str(payload.get("branch", "") or ""),
                 "head": str(payload.get("head", "") or ""),
+                "comparison_base_head": comparison_base_head,
+                "committed_diff_stat": str(payload.get("committed_diff_stat", "") or ""),
+                "committed_files": [str(item) for item in payload.get("committed_files", []) if str(item)],
                 "worktree_diff_stat": str(payload.get("worktree_diff_stat", "") or ""),
                 "changed_files": [str(item) for item in payload.get("changed_files", []) if str(item)],
                 "untracked_paths": [str(item) for item in payload.get("untracked_paths", []) if str(item)],
@@ -2934,6 +2956,7 @@ class TrackRuntime:
             payload["seq"] = int(event_seq)
         _write_jsonl_record(handle, payload)
         self.last_git_checkpoint_fingerprint = fingerprint
+        self.last_git_checkpoint_head = current_head or self.last_git_checkpoint_head
         return payload
 
     def persist_summary(

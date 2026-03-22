@@ -3,11 +3,12 @@ use base64::Engine;
 use clap::Parser;
 use flate2::read::GzDecoder;
 use serde::{Deserialize, Serialize};
-use std::collections::hash_map::DefaultHasher;
+use std::collections::{hash_map::DefaultHasher, BTreeMap};
 use std::fs::{self, File};
 use std::hash::{Hash, Hasher};
 use std::io::{self, BufRead, BufReader, Read, Write};
 use std::path::Path;
+use std::process::Command;
 use std::time::{Duration, Instant};
 
 const DEFAULT_CHECKPOINT_INTERVAL_MS: u64 = 120;
@@ -52,11 +53,17 @@ pub struct GitCheckpointRecord {
     #[serde(default)]
     pub head: String,
     #[serde(default)]
+    pub comparison_base_head: String,
+    #[serde(default)]
     pub status_porcelain: String,
     #[serde(default)]
     pub status_fingerprint: String,
     #[serde(default)]
     pub tracked_patch_sha256: String,
+    #[serde(default)]
+    pub committed_diff_stat: String,
+    #[serde(default)]
+    pub committed_files: Vec<String>,
     #[serde(default)]
     pub worktree_diff_stat: String,
     #[serde(default)]
@@ -65,6 +72,12 @@ pub struct GitCheckpointRecord {
     pub untracked_paths: Vec<String>,
     #[serde(default)]
     pub fingerprint: String,
+    #[serde(skip)]
+    pub cumulative_diff_stat: String,
+    #[serde(skip)]
+    pub cumulative_files: Vec<String>,
+    #[serde(skip)]
+    pub cumulative_file_markers: BTreeMap<String, String>,
 }
 
 #[derive(Clone, Debug, Default, Deserialize)]
@@ -324,6 +337,65 @@ fn git_changed_files_from_diff_stat(diff_stat: &str) -> Vec<String> {
     files
 }
 
+fn git_capture(repo_root: &str, args: &[&str]) -> Option<String> {
+    let output = Command::new("git")
+        .arg("-C")
+        .arg(repo_root)
+        .args(args)
+        .output()
+        .ok()?;
+    if !output.status.success() {
+        return None;
+    }
+    String::from_utf8(output.stdout)
+        .ok()
+        .map(|text| text.trim().to_string())
+}
+
+fn git_capture_lines(repo_root: &str, args: &[&str]) -> Vec<String> {
+    git_capture(repo_root, args)
+        .map(|text| {
+            text.lines()
+                .map(str::trim)
+                .filter(|line| !line.is_empty())
+                .map(ToOwned::to_owned)
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
+fn marker_for_name_status(status: &str) -> &'static str {
+    match status.chars().next().unwrap_or_default() {
+        'A' | 'C' => "+",
+        'D' => "-",
+        'R' => ">",
+        'M' => "~",
+        _ => "•",
+    }
+}
+
+fn parse_name_status_lines(lines: &[String]) -> (Vec<String>, BTreeMap<String, String>) {
+    let mut files = Vec::new();
+    let mut markers = BTreeMap::new();
+    for line in lines {
+        let parts: Vec<&str> = line.split('\t').collect();
+        if parts.len() < 2 {
+            continue;
+        }
+        let status = parts[0].trim();
+        let path = parts.last().copied().unwrap_or_default().trim();
+        if path.is_empty() {
+            continue;
+        }
+        let clean_path = path.to_string();
+        if !files.iter().any(|item| item == &clean_path) {
+            files.push(clean_path.clone());
+        }
+        markers.insert(clean_path, marker_for_name_status(status).to_string());
+    }
+    (files, markers)
+}
+
 pub fn load_git_checkpoint_records(path: &str) -> Vec<GitCheckpointRecord> {
     let Some(contents) = read_text_artifact(path) else {
         return Vec::new();
@@ -345,7 +417,71 @@ pub fn load_git_checkpoint_records(path: &str) -> Vec<GitCheckpointRecord> {
         .filter(|record| record.seq > 0)
         .collect();
     records.sort_by_key(|record| (record.seq, record.timestamp));
+    let mut previous_head = String::new();
+    for record in &mut records {
+        record.cumulative_diff_stat.clear();
+        record.cumulative_files.clear();
+        record.cumulative_file_markers.clear();
+        if record.committed_files.is_empty() && !record.committed_diff_stat.trim().is_empty() {
+            record.committed_files = git_changed_files_from_diff_stat(&record.committed_diff_stat);
+        }
+        if record.comparison_base_head.trim().is_empty() && !previous_head.trim().is_empty() {
+            record.comparison_base_head = previous_head.clone();
+        }
+        if record.committed_files.is_empty()
+            && record.committed_diff_stat.trim().is_empty()
+            && !record.repo_root.trim().is_empty()
+            && !record.comparison_base_head.trim().is_empty()
+            && !record.head.trim().is_empty()
+            && record.comparison_base_head != record.head
+        {
+            if let Some(diff_stat) = git_capture(
+                &record.repo_root,
+                &[
+                    "diff",
+                    "--stat",
+                    &format!("{}..{}", record.comparison_base_head, record.head),
+                ],
+            ) {
+                record.committed_diff_stat = diff_stat;
+                record.committed_files =
+                    git_changed_files_from_diff_stat(&record.committed_diff_stat);
+            }
+        }
+        if !record.head.trim().is_empty() {
+            previous_head = record.head.clone();
+        }
+    }
     records
+}
+
+pub fn enrich_git_checkpoint_records(
+    records: &mut [GitCheckpointRecord],
+    repo_root: &str,
+    head_start: &str,
+) {
+    let clean_repo_root = repo_root.trim();
+    let clean_head_start = head_start.trim();
+    if clean_repo_root.is_empty() || clean_head_start.is_empty() {
+        return;
+    }
+    for record in records {
+        record.cumulative_diff_stat.clear();
+        record.cumulative_files.clear();
+        record.cumulative_file_markers.clear();
+        let clean_head = record.head.trim();
+        if clean_head.is_empty() || clean_head == clean_head_start {
+            continue;
+        }
+        let range = format!("{clean_head_start}..{clean_head}");
+        if let Some(diff_stat) = git_capture(clean_repo_root, &["diff", "--stat", &range]) {
+            record.cumulative_diff_stat = diff_stat;
+        }
+        let name_status = git_capture_lines(clean_repo_root, &["diff", "--name-status", &range]);
+        let (files, markers) = parse_name_status_lines(&name_status);
+        record.cumulative_files = files;
+        record.cumulative_file_markers = markers;
+    }
 }
 
 pub fn run_from_env(argv: &[String]) -> Result<(), String> {

@@ -1,6 +1,7 @@
 use crate::checkpoints::{
-    checkpoint_path_for_transcript, decode_checkpoint_state, git_checkpoint_path_for_transcript,
-    load_checkpoint_records, load_git_checkpoint_records, CheckpointRecord, GitCheckpointRecord,
+    checkpoint_path_for_transcript, decode_checkpoint_state, enrich_git_checkpoint_records,
+    git_checkpoint_path_for_transcript, load_checkpoint_records, load_git_checkpoint_records,
+    CheckpointRecord, GitCheckpointRecord,
 };
 use base64::engine::general_purpose::STANDARD as BASE64_STANDARD;
 use base64::Engine;
@@ -409,8 +410,13 @@ struct DetailState {
 
 impl DetailState {
     fn new(session: SessionSummary, events: Vec<SessionEvent>, autoplay: bool) -> Self {
-        let git_checkpoint_records = load_git_checkpoint_records(
+        let mut git_checkpoint_records = load_git_checkpoint_records(
             &git_checkpoint_path_for_transcript(&session.transcript_path),
+        );
+        enrich_git_checkpoint_records(
+            &mut git_checkpoint_records,
+            &session.repo_root,
+            &session.head_start,
         );
         let events = augment_events_with_git_checkpoints(
             events,
@@ -2631,19 +2637,45 @@ fn build_changes_lines(detail: &DetailState) -> Vec<Line<'static>> {
         .map(|record| sanitize_inline_text(&record.checkpoint_id))
         .filter(|value| !value.is_empty())
         .unwrap_or_else(|| "-".to_string());
-    let checkpoint_files: Vec<String> = selected_checkpoint
-        .map(|record| {
-            record
-                .changed_files
+    let (checkpoint_preferred_stats, checkpoint_files, checkpoint_markers) =
+        if let Some(record) = selected_checkpoint {
+            let checkpoint_cumulative_stats =
+                parse_diff_stat(&sanitize_multiline_text(&record.cumulative_diff_stat));
+            let checkpoint_worktree_stats =
+                parse_diff_stat(&sanitize_multiline_text(&record.worktree_diff_stat));
+            let preferred_stats = if !checkpoint_cumulative_stats.files.is_empty()
+                || checkpoint_cumulative_stats.summary.is_some()
+            {
+                checkpoint_cumulative_stats
+            } else if !checkpoint_worktree_stats.files.is_empty()
+                || checkpoint_worktree_stats.summary.is_some()
+            {
+                checkpoint_worktree_stats
+            } else {
+                ParsedDiffStat::default()
+            };
+            let preferred_files = if !record.cumulative_files.is_empty() {
+                &record.cumulative_files
+            } else {
+                &record.changed_files
+            };
+            let files = preferred_files
                 .iter()
                 .map(|item| sanitize_inline_text(item))
                 .filter(|item| !item.is_empty())
-                .collect()
-        })
-        .unwrap_or_else(|| session_files.clone());
-    let checkpoint_stats = selected_checkpoint
-        .map(|record| parse_diff_stat(&sanitize_multiline_text(&record.worktree_diff_stat)))
-        .unwrap_or_else(|| session_preferred_stats.clone());
+                .collect();
+            (
+                preferred_stats,
+                files,
+                record.cumulative_file_markers.clone(),
+            )
+        } else {
+            (
+                session_preferred_stats.clone(),
+                session_files.clone(),
+                BTreeMap::new(),
+            )
+        };
 
     lines.push(Line::from(""));
     lines.push(Line::from(Span::styled(
@@ -2669,7 +2701,7 @@ fn build_changes_lines(detail: &DetailState) -> Vec<Line<'static>> {
             .fg(Color::Cyan)
             .add_modifier(Modifier::BOLD),
     )));
-    if checkpoint_files.is_empty() && checkpoint_stats.files.is_empty() {
+    if checkpoint_files.is_empty() && checkpoint_preferred_stats.files.is_empty() {
         lines.push(Line::from(
             "No repo changes recorded at selected checkpoint.",
         ));
@@ -2677,15 +2709,23 @@ fn build_changes_lines(detail: &DetailState) -> Vec<Line<'static>> {
         let mut rendered_files = BTreeSet::new();
         for file in checkpoint_files {
             rendered_files.insert(file.clone());
-            if let Some(stat) = checkpoint_stats.files.get(&file) {
-                lines.push(diff_stat_line(&format!("- {} | {}", file, stat)));
+            let marker = checkpoint_markers
+                .get(&file)
+                .cloned()
+                .unwrap_or_else(|| "-".to_string());
+            if let Some(stat) = checkpoint_preferred_stats.files.get(&file) {
+                lines.push(diff_stat_line(&format!("{marker} {} | {}", file, stat)));
             } else {
-                lines.push(Line::from(format!("- {}", file)));
+                lines.push(Line::from(format!("{marker} {}", file)));
             }
         }
-        for (file, stat) in &checkpoint_stats.files {
+        for (file, stat) in &checkpoint_preferred_stats.files {
             if rendered_files.insert(file.clone()) {
-                lines.push(diff_stat_line(&format!("- {} | {}", file, stat)));
+                let marker = checkpoint_markers
+                    .get(file)
+                    .cloned()
+                    .unwrap_or_else(|| "-".to_string());
+                lines.push(diff_stat_line(&format!("{marker} {} | {}", file, stat)));
             }
         }
     }
