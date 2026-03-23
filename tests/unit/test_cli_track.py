@@ -68,6 +68,30 @@ def _make_test_launch(
     )
 
 
+def _test_git_commit_env() -> dict[str, str]:
+    env = os.environ.copy()
+    env.update(
+        {
+            "GIT_AUTHOR_NAME": "Test User",
+            "GIT_AUTHOR_EMAIL": "test@example.com",
+            "GIT_COMMITTER_NAME": "Test User",
+            "GIT_COMMITTER_EMAIL": "test@example.com",
+        }
+    )
+    return env
+
+
+def _run_test_git_commit(repo_dir: str, message: str) -> None:
+    subprocess.run(
+        ["git", "commit", "-m", message],
+        cwd=repo_dir,
+        check=True,
+        capture_output=True,
+        text=True,
+        env=_test_git_commit_env(),
+    )
+
+
 class CliTrackTests(unittest.TestCase):
     def setUp(self) -> None:
         self.runner = CliRunner()
@@ -841,13 +865,24 @@ class CliTrackTests(unittest.TestCase):
             subprocess.run(["git", "init"], cwd=repo_dir, check=True, capture_output=True, text=True)
             subprocess.run(["git", "config", "user.email", "test@example.com"], cwd=repo_dir, check=True)
             subprocess.run(["git", "config", "user.name", "Test User"], cwd=repo_dir, check=True)
+            subprocess.run(["git", "config", "commit.gpgsign", "false"], cwd=repo_dir, check=True)
             Path(repo_dir, "README.md").write_text("hello\n", encoding="utf-8")
             subprocess.run(["git", "add", "README.md"], cwd=repo_dir, check=True)
-            subprocess.run(["git", "commit", "-m", "init"], cwd=repo_dir, check=True, capture_output=True, text=True)
+            _run_test_git_commit(repo_dir, "init")
 
             with patch("os.getcwd", return_value=repo_dir):
                 launch = _make_test_launch(
-                    ["bash", "-lc", "echo changed > README.md; git add README.md; git commit -m 'update readme'"],
+                    [
+                        "bash",
+                        "-lc",
+                        "echo changed > README.md; "
+                        "git add README.md; "
+                        "GIT_AUTHOR_NAME='Test User' "
+                        "GIT_AUTHOR_EMAIL='test@example.com' "
+                        "GIT_COMMITTER_NAME='Test User' "
+                        "GIT_COMMITTER_EMAIL='test@example.com' "
+                        "git commit -m 'update readme'",
+                    ],
                 )
             code = track_module.run_tracked_command(launch)
 
@@ -908,13 +943,24 @@ class CliTrackTests(unittest.TestCase):
             subprocess.run(["git", "init"], cwd=repo_dir, check=True, capture_output=True, text=True)
             subprocess.run(["git", "config", "user.email", "test@example.com"], cwd=repo_dir, check=True)
             subprocess.run(["git", "config", "user.name", "Test User"], cwd=repo_dir, check=True)
+            subprocess.run(["git", "config", "commit.gpgsign", "false"], cwd=repo_dir, check=True)
             Path(repo_dir, "README.md").write_text("hello\n", encoding="utf-8")
             subprocess.run(["git", "add", "README.md"], cwd=repo_dir, check=True)
-            subprocess.run(["git", "commit", "-m", "init"], cwd=repo_dir, check=True, capture_output=True, text=True)
+            _run_test_git_commit(repo_dir, "init")
 
             with patch("os.getcwd", return_value=repo_dir):
                 launch = _make_test_launch(
-                    ["bash", "-lc", "echo changed > README.md; git add README.md; git commit -m 'update readme'"],
+                    [
+                        "bash",
+                        "-lc",
+                        "echo changed > README.md; "
+                        "git add README.md; "
+                        "GIT_AUTHOR_NAME='Test User' "
+                        "GIT_AUTHOR_EMAIL='test@example.com' "
+                        "GIT_COMMITTER_NAME='Test User' "
+                        "GIT_COMMITTER_EMAIL='test@example.com' "
+                        "git commit -m 'update readme'",
+                    ],
                 )
             code = track_module.run_tracked_command(launch)
 
@@ -941,15 +987,16 @@ class CliTrackTests(unittest.TestCase):
             subprocess.run(["git", "init"], cwd=repo_dir, check=True, capture_output=True, text=True)
             subprocess.run(["git", "config", "user.email", "test@example.com"], cwd=repo_dir, check=True)
             subprocess.run(["git", "config", "user.name", "Test User"], cwd=repo_dir, check=True)
+            subprocess.run(["git", "config", "commit.gpgsign", "false"], cwd=repo_dir, check=True)
             Path(repo_dir, "README.md").write_text("hello\n", encoding="utf-8")
             subprocess.run(["git", "add", "README.md"], cwd=repo_dir, check=True)
-            subprocess.run(["git", "commit", "-m", "init"], cwd=repo_dir, check=True, capture_output=True, text=True)
+            _run_test_git_commit(repo_dir, "init")
 
             def _external_commit() -> None:
                 time.sleep(0.2)
                 Path(repo_dir, "README.md").write_text("external\n", encoding="utf-8")
                 subprocess.run(["git", "add", "README.md"], cwd=repo_dir, check=True, capture_output=True, text=True)
-                subprocess.run(["git", "commit", "-m", "external commit"], cwd=repo_dir, check=True, capture_output=True, text=True)
+                _run_test_git_commit(repo_dir, "external commit")
 
             worker = threading.Thread(target=_external_commit)
             worker.start()
@@ -1150,10 +1197,11 @@ class CliTrackTests(unittest.TestCase):
             subprocess.run(["git", "init"], cwd=repo_dir, check=True, capture_output=True, text=True)
             subprocess.run(["git", "config", "user.email", "test@example.com"], cwd=repo_dir, check=True)
             subprocess.run(["git", "config", "user.name", "Test User"], cwd=repo_dir, check=True)
+            subprocess.run(["git", "config", "commit.gpgsign", "false"], cwd=repo_dir, check=True)
             tracked = Path(repo_dir) / "tracked.txt"
             tracked.write_text("base\n", encoding="utf-8")
             subprocess.run(["git", "add", "tracked.txt"], cwd=repo_dir, check=True)
-            subprocess.run(["git", "commit", "-m", "base"], cwd=repo_dir, check=True, capture_output=True, text=True)
+            _run_test_git_commit(repo_dir, "base")
 
             store = SQLiteStateStore(temp_paths.state_sqlite_path, journal=None)
             store.upsert_tracked_session(
@@ -1222,10 +1270,11 @@ class CliTrackTests(unittest.TestCase):
             subprocess.run(["git", "init"], cwd=repo_dir, check=True, capture_output=True, text=True)
             subprocess.run(["git", "config", "user.email", "test@example.com"], cwd=repo_dir, check=True)
             subprocess.run(["git", "config", "user.name", "Test User"], cwd=repo_dir, check=True)
+            subprocess.run(["git", "config", "commit.gpgsign", "false"], cwd=repo_dir, check=True)
             tracked = Path(repo_dir) / "tracked.txt"
             tracked.write_text("base\n", encoding="utf-8")
             subprocess.run(["git", "add", "tracked.txt"], cwd=repo_dir, check=True)
-            subprocess.run(["git", "commit", "-m", "base"], cwd=repo_dir, check=True, capture_output=True, text=True)
+            _run_test_git_commit(repo_dir, "base")
 
             head = subprocess.run(
                 ["git", "rev-parse", "HEAD"],
@@ -1293,10 +1342,11 @@ class CliTrackTests(unittest.TestCase):
             subprocess.run(["git", "init"], cwd=repo_dir, check=True, capture_output=True, text=True)
             subprocess.run(["git", "config", "user.email", "test@example.com"], cwd=repo_dir, check=True)
             subprocess.run(["git", "config", "user.name", "Test User"], cwd=repo_dir, check=True)
+            subprocess.run(["git", "config", "commit.gpgsign", "false"], cwd=repo_dir, check=True)
             tracked = Path(repo_dir) / "tracked.txt"
             tracked.write_text("base\n", encoding="utf-8")
             subprocess.run(["git", "add", "tracked.txt"], cwd=repo_dir, check=True)
-            subprocess.run(["git", "commit", "-m", "base"], cwd=repo_dir, check=True, capture_output=True, text=True)
+            _run_test_git_commit(repo_dir, "base")
 
             store = SQLiteStateStore(temp_paths.state_sqlite_path, journal=None)
             store.upsert_tracked_session(
