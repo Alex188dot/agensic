@@ -71,7 +71,7 @@ const IDLE_POLL_MS: u64 = 1_000;
 const REPLAY_LOADING_POLL_MS: u64 = 120;
 
 #[derive(Debug, Parser, Clone)]
-#[command(name = "agensic-provenance-tui sessions")]
+#[command(name = "agensic-tuis sessions")]
 pub struct SessionsArgs {
     #[arg(long, default_value = "http://127.0.0.1:22000")]
     daemon_url: String,
@@ -5328,8 +5328,8 @@ mod tests {
     fn changes_pane_merges_file_list_with_committed_diff_stat() {
         let mut session = SessionSummary::default();
         session.changes = json!({
-            "files_changed": ["agensic.bash", "rust/provenance_tui/src/main.rs", "tests/integration/test_agensic_bash_sessions.py"],
-            "committed_diff_stat": "agensic.bash | 11 +++++++++++\nrust/provenance_tui/src/main.rs | 23 +++++++++++++++++++++++---\ntests/integration/test_agensic_bash_sessions.py | 27 +++++++++++++++++++++++++++\n3 files changed, 58 insertions(+), 3 deletions(-)"
+            "files_changed": ["agensic.bash", "rust/tuis/src/main.rs", "tests/integration/test_agensic_bash_sessions.py"],
+            "committed_diff_stat": "agensic.bash | 11 +++++++++++\nrust/tuis/src/main.rs | 23 +++++++++++++++++++++++---\ntests/integration/test_agensic_bash_sessions.py | 27 +++++++++++++++++++++++++++\n3 files changed, 58 insertions(+), 3 deletions(-)"
         });
         let detail = DetailState::new(session, Vec::new(), false);
 

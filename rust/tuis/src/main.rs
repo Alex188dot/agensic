@@ -185,7 +185,7 @@ pub(crate) fn copy_to_clipboard(text: &str) -> Result<(), String> {
 }
 
 #[derive(Debug, Parser, Clone)]
-#[command(name = "agensic-provenance-tui")]
+#[command(name = "agensic-tuis")]
 #[command(about = "Full-screen provenance viewer for Agensic")]
 struct Args {
     #[arg(long, default_value = "http://127.0.0.1:22000")]

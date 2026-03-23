@@ -170,7 +170,7 @@ class RepoContextGraphTests(unittest.TestCase):
         db = self._build_db_for_rerank(
             command_stats={
                 "agensic setup": {"accept_count": 0, "execute_count": 0, "history_count": 200},
-                "agensic provenance --tui": {"accept_count": 0, "execute_count": 0, "history_count": 5},
+                "agensic provenance": {"accept_count": 0, "execute_count": 0, "history_count": 5},
             },
         )
         now_ts = 2_000_000_000
@@ -179,7 +179,7 @@ class RepoContextGraphTests(unittest.TestCase):
             out = {cmd: 0 for cmd in commands}
             label_set = {str(v or "").strip() for v in (labels or [])}
             if "HUMAN_TYPED" in label_set:
-                out["agensic provenance --tui"] = 6
+                out["agensic provenance"] = 6
             if label_set.intersection({"AI_SUGGESTED_HUMAN_RAN", "AG_SUGGESTED_HUMAN_RAN", "AI_EXECUTED"}):
                 out["agensic setup"] = 3
             return out
@@ -188,17 +188,17 @@ class RepoContextGraphTests(unittest.TestCase):
         db.state_store.get_last_command_run_ts = Mock(
             return_value={
                 "agensic setup": now_ts - (14 * 24 * 3600),
-                "agensic provenance --tui": now_ts - 3600,
+                "agensic provenance": now_ts - 3600,
             }
         )
 
         with patch("agensic.vector_db.command_db.time.time", return_value=now_ts):
             reranked = db.rerank_candidates(
                 "agensic",
-                [" setup", " provenance --tui"],
+                [" setup", " provenance"],
                 working_directory="/tmp/repo",
             )
-        self.assertEqual(reranked[0], " provenance --tui")
+        self.assertEqual(reranked[0], " provenance")
 
     def test_history_signal_is_capped(self):
         score_200 = CommandVectorDB.blend_rank_score(

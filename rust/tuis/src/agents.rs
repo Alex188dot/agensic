@@ -18,7 +18,7 @@ use std::io::{self, Stdout, Write};
 use std::time::Duration;
 
 #[derive(Debug, Parser, Clone)]
-#[command(name = "agensic-provenance-tui agents")]
+#[command(name = "agensic-tuis agents")]
 pub struct AgentsArgs {
     #[arg(long, default_value = "")]
     input: String,
@@ -108,7 +108,7 @@ impl App {
 }
 
 pub fn run_from_env(raw_args: &[String]) -> Result<(), String> {
-    let mut argv = vec!["agensic-provenance-tui agents".to_string()];
+    let mut argv = vec!["agensic-tuis agents".to_string()];
     argv.extend(raw_args.iter().cloned());
     let args = AgentsArgs::parse_from(argv);
     let payload = load_payload(&args)?;

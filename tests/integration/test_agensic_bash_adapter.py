@@ -127,14 +127,14 @@ class AgensicBashAdapterTests(unittest.TestCase):
         result = self._run_bash(
             """
             COLUMNS=80
-            printf '%s\\n' "$(_agensic_bash_render_overlay_message 'agensic provenance --tui' '(3/6, Ctrl+P/N)')"
+            printf '%s\\n' "$(_agensic_bash_render_overlay_message 'agensic provenance' '(3/6, Ctrl+P/N)')"
             """,
         )
 
         self.assertEqual(result.returncode, 0, msg=result.stderr)
         self.assertEqual(
             result.stdout.strip(),
-            "\x1b[32m[Agensic]\x1b[0m (3/6, Ctrl+P/N) \x1b[38;5;245magensic provenance --tui\x1b[0m",
+            "\x1b[32m[Agensic]\x1b[0m (3/6, Ctrl+P/N) \x1b[38;5;245magensic provenance\x1b[0m",
         )
 
     def test_keyseq_from_bytes_encodes_del_for_readline_binding(self):

@@ -30,16 +30,19 @@ Instead of flattening all terminal activity into a single ambiguous "shell histo
 1. [Platform Support](#-platform-support)
 2. [Installation](#-installation)
 3. [Quick Start](#-quick-start)
-4. [Agensic Sessions](#-agensic-sessions)
+4. [Agensic Provenance](#-agensic-provenance)
+   - [Features](#-features-provenance)
+   - [Supported Labels](#-supported-labels)
+5. [Agensic Sessions](#-agensic-sessions)
    - [Features](#-features-sessions)
    - [Supported Agents](#-supported-agents)
-5. [Agensic Autocomplete](#-agensic-autocomplete)
+6. [Agensic Autocomplete](#-agensic-autocomplete)
    - [Features](#-features-autocomplete)
    - [Supported Providers](#-supported-providers)
-6. [Safety & Privacy](#-safety--privacy)
-7. [Project Creator](#-project-creator)
-8. [Support](#-support)
-9. [License](#-license)
+7. [Safety & Privacy](#-safety--privacy)
+8. [Project Creator](#-project-creator)
+9. [Support](#-support)
+10. [License](#-license)
 
 ---
 
@@ -104,8 +107,45 @@ agensic sessions
 or view the forensic provenance:
 
 ```bash
-agensic provenance --tui
+agensic provenance
 ```
+
+---
+
+## 🧾 <a id="-agensic-provenance"></a>Agensic Provenance
+Agensic gives you a forensic timeline for every command that matters. It classifies what happened, records rich metadata and surfaces a clear audit trail so you can tell whether a command was manually typed, accepted from a suggestion or executed directly by an agent.
+
+### <a id="-features-provenance"></a>✨ Features
+
+### 🔍 Full-Screen Provenance Explorer
+<p>
+Need to answer, "What exactly ran here, and who triggered it?" Run <code>agensic provenance</code> to open the full-screen provenance viewer. Filter by label, agent, provider or time window, inspect the exact command trail and export the current view to JSON or CSV when you need a durable record for debugging, incident review or compliance.
+</p>
+
+
+
+### 🛡️ Cryptographic Command Provenance & Signing
+<p>
+Stop guessing whether a human or an AI broke the build. Agensic captures rich metadata for every command and uses local Ed25519 signing to tag agent-executed runs with an undeniable <code>AI_EXECUTED</code> label. You get a clear, auditable timeline separating human keystrokes from AI suggestions and automated executions.
+</p>
+
+
+
+### 🏷️ Structured Attribution Labels
+<p>
+Agensic does not reduce terminal history to a raw list of strings. Every tracked command is classified into a provenance label, giving you a consistent way to filter runs, investigate behavior and understand how a command entered your shell in the first place.
+</p>
+
+### <a id="-supported-labels"></a>🔖 Supported Labels
+
+Agensic currently supports the following provenance labels:
+
+- <code>AI_EXECUTED</code> for commands executed directly by an AI agent with signed proof
+- <code>HUMAN_TYPED</code> for commands manually typed by a human in the shell
+- <code>AI_SUGGESTED_HUMAN_RAN</code> for commands suggested by an external AI LLM call and then run by a human
+- <code>AG_SUGGESTED_HUMAN_RAN</code> for commands suggested by Agensic and then run by a human
+- <code>INVALID_PROOF</code> for commands that arrived with proof metadata that failed validation
+- <code>UNKNOWN</code> for commands where the available evidence is insufficient to assign a stronger attribution label
 
 ---
 
@@ -125,15 +165,6 @@ Need to audit last night's session, to understand what happened? Run <code>agens
 <p>
 Ever wonder, "What did my repo look like exactly before the agent made that destructive commit?" Time Travel lets you rewind your repository to the exact Git state captured at a specific session checkpoint. Agensic safely restores untracked and modified files into a brand new branch, ensuring you never accidentally destroy your live working tree while investigating.
 </p>
-
-
-
-### 🛡️ Cryptographic Command Provenance & Signing
-<p>
-Stop guessing whether a human or an AI broke the build. Agensic captures rich metadata for every command and uses local Ed25519 signing to tag agent-executed runs with an undeniable <code>AI_EXECUTED</code> label. You get a clear, auditable timeline separating human keystrokes from AI suggestions and automated executions.
-</p>
-
-
 
 ### 🗄️ Resilient Local-First State
 <p>

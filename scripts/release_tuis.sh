@@ -2,8 +2,8 @@
 set -euo pipefail
 
 ROOT_DIR="$(cd "$(dirname "$0")/.." && pwd)"
-CRATE_DIR="$ROOT_DIR/rust/provenance_tui"
-BINARY_NAME="agensic-provenance-tui"
+CRATE_DIR="$ROOT_DIR/rust/tuis"
+BINARY_NAME="agensic-tuis"
 VERSION="${1:-}"
 
 detect_target() {
@@ -83,11 +83,11 @@ if [[ -z "$VERSION" ]]; then
   VERSION="$(git -C "$ROOT_DIR" describe --tags --always --dirty 2>/dev/null || date +%Y%m%d%H%M%S)"
 fi
 
-OUT_DIR="$ROOT_DIR/dist/provenance_tui/$VERSION"
+OUT_DIR="$ROOT_DIR/dist/tuis/$VERSION"
 STAGE_DIR="$OUT_DIR/stage"
 ARTIFACT_NAME="${BINARY_NAME}-${PLATFORM_KEY}.tar.gz"
 ARTIFACT_PATH="$OUT_DIR/$ARTIFACT_NAME"
-MANIFEST_PATH="$OUT_DIR/provenance_tui_manifest.json"
+MANIFEST_PATH="$OUT_DIR/tuis_manifest.json"
 
 mkdir -p "$STAGE_DIR"
 

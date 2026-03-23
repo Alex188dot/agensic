@@ -56,7 +56,7 @@ class AppPaths:
     session_status_launcher_path: str
     session_stop_launcher_path: str
     ai_session_state_path: str
-    provenance_tui_bin: str
+    tuis_bin: str
     provenance_private_key_path: str
     provenance_public_key_path: str
     agent_registry_local_override_path: str
@@ -122,7 +122,7 @@ def get_app_paths() -> AppPaths:
         session_status_launcher_path=os.path.join(user_bin_dir, "agensic_session_status"),
         session_stop_launcher_path=os.path.join(user_bin_dir, "agensic_session_stop"),
         ai_session_state_path=os.path.join(state_dir, "ai_session.env"),
-        provenance_tui_bin=os.path.join(install_bin_dir, "agensic-provenance-tui"),
+        tuis_bin=os.path.join(install_bin_dir, "agensic-tuis"),
         provenance_private_key_path=os.path.join(config_dir, "provenance_ed25519.pem"),
         provenance_public_key_path=os.path.join(config_dir, "provenance_ed25519.pub.pem"),
         agent_registry_local_override_path=os.path.join(config_dir, "agent_registry.local.json"),

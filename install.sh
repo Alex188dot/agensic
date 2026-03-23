@@ -85,9 +85,9 @@ cp shell_client.py "$INSTALL_DIR/"
 mkdir -p "$INSTALL_DIR/shell"
 cp shell/agensic_shared.sh "$INSTALL_DIR/shell/"
 
-# 2b. Build the local provenance TUI sidecar from source when cargo is available.
-TUI_MANIFEST_PATH="$PWD/rust/provenance_tui/Cargo.toml"
-LOCAL_TUI_BIN="$PWD/rust/provenance_tui/target/release/agensic-provenance-tui"
+# 2b. Build the local TUI sidecar from source when cargo is available.
+TUI_MANIFEST_PATH="$PWD/rust/tuis/Cargo.toml"
+LOCAL_TUI_BIN="$PWD/rust/tuis/target/release/agensic-tuis"
 CARGO_BIN="${CARGO:-}"
 if [ -z "$CARGO_BIN" ] && command -v cargo >/dev/null 2>&1; then
     CARGO_BIN="$(command -v cargo)"
@@ -99,9 +99,9 @@ if [ -n "$CARGO_BIN" ]; then
     export PATH="$(dirname "$CARGO_BIN"):$PATH"
 fi
 if [ -f "$TUI_MANIFEST_PATH" ] && [ -n "$CARGO_BIN" ]; then
-    echo "🛠️ Building provenance TUI sidecar from source..."
+    echo "🛠️ Building TUI sidecar from source..."
     "$CARGO_BIN" build --manifest-path "$TUI_MANIFEST_PATH" --release || {
-        echo "❌ Failed to build provenance TUI sidecar from source."
+        echo "❌ Failed to build TUI sidecar from source."
         echo "   Fix the Rust build or install without local sidecar changes."
         exit 1
     }
@@ -110,12 +110,12 @@ elif [ -f "$TUI_MANIFEST_PATH" ]; then
 fi
 
 if [ -x "$LOCAL_TUI_BIN" ]; then
-    cp "$LOCAL_TUI_BIN" "$INSTALL_BIN_DIR/agensic-provenance-tui"
-    chmod +x "$INSTALL_BIN_DIR/agensic-provenance-tui"
-    echo "✅ Installed local provenance TUI sidecar to $INSTALL_BIN_DIR"
+    cp "$LOCAL_TUI_BIN" "$INSTALL_BIN_DIR/agensic-tuis"
+    chmod +x "$INSTALL_BIN_DIR/agensic-tuis"
+    echo "✅ Installed local TUI sidecar to $INSTALL_BIN_DIR"
 else
-    MANIFEST_URL="${AGENSIC_PROVENANCE_TUI_MANIFEST_URL:-https://github.com/Alex188dot/agensic/releases/latest/download/provenance_tui_manifest.json}"
-    python3 - "$MANIFEST_URL" "$INSTALL_BIN_DIR/agensic-provenance-tui" <<'PY' || echo "⚠️ Provenance TUI sidecar was not installed; CLI fallback will still work."
+    MANIFEST_URL="${AGENSIC_TUIS_MANIFEST_URL:-https://github.com/Alex188dot/agensic/releases/latest/download/tuis_manifest.json}"
+    python3 - "$MANIFEST_URL" "$INSTALL_BIN_DIR/agensic-tuis" <<'PY' || echo "⚠️ TUI sidecar was not installed; CLI fallback will still work."
 import hashlib
 import json
 import os
@@ -145,17 +145,17 @@ elif system == "linux" and machine in {"arm64", "aarch64"}:
 else:
     raise SystemExit(1)
 
-default_manifest = "https://github.com/Alex188dot/agensic/releases/latest/download/provenance_tui_manifest.json"
+default_manifest = "https://github.com/Alex188dot/agensic/releases/latest/download/tuis_manifest.json"
 published_platforms = {"darwin-arm64", "darwin-x64", "linux-arm64", "linux-x64", "windows-x64"}
 manifest_overridden = manifest_url != default_manifest
 
 if not manifest_overridden and platform_key not in published_platforms:
     print(
-        f"No published provenance TUI sidecar is available for {platform_key}; skipping download.",
+        f"No published TUI sidecar is available for {platform_key}; skipping download.",
         file=sys.stderr,
     )
     print(
-        "Set AGENSIC_PROVENANCE_TUI_MANIFEST_URL to use a custom external sidecar manifest.",
+        "Set AGENSIC_TUIS_MANIFEST_URL to use a custom external sidecar manifest.",
         file=sys.stderr,
     )
     raise SystemExit(0)
@@ -165,9 +165,9 @@ try:
         manifest = json.loads(response.read().decode("utf-8"))
 except urllib.error.HTTPError as exc:
     if int(getattr(exc, "code", 0) or 0) == 404:
-        print("No published provenance TUI sidecar manifest was found; skipping download.", file=sys.stderr)
+        print("No published TUI sidecar manifest was found; skipping download.", file=sys.stderr)
         print(
-            "Set AGENSIC_PROVENANCE_TUI_MANIFEST_URL to use a custom external sidecar manifest.",
+            "Set AGENSIC_TUIS_MANIFEST_URL to use a custom external sidecar manifest.",
             file=sys.stderr,
         )
         raise SystemExit(0)
@@ -178,7 +178,7 @@ except Exception:
 entry = ((manifest or {}).get("platforms", {}) or {}).get(platform_key, {})
 if not isinstance(entry, dict) or not entry.get("url"):
     print(
-        f"Manifest does not include a provenance TUI sidecar for {platform_key}; skipping download.",
+        f"Manifest does not include a TUI sidecar for {platform_key}; skipping download.",
         file=sys.stderr,
     )
     raise SystemExit(0)
@@ -186,11 +186,11 @@ if not isinstance(entry, dict) or not entry.get("url"):
 artifact_url = str(entry.get("url", "") or "").strip()
 artifact_sha = str(entry.get("artifact_sha256", "") or "").strip().lower()
 binary_sha = str(entry.get("binary_sha256", "") or "").strip().lower()
-binary_name = str(entry.get("binary", "agensic-provenance-tui") or "agensic-provenance-tui")
+binary_name = str(entry.get("binary", "agensic-tuis") or "agensic-tuis")
 
 os.makedirs(os.path.dirname(dest_bin), exist_ok=True)
 with tempfile.TemporaryDirectory(prefix="agensic-tui-install-") as tmp:
-    artifact_path = os.path.join(tmp, "provenance_tui.tar.gz")
+    artifact_path = os.path.join(tmp, "tuis.tar.gz")
     try:
         with urllib.request.urlopen(artifact_url, timeout=30) as response, open(artifact_path, "wb") as out:
             shutil.copyfileobj(response, out)
@@ -226,7 +226,7 @@ if binary_sha:
         digest = hashlib.sha256(f.read()).hexdigest().lower()
     if digest != binary_sha:
         raise SystemExit(1)
-print(f"✅ Downloaded provenance TUI sidecar to {dest_bin}")
+print(f"✅ Downloaded TUI sidecar to {dest_bin}")
 PY
 fi
 

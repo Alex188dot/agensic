@@ -165,7 +165,7 @@ STATE_SQLITE_PATH = APP_PATHS.state_sqlite_path
 EVENTS_DIR = APP_PATHS.events_dir
 SNAPSHOTS_DIR = APP_PATHS.snapshots_dir
 BIN_DIR = APP_PATHS.install_bin_dir
-PROVENANCE_TUI_BIN = APP_PATHS.provenance_tui_bin
+TUIS_BIN = APP_PATHS.tuis_bin
 SERVER_LOG_FILE = APP_PATHS.server_log_file
 PLUGIN_LOG_FILE = APP_PATHS.plugin_log_file
 MOUSE_REPORTING_RESET_SEQ = "\x1b[?1000l\x1b[?1002l\x1b[?1003l\x1b[?1006l\x1b[?1015l"
@@ -173,10 +173,10 @@ CURSOR_SAVE_SEQ = "\x1b7"
 CURSOR_RESTORE_SEQ = "\x1b8"
 ALT_SCREEN_ENTER_SEQ = "\x1b[?1049h"
 ALT_SCREEN_EXIT_SEQ = "\x1b[?1049l"
-DEFAULT_TUI_MANIFEST_URL = (
-    "https://github.com/Alex188dot/agensic/releases/latest/download/provenance_tui_manifest.json"
+DEFAULT_TUIS_MANIFEST_URL = (
+    "https://github.com/Alex188dot/agensic/releases/latest/download/tuis_manifest.json"
 )
-PUBLISHED_TUI_PLATFORMS = {"darwin-arm64"}
+PUBLISHED_TUIS_PLATFORMS = {"darwin-arm64"}
 DEFAULT_SIGNING_AGENT = "unknown"
 DEFAULT_SIGNING_MODEL = "unknown-model"
 MAX_COMMAND_DURATION_MS = 86_400_000
@@ -689,36 +689,36 @@ def _platform_rust_target() -> str:
     return ""
 
 
-def _local_provenance_tui_candidates() -> list[str]:
-    explicit = str(os.environ.get("AGENSIC_PROVENANCE_TUI_LOCAL_BIN", "") or "").strip()
+def _local_tuis_candidates() -> list[str]:
+    explicit = str(os.environ.get("AGENSIC_TUIS_LOCAL_BIN", "") or "").strip()
     cwd = os.getcwd()
     target = _platform_rust_target()
     candidates = [
         explicit,
-        os.path.join(cwd, "rust", "provenance_tui", "target", "release", "agensic-provenance-tui"),
+        os.path.join(cwd, "rust", "tuis", "target", "release", "agensic-tuis"),
         (
             os.path.join(
                 cwd,
                 "rust",
-                "provenance_tui",
+                "tuis",
                 "target",
                 target,
                 "release",
-                "agensic-provenance-tui",
+                "agensic-tuis",
             )
             if target
             else ""
         ),
-        os.path.join(PROJECT_ROOT, "rust", "provenance_tui", "target", "release", "agensic-provenance-tui"),
+        os.path.join(PROJECT_ROOT, "rust", "tuis", "target", "release", "agensic-tuis"),
         (
             os.path.join(
                 PROJECT_ROOT,
                 "rust",
-                "provenance_tui",
+                "tuis",
                 "target",
                 target,
                 "release",
-                "agensic-provenance-tui",
+                "agensic-tuis",
             )
             if target
             else ""
@@ -735,16 +735,16 @@ def _local_provenance_tui_candidates() -> list[str]:
     return out
 
 
-def _resolve_local_provenance_tui_binary() -> str:
-    for candidate in _local_provenance_tui_candidates():
+def _resolve_local_tuis_binary() -> str:
+    for candidate in _local_tuis_candidates():
         if os.path.isfile(candidate) and os.access(candidate, os.X_OK):
             return candidate
     return ""
 
 
-def _resolve_installed_provenance_tui_binary() -> str:
-    if os.path.isfile(PROVENANCE_TUI_BIN) and os.access(PROVENANCE_TUI_BIN, os.X_OK):
-        return PROVENANCE_TUI_BIN
+def _resolve_installed_tuis_binary() -> str:
+    if os.path.isfile(TUIS_BIN) and os.access(TUIS_BIN, os.X_OK):
+        return TUIS_BIN
     return ""
 
 
@@ -774,9 +774,9 @@ def _binary_supports_agents_mode(binary_path: str) -> bool:
     return _binary_supports_tui_subcommand(binary_path, "agents")
 
 
-def _fetch_provenance_tui_manifest() -> dict:
+def _fetch_tuis_manifest() -> dict:
     manifest_url = str(
-        os.environ.get("AGENSIC_PROVENANCE_TUI_MANIFEST_URL", DEFAULT_TUI_MANIFEST_URL) or ""
+        os.environ.get("AGENSIC_TUIS_MANIFEST_URL", DEFAULT_TUIS_MANIFEST_URL) or ""
     ).strip()
     if not manifest_url:
         raise RuntimeError("missing_manifest_url")
@@ -810,7 +810,7 @@ def _default_export_path(export_format: str) -> str:
     return os.path.join(_default_export_dir(), filename)
 
 
-def _resolve_provenance_tui_platform_entry(manifest: dict) -> dict:
+def _resolve_tuis_platform_entry(manifest: dict) -> dict:
     platforms = manifest.get("platforms", {})
     if not isinstance(platforms, dict):
         raise RuntimeError("manifest_missing_platforms")
@@ -821,21 +821,21 @@ def _resolve_provenance_tui_platform_entry(manifest: dict) -> dict:
     return entry
 
 
-def _install_provenance_tui_binary(entry: dict) -> str:
+def _install_tuis_binary(entry: dict) -> str:
     artifact_url = str(entry.get("url", "") or "").strip()
     artifact_sha = str(entry.get("artifact_sha256", "") or "").strip().lower()
     binary_sha = str(entry.get("binary_sha256", "") or "").strip().lower()
-    binary_name = str(entry.get("binary", "agensic-provenance-tui") or "agensic-provenance-tui").strip()
+    binary_name = str(entry.get("binary", "agensic-tuis") or "agensic-tuis").strip()
     if not artifact_url:
         raise RuntimeError("manifest_missing_artifact_url")
 
     ensure_private_dir(BIN_DIR)
-    if os.path.exists(PROVENANCE_TUI_BIN) and binary_sha:
-        if _file_sha256(PROVENANCE_TUI_BIN).lower() == binary_sha:
-            return PROVENANCE_TUI_BIN
+    if os.path.exists(TUIS_BIN) and binary_sha:
+        if _file_sha256(TUIS_BIN).lower() == binary_sha:
+            return TUIS_BIN
 
     with tempfile.TemporaryDirectory(prefix="agensic-tui-") as tmp:
-        artifact_path = os.path.join(tmp, "provenance_tui.tar.gz")
+        artifact_path = os.path.join(tmp, "tuis.tar.gz")
         with requests.get(artifact_url, timeout=30, stream=True) as response:
             response.raise_for_status()
             with open(artifact_path, "wb") as f:
@@ -863,48 +863,48 @@ def _install_provenance_tui_binary(entry: dict) -> str:
             source = tar.extractfile(target)
             if source is None:
                 raise RuntimeError("artifact_extract_failed")
-            with source as src, open(PROVENANCE_TUI_BIN, "wb") as out:
+            with source as src, open(TUIS_BIN, "wb") as out:
                 shutil.copyfileobj(src, out)
 
-    enforce_private_file(PROVENANCE_TUI_BIN, executable=True)
+    enforce_private_file(TUIS_BIN, executable=True)
     if binary_sha:
-        got_bin = _file_sha256(PROVENANCE_TUI_BIN).lower()
+        got_bin = _file_sha256(TUIS_BIN).lower()
         if got_bin != binary_sha:
             raise RuntimeError("binary_checksum_mismatch")
-    return PROVENANCE_TUI_BIN
+    return TUIS_BIN
 
 
-def _ensure_provenance_tui_binary() -> str:
-    local_bin = _resolve_local_provenance_tui_binary()
+def _ensure_tuis_binary() -> str:
+    local_bin = _resolve_local_tuis_binary()
     if local_bin:
         return local_bin
-    installed_bin = _resolve_installed_provenance_tui_binary()
+    installed_bin = _resolve_installed_tuis_binary()
     if installed_bin:
         return installed_bin
     platform_tag = _platform_tag()
-    manifest_override = str(os.environ.get("AGENSIC_PROVENANCE_TUI_MANIFEST_URL", "") or "").strip()
-    if not manifest_override and platform_tag not in PUBLISHED_TUI_PLATFORMS:
+    manifest_override = str(os.environ.get("AGENSIC_TUIS_MANIFEST_URL", "") or "").strip()
+    if not manifest_override and platform_tag not in PUBLISHED_TUIS_PLATFORMS:
         raise RuntimeError(
-            "provenance_tui_unavailable:"
+            "tuis_unavailable:"
             f" no_published_sidecar_for_platform={platform_tag}; "
             "CLI fallback still works; "
-            "set AGENSIC_PROVENANCE_TUI_MANIFEST_URL to use a custom external manifest, "
-            "or build locally with cargo build --manifest-path rust/provenance_tui/Cargo.toml --release"
+            "set AGENSIC_TUIS_MANIFEST_URL to use a custom external manifest, "
+            "or build locally with cargo build --manifest-path rust/tuis/Cargo.toml --release"
         )
     try:
-        manifest = _fetch_provenance_tui_manifest()
-        entry = _resolve_provenance_tui_platform_entry(manifest)
-        return _install_provenance_tui_binary(entry)
+        manifest = _fetch_tuis_manifest()
+        entry = _resolve_tuis_platform_entry(manifest)
+        return _install_tuis_binary(entry)
     except Exception as manifest_exc:
-        local_bin = _resolve_local_provenance_tui_binary()
+        local_bin = _resolve_local_tuis_binary()
         if local_bin:
             return local_bin
         raise RuntimeError(
-            "provenance_tui_unavailable:"
+            "tuis_unavailable:"
             f"{manifest_exc}; "
             "CLI fallback still works; "
-            "set AGENSIC_PROVENANCE_TUI_MANIFEST_URL to use a custom external manifest, "
-            "or build locally with cargo build --manifest-path rust/provenance_tui/Cargo.toml --release"
+            "set AGENSIC_TUIS_MANIFEST_URL to use a custom external manifest, "
+            "or build locally with cargo build --manifest-path rust/tuis/Cargo.toml --release"
         ) from manifest_exc
 
 
@@ -998,7 +998,7 @@ def _fallback_export_provenance(
     _export_provenance_rows_to_file(payload, export_format=export_format, out_path=out_path)
 
 
-def _run_provenance_tui(
+def _run_tuis(
     limit: int,
     label: str,
     contains: str,
@@ -1010,7 +1010,7 @@ def _run_provenance_tui(
     export_format: str,
     out_path: str,
 ) -> bool:
-    binary_path = _ensure_provenance_tui_binary()
+    binary_path = _ensure_tuis_binary()
     token = ""
     try:
         token = _DAEMON_AUTH_CACHE.get_token()
@@ -1053,11 +1053,11 @@ def _run_provenance_tui(
 
 
 def _run_sessions_tui(session_id: str = "", *, replay: bool = False) -> bool:
-    binary_path = _ensure_provenance_tui_binary()
+    binary_path = _ensure_tuis_binary()
     if not _binary_supports_sessions_mode(binary_path):
         raise RuntimeError(
             "installed_sessions_tui_is_outdated; "
-            "rebuild the local sidecar or reinstall Agensic so agensic-provenance-tui supports the 'sessions' mode"
+            "rebuild the local sidecar or reinstall Agensic so agensic-tuis supports the 'sessions' mode"
         )
     token = ""
     try:
@@ -1087,11 +1087,11 @@ def _run_sessions_tui(session_id: str = "", *, replay: bool = False) -> bool:
 
 
 def _run_agents_tui(agents: list[dict[str, Any]]) -> bool:
-    binary_path = _ensure_provenance_tui_binary()
+    binary_path = _ensure_tuis_binary()
     if not _binary_supports_agents_mode(binary_path):
         raise RuntimeError(
             "installed_agents_tui_is_outdated; "
-            "rebuild the local sidecar or reinstall Agensic so agensic-provenance-tui supports the 'agents' mode"
+            "rebuild the local sidecar or reinstall Agensic so agensic-tuis supports the 'agents' mode"
         )
 
     payload_path = ""
@@ -3560,8 +3560,7 @@ def provenance(
     agent: str = typer.Option("", "--agent", help="Filter by inferred agent"),
     agent_name: str = typer.Option("", "--agent-name", help="Filter by optional agent display name"),
     provider: str = typer.Option("", "--provider", help="Filter by provider"),
-    tui: bool = typer.Option(False, "--tui", help="Open full-screen provenance TUI"),
-    export: str = typer.Option("", "--export", help="When used with --tui, export current view to json or csv"),
+    export: str = typer.Option("", "--export", help="Export the current provenance view to json or csv"),
     out: str = typer.Option("", "--out", help="Output file path for --export"),
     as_json: bool = typer.Option(False, "--json", help="Print raw JSON payload"),
 ):
@@ -3574,9 +3573,9 @@ def provenance(
     if export_format and not out_path:
         out_path = _default_export_path(export_format)
 
-    if tui:
+    if not as_json:
         try:
-            ok = _run_provenance_tui(
+            ok = _run_tuis(
                 limit=limit,
                 label=label,
                 contains=contains,

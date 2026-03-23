@@ -16,7 +16,7 @@ const DEFAULT_CHECKPOINT_INTERVAL_EVENTS: i64 = 48;
 const DEFAULT_RESIZE_SETTLE_MS: u64 = 140;
 
 #[derive(Debug, Parser, Clone)]
-#[command(name = "agensic-provenance-tui checkpoints")]
+#[command(name = "agensic-tuis checkpoints")]
 pub struct CheckpointsArgs {
     #[arg(long, default_value = "")]
     out: String,

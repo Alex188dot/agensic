@@ -31,7 +31,7 @@ class CliAgentsTuiTests(unittest.TestCase):
             }
         ]
 
-        with patch("agensic.cli.app._ensure_provenance_tui_binary", return_value="/tmp/agensic-provenance-tui"), patch(
+        with patch("agensic.cli.app._ensure_tuis_binary", return_value="/tmp/agensic-tuis"), patch(
             "agensic.cli.app._binary_supports_agents_mode", return_value=True
         ), patch("agensic.cli.app._reset_terminal_mouse_reporting"), patch(
             "agensic.cli.app.subprocess.run", side_effect=_fake_run
@@ -39,7 +39,7 @@ class CliAgentsTuiTests(unittest.TestCase):
             ok = app_module._run_agents_tui(agents)
 
         self.assertTrue(ok)
-        self.assertEqual(captured["cmd"][:3], ["/tmp/agensic-provenance-tui", "agents", "--input"])
+        self.assertEqual(captured["cmd"][:3], ["/tmp/agensic-tuis", "agents", "--input"])
         self.assertEqual(captured["payload"], {"agents": agents})
         self.assertTrue(run_cmd.called)
 

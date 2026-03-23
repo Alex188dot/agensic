@@ -1,10 +1,10 @@
-name: Release Provenance TUI
+name: Release TUIs
 
 on:
   push:
     tags:
       - "v*"
-      - "provenance-tui-*"
+      - "tuis-*"
   workflow_dispatch:
 
 jobs:
@@ -55,15 +55,15 @@ jobs:
           BUILD_CMD: ${{ matrix.build_cmd }}
           VERSION: ${{ github.ref_name }}
         run: |
-          ./scripts/release_provenance_tui.sh "$VERSION"
+          ./scripts/release_tuis.sh "$VERSION"
 
           mkdir -p ci-out
-          cp "dist/provenance_tui/${VERSION}/"*.tar.gz ci-out/
-          cp "dist/provenance_tui/${VERSION}/provenance_tui_manifest.json" "ci-out/provenance_tui_manifest.${PLATFORM_KEY}.json"
+          cp "dist/tuis/${VERSION}/"*.tar.gz ci-out/
+          cp "dist/tuis/${VERSION}/tuis_manifest.json" "ci-out/tuis_manifest.${PLATFORM_KEY}.json"
 
       - uses: actions/upload-artifact@v4
         with:
-          name: provenance-tui-${{ matrix.platform }}
+          name: tuis-${{ matrix.platform }}
           path: ci-out/*
 
   assemble:
@@ -79,7 +79,7 @@ jobs:
       - uses: actions/download-artifact@v4
         with:
           path: downloaded
-          pattern: provenance-tui-*
+          pattern: tuis-*
           merge-multiple: true
 
       - name: Assemble Combined Manifest
@@ -97,7 +97,7 @@ jobs:
           import time
 
           platforms = {}
-          for manifest_path in sorted(glob.glob("downloaded/provenance_tui_manifest.*.json")):
+          for manifest_path in sorted(glob.glob("downloaded/tuis_manifest.*.json")):
               with open(manifest_path, "r", encoding="utf-8") as f:
                   payload = json.load(f)
               manifest_platforms = payload.get("platforms", {})
@@ -110,20 +110,20 @@ jobs:
               shutil.copyfile(artifact_path, os.path.join("release-assets", os.path.basename(artifact_path)))
 
           manifest = {
-              "name": "agensic-provenance-tui",
+              "name": "agensic-tuis",
               "version": os.environ["VERSION"],
               "min_cli_version": "0.1.0",
               "generated_at": int(time.time()),
               "platforms": dict(sorted(platforms.items())),
           }
-          with open("release-assets/provenance_tui_manifest.json", "w", encoding="utf-8") as f:
+          with open("release-assets/tuis_manifest.json", "w", encoding="utf-8") as f:
               json.dump(manifest, f, ensure_ascii=True, indent=2)
               f.write("\n")
           PY
 
       - uses: actions/upload-artifact@v4
         with:
-          name: provenance-tui-release-assets
+          name: tuis-release-assets
           path: release-assets/*
 
   publish:
@@ -137,7 +137,7 @@ jobs:
     steps:
       - uses: actions/download-artifact@v4
         with:
-          name: provenance-tui-release-assets
+          name: tuis-release-assets
           path: release-assets
 
       - name: Publish Release Assets

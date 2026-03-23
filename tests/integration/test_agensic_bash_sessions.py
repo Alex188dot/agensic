@@ -179,7 +179,7 @@ EOF
     def test_preexec_forces_provenance_launcher_to_human_even_with_pending_ai_proof(self):
         result = self._run_bash(
             """
-            _agensic_bash_last_history_entry() { printf '%s\n' 'agensic provenance --tui'; }
+            _agensic_bash_last_history_entry() { printf '%s\n' 'agensic provenance'; }
             AGENSIC_BASH_AT_PROMPT=1
             AGENSIC_NEXT_PROOF_LABEL="AI_EXECUTED"
             AGENSIC_NEXT_PROOF_AGENT="codex"

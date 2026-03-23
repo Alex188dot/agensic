@@ -566,38 +566,38 @@ def _platform_rust_target() -> str:
     return ""
 
 
-def _local_provenance_tui_candidates() -> list[str]:
-    explicit = str(os.environ.get("AGENSIC_PROVENANCE_TUI_LOCAL_BIN", "") or "").strip()
+def _local_tuis_candidates() -> list[str]:
+    explicit = str(os.environ.get("AGENSIC_TUIS_LOCAL_BIN", "") or "").strip()
     target = _platform_rust_target()
     project_root = str(Path(__file__).resolve().parents[2])
     cwd = os.getcwd()
     candidates = [
         explicit,
-        APP_PATHS.provenance_tui_bin,
-        os.path.join(cwd, "rust", "provenance_tui", "target", "release", "agensic-provenance-tui"),
+        APP_PATHS.tuis_bin,
+        os.path.join(cwd, "rust", "tuis", "target", "release", "agensic-tuis"),
         (
             os.path.join(
                 cwd,
                 "rust",
-                "provenance_tui",
+                "tuis",
                 "target",
                 target,
                 "release",
-                "agensic-provenance-tui",
+                "agensic-tuis",
             )
             if target
             else ""
         ),
-        os.path.join(project_root, "rust", "provenance_tui", "target", "release", "agensic-provenance-tui"),
+        os.path.join(project_root, "rust", "tuis", "target", "release", "agensic-tuis"),
         (
             os.path.join(
                 project_root,
                 "rust",
-                "provenance_tui",
+                "tuis",
                 "target",
                 target,
                 "release",
-                "agensic-provenance-tui",
+                "agensic-tuis",
             )
             if target
             else ""
@@ -614,8 +614,8 @@ def _local_provenance_tui_candidates() -> list[str]:
     return out
 
 
-def _resolve_provenance_tui_binary_for_checkpoints() -> str:
-    for candidate in _local_provenance_tui_candidates():
+def _resolve_tuis_binary_for_checkpoints() -> str:
+    for candidate in _local_tuis_candidates():
         if os.path.isfile(candidate) and os.access(candidate, os.X_OK):
             return candidate
     return ""
@@ -2585,7 +2585,7 @@ def _record_startup_terminal_output(
 
 
 def _start_checkpoint_recorder(checkpoint_path: str) -> subprocess.Popen[str] | None:
-    binary = _resolve_provenance_tui_binary_for_checkpoints()
+    binary = _resolve_tuis_binary_for_checkpoints()
     if not binary or not checkpoint_path.strip():
         return None
     try:
