@@ -6770,6 +6770,156 @@ mod tests {
     }
 
     #[test]
+    fn changes_pane_commit_rows_fall_back_to_same_head_checkpoint_stats_without_older_base() {
+        let suffix = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|duration| duration.as_nanos())
+            .unwrap_or(0);
+        let repo_root =
+            std::env::temp_dir().join(format!("sessions-commit-fallback-base-{suffix}"));
+        fs::create_dir_all(&repo_root).expect("create repo root");
+
+        Command::new("git")
+            .args(["init"])
+            .current_dir(&repo_root)
+            .output()
+            .expect("git init");
+        Command::new("git")
+            .args(["config", "user.email", "test@example.com"])
+            .current_dir(&repo_root)
+            .output()
+            .expect("git config email");
+        Command::new("git")
+            .args(["config", "user.name", "Test User"])
+            .current_dir(&repo_root)
+            .output()
+            .expect("git config name");
+
+        fs::write(repo_root.join("base.txt"), "base\n").expect("write base");
+        Command::new("git")
+            .args(["add", "base.txt"])
+            .current_dir(&repo_root)
+            .output()
+            .expect("git add base");
+        Command::new("git")
+            .args(["commit", "-m", "base"])
+            .current_dir(&repo_root)
+            .output()
+            .expect("git commit base");
+        let head_start = String::from_utf8(
+            Command::new("git")
+                .args(["rev-parse", "HEAD"])
+                .current_dir(&repo_root)
+                .output()
+                .expect("git rev-parse base")
+                .stdout,
+        )
+        .expect("utf8 start head")
+        .trim()
+        .to_string();
+
+        fs::write(
+            repo_root.join("modifications.md"),
+            "line 1\nline 2\nline 3\n",
+        )
+        .expect("write commit contents");
+        Command::new("git")
+            .args(["add", "modifications.md"])
+            .current_dir(&repo_root)
+            .output()
+            .expect("git add commit contents");
+        Command::new("git")
+            .args(["commit", "-m", "commit 1"])
+            .current_dir(&repo_root)
+            .output()
+            .expect("git commit commit contents");
+        let commit_head = String::from_utf8(
+            Command::new("git")
+                .args(["rev-parse", "HEAD"])
+                .current_dir(&repo_root)
+                .output()
+                .expect("git rev-parse commit")
+                .stdout,
+        )
+        .expect("utf8 commit head")
+        .trim()
+        .to_string();
+
+        let mut detail = DetailState::new(SessionSummary::default(), Vec::new(), false);
+        detail.session.repo_root = repo_root.to_string_lossy().into_owned();
+        detail.session.head_start = head_start;
+        detail.events = vec![SessionEvent {
+            session_id: "sess-1".to_string(),
+            seq: 5,
+            ts_wall: 0.0,
+            ts_monotonic_ms: 0,
+            event_type: "git.commit.created".to_string(),
+            payload: json!({"sha": commit_head.clone()}),
+        }];
+        detail.timeline_entries = vec![TimelineEntry {
+            event_index: 0,
+            event_start_index: 0,
+            event_end_index: 0,
+            seq_start: 5,
+            seq_end: 5,
+            ts_wall: 0.0,
+            event_type: "git.commit.created".to_string(),
+            summary: "commit 1".to_string(),
+            copy_command: None,
+        }];
+        detail.timeline_index = 0;
+        detail.git_checkpoint_records = vec![GitCheckpointRecord {
+            checkpoint_id: "chkpt-0001".to_string(),
+            seq: 4,
+            timestamp: 0,
+            reason: String::new(),
+            repo_root: repo_root.to_string_lossy().into_owned(),
+            branch: String::new(),
+            head: commit_head,
+            comparison_base_head: String::new(),
+            status_porcelain: String::new(),
+            status_fingerprint: String::new(),
+            tracked_patch_sha256: String::new(),
+            committed_diff_stat: "modifications.md | 3 +++".to_string(),
+            committed_files: vec!["modifications.md".to_string()],
+            worktree_diff_stat: String::new(),
+            changed_files: Vec::new(),
+            untracked_paths: Vec::new(),
+            fingerprint: String::new(),
+            delta_diff_stat: "modifications.md | 3 +++".to_string(),
+            delta_files: vec!["modifications.md".to_string()],
+            delta_file_markers: [("modifications.md".to_string(), "+".to_string())]
+                .into_iter()
+                .collect(),
+            cumulative_diff_stat: "modifications.md | 3 +++".to_string(),
+            cumulative_files: vec!["modifications.md".to_string()],
+            cumulative_file_markers: [("modifications.md".to_string(), "+".to_string())]
+                .into_iter()
+                .collect(),
+        }];
+
+        let rendered = build_changes_lines(&detail)
+            .iter()
+            .map(ToString::to_string)
+            .collect::<Vec<_>>();
+
+        assert!(rendered
+            .iter()
+            .any(|line| line.contains("Changes made in this checkpoint")));
+        assert!(rendered
+            .iter()
+            .any(|line| line.contains("+ modifications.md | 3 +++")));
+        assert!(rendered
+            .iter()
+            .any(|line| line.contains("Changes made since session start")));
+        assert!(rendered
+            .iter()
+            .any(|line| line.contains("+ modifications.md | 3 +++")));
+
+        let _ = fs::remove_dir_all(repo_root);
+    }
+
+    #[test]
     fn changes_pane_scrolls_without_affecting_timeline_selection() {
         let mut session = SessionSummary::default();
         session.changes = json!({
