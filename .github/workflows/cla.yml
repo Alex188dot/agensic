@@ -6,12 +6,22 @@ on:
   pull_request_target:
     types: [opened, synchronize]
 
+permissions:
+  actions: write
+  contents: write
+  pull-requests: write
+  statuses: write
+
 jobs:
   cla:
     runs-on: ubuntu-latest
     steps:
-      - uses: cla-assistant/github-action@v2
+      - name: CLA Assistant
+        if: (github.event.comment.body == 'recheck' || github.event.comment.body == 'I have read the CLA Document and I hereby sign the CLA') || github.event_name == 'pull_request_target'
+        uses: contributor-assistant/github-action@v2.6.1
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         with:
           path-to-signatures: 'cla-signatures.json'
-          path-to-document: 'CONTRIBUTING.md'
+          path-to-document: '${{ github.server_url }}/${{ github.repository }}/blob/main/CONTRIBUTING.md'
           branch: 'main'
