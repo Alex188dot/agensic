@@ -402,6 +402,7 @@ struct DetailState {
     terminal_replay_frames: Arc<Vec<TerminalReplayFrame>>,
     terminal_replay_cache: HashMap<TerminalReplayCacheKey, Arc<Vec<TerminalReplayFrame>>>,
     git_change_view_cache: RefCell<HashMap<GitRangeChangeViewCacheKey, GitRangeChangeView>>,
+    git_path_exists_cache: RefCell<HashMap<GitPathExistenceCacheKey, bool>>,
     terminal_cache_key: Option<TerminalReplayCacheKey>,
     pending_replay_cache_key: Option<TerminalReplayCacheKey>,
     replay_cache_rx: Option<Receiver<(TerminalReplayCacheKey, Arc<Vec<TerminalReplayFrame>>)>>,
@@ -479,6 +480,7 @@ impl DetailState {
             terminal_replay_frames: Arc::new(Vec::new()),
             terminal_replay_cache: HashMap::new(),
             git_change_view_cache: RefCell::new(HashMap::new()),
+            git_path_exists_cache: RefCell::new(HashMap::new()),
             terminal_cache_key: None,
             pending_replay_cache_key: None,
             replay_cache_rx: None,
@@ -2736,7 +2738,7 @@ fn build_changes_lines(detail: &DetailState) -> Vec<Line<'static>> {
             } else {
                 &record.changed_files
             };
-            let files = preferred_files
+            let files: Vec<String> = preferred_files
                 .iter()
                 .map(|item| sanitize_inline_text(item))
                 .filter(|item| !item.is_empty())
@@ -2777,16 +2779,17 @@ fn build_changes_lines(detail: &DetailState) -> Vec<Line<'static>> {
             } else {
                 &record.changed_files
             };
-            let files = preferred_files
+            let files: Vec<String> = preferred_files
                 .iter()
                 .map(|item| sanitize_inline_text(item))
                 .filter(|item| !item.is_empty())
                 .collect();
-            (
-                preferred_stats,
-                files,
-                record.cumulative_file_markers.clone(),
-            )
+            let normalized_markers = normalize_cumulative_markers_against_session_start(
+                detail,
+                &files,
+                &record.cumulative_file_markers,
+            );
+            (preferred_stats, files, normalized_markers)
         } else {
             (
                 session_preferred_stats.clone(),
@@ -2893,6 +2896,13 @@ struct GitRangeChangeViewCacheKey {
     end_head: String,
 }
 
+#[derive(Clone, Debug, PartialEq, Eq, Hash)]
+struct GitPathExistenceCacheKey {
+    repo_root: String,
+    head: String,
+    path: String,
+}
+
 fn build_git_range_change_view_cached(
     detail: &DetailState,
     start_head: &str,
@@ -2919,6 +2929,73 @@ fn build_git_range_change_view_cached(
         .borrow_mut()
         .insert(key, view.clone());
     view
+}
+
+fn normalize_cumulative_markers_against_session_start(
+    detail: &DetailState,
+    files: &[String],
+    markers: &BTreeMap<String, String>,
+) -> BTreeMap<String, String> {
+    let clean_repo_root = detail.session.repo_root.trim();
+    let clean_head_start = detail.session.head_start.trim();
+    if clean_repo_root.is_empty() || clean_head_start.is_empty() {
+        return markers
+            .iter()
+            .filter_map(|(path, marker)| {
+                let clean_path = sanitize_inline_text(path);
+                let clean_marker = sanitize_inline_text(marker);
+                if clean_path.is_empty() || clean_marker.is_empty() {
+                    None
+                } else {
+                    Some((clean_path, clean_marker))
+                }
+            })
+            .collect();
+    }
+    let mut normalized = BTreeMap::new();
+    for file in files {
+        let existing_marker = markers
+            .get(file)
+            .map(|value| sanitize_inline_text(value))
+            .filter(|value| !value.is_empty())
+            .unwrap_or_else(|| "•".to_string());
+        let normalized_marker = if existing_marker == "-" {
+            "-".to_string()
+        } else if git_path_exists_at_head_cached(detail, &detail.session.head_start, file) {
+            "~".to_string()
+        } else {
+            "+".to_string()
+        };
+        normalized.insert(file.clone(), normalized_marker);
+    }
+    normalized
+}
+
+fn git_path_exists_at_head_cached(detail: &DetailState, head: &str, path: &str) -> bool {
+    let key = GitPathExistenceCacheKey {
+        repo_root: detail.session.repo_root.trim().to_string(),
+        head: head.trim().to_string(),
+        path: path.trim().to_string(),
+    };
+    if key.repo_root.is_empty() || key.head.is_empty() || key.path.is_empty() {
+        return false;
+    }
+    if let Some(cached) = detail.git_path_exists_cache.borrow().get(&key).copied() {
+        return cached;
+    }
+    let spec = format!("{}:{}", key.head, key.path);
+    let exists = Command::new("git")
+        .arg("-C")
+        .arg(&key.repo_root)
+        .args(["cat-file", "-e", &spec])
+        .output()
+        .map(|output| output.status.success())
+        .unwrap_or(false);
+    detail
+        .git_path_exists_cache
+        .borrow_mut()
+        .insert(key, exists);
+    exists
 }
 
 fn preferred_base_checkpoint_for_synthetic_view<'a>(
@@ -4416,7 +4493,6 @@ fn common_prefix_len(left: &str, right: &str) -> usize {
         .count()
 }
 
-
 fn timeline_viewport(detail: &DetailState, height: u16) -> TimelineViewport {
     let total = detail.timeline_entries.len();
     let selected = detail.timeline_index.min(total.saturating_sub(1));
@@ -5160,12 +5236,12 @@ mod tests {
         export_conversation_jsonl, export_timeline_rows, format_duration, format_header_outcome,
         format_outcome, format_timeline_ordinal, handle_key, load_transcript_chunks,
         repo_display_name, sanitize_inline_text, sanitize_terminal_output,
-        session_detail_layout_in_area, timeline_category_color, timeline_kind_style, App,
+        session_detail_layout_in_area, terminal_replay_end_padding, terminal_replay_max_scroll_x,
+        terminal_replay_scroll, timeline_category_color, timeline_kind_style, App,
         DeleteModalState, DetailState, FocusPane, GitCheckpointRecord, ReplayMode, SessionEvent,
         SessionFilters, SessionSummary, SessionsArgs, TerminalReplayFrame, TimeTravelModalState,
         TimeTravelPreviewResponse, TimelineCategory, TimelineEntry, TranscriptChunk,
-        TEXT_REPLAY_TICK_MS, terminal_replay_end_padding, terminal_replay_max_scroll_x,
-        terminal_replay_scroll,
+        TEXT_REPLAY_TICK_MS,
     };
     use crate::sessions_render::{
         diff_stat_line, rendered_text_height, replay_max_scroll, strip_inline_progress_noise,
@@ -5812,6 +5888,7 @@ mod tests {
             }]),
             terminal_replay_cache: HashMap::new(),
             git_change_view_cache: RefCell::new(HashMap::new()),
+            git_path_exists_cache: RefCell::new(HashMap::new()),
             terminal_cache_key: None,
             pending_replay_cache_key: None,
             replay_cache_rx: None,
@@ -5958,6 +6035,118 @@ mod tests {
         assert!(rendered
             .iter()
             .any(|line| line.contains("~ modifications.md | 6 ++++++")));
+    }
+
+    #[test]
+    fn changes_pane_cumulative_markers_use_session_start_existence() {
+        let suffix = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|duration| duration.as_nanos())
+            .unwrap_or(0);
+        let repo_root = std::env::temp_dir().join(format!("sessions-cumulative-marker-{suffix}"));
+        fs::create_dir_all(&repo_root).expect("create repo root");
+
+        Command::new("git")
+            .args(["init"])
+            .current_dir(&repo_root)
+            .output()
+            .expect("git init");
+        Command::new("git")
+            .args(["config", "user.email", "test@example.com"])
+            .current_dir(&repo_root)
+            .output()
+            .expect("git config email");
+        Command::new("git")
+            .args(["config", "user.name", "Test User"])
+            .current_dir(&repo_root)
+            .output()
+            .expect("git config name");
+
+        fs::write(repo_root.join("base.txt"), "base\n").expect("write base");
+        Command::new("git")
+            .args(["add", "base.txt"])
+            .current_dir(&repo_root)
+            .output()
+            .expect("git add base");
+        Command::new("git")
+            .args(["commit", "-m", "base"])
+            .current_dir(&repo_root)
+            .output()
+            .expect("git commit base");
+        let head_start = String::from_utf8(
+            Command::new("git")
+                .args(["rev-parse", "HEAD"])
+                .current_dir(&repo_root)
+                .output()
+                .expect("git rev-parse base")
+                .stdout,
+        )
+        .expect("utf8 head start")
+        .trim()
+        .to_string();
+
+        let mut detail = DetailState::new(SessionSummary::default(), Vec::new(), false);
+        detail.session.repo_root = repo_root.to_string_lossy().into_owned();
+        detail.session.head_start = head_start.clone();
+        detail.session.changes = json!({
+            "files_changed": ["modifications.md"],
+            "committed_diff_stat": "modifications.md | 6 ++++++\n1 file changed, 6 insertions(+)",
+        });
+        detail.timeline_entries = vec![TimelineEntry {
+            event_index: 0,
+            event_start_index: 0,
+            event_end_index: 0,
+            seq_start: 3,
+            seq_end: 3,
+            ts_wall: 0.0,
+            event_type: "git.snapshot.chkpt".to_string(),
+            summary: "chkpt-0003".to_string(),
+            copy_command: None,
+        }];
+        detail.timeline_index = 0;
+        detail.git_checkpoint_records = vec![GitCheckpointRecord {
+            checkpoint_id: "chkpt-0003".to_string(),
+            seq: 3,
+            timestamp: 0,
+            reason: String::new(),
+            repo_root: repo_root.to_string_lossy().into_owned(),
+            branch: String::new(),
+            head: head_start.clone(),
+            comparison_base_head: String::new(),
+            status_porcelain: String::new(),
+            status_fingerprint: String::new(),
+            tracked_patch_sha256: String::new(),
+            committed_diff_stat: String::new(),
+            committed_files: Vec::new(),
+            worktree_diff_stat: String::new(),
+            changed_files: vec!["modifications.md".to_string()],
+            untracked_paths: Vec::new(),
+            fingerprint: String::new(),
+            delta_diff_stat: "modifications.md | 3 +++".to_string(),
+            delta_files: vec!["modifications.md".to_string()],
+            delta_file_markers: [("modifications.md".to_string(), "~".to_string())]
+                .into_iter()
+                .collect(),
+            cumulative_diff_stat: "modifications.md | 6 ++++++".to_string(),
+            cumulative_files: vec!["modifications.md".to_string()],
+            cumulative_file_markers: [("modifications.md".to_string(), "~".to_string())]
+                .into_iter()
+                .collect(),
+        }];
+
+        let rendered = build_changes_lines(&detail)
+            .iter()
+            .map(ToString::to_string)
+            .collect::<Vec<_>>();
+
+        assert!(rendered
+            .iter()
+            .any(|line| line.contains("Changes made since session start (chkpt-0003)")));
+        assert!(rendered
+            .iter()
+            .any(|line| line.contains("+ modifications.md | 6 ++++++")));
+
+        let _ = fs::remove_dir_all(repo_root);
     }
 
     #[test]
@@ -7396,6 +7585,7 @@ mod tests {
             }]),
             terminal_replay_cache: HashMap::new(),
             git_change_view_cache: RefCell::new(HashMap::new()),
+            git_path_exists_cache: RefCell::new(HashMap::new()),
             terminal_cache_key: None,
             pending_replay_cache_key: None,
             replay_cache_rx: None,
