@@ -1534,7 +1534,9 @@ fn strip_leading_agensic_env_assignments(value: &str) -> String {
         };
         if name.is_empty()
             || !name.starts_with("AGENSIC_")
-            || !name.chars().all(|ch| ch.is_ascii_alphanumeric() || ch == '_')
+            || !name
+                .chars()
+                .all(|ch| ch.is_ascii_alphanumeric() || ch == '_')
         {
             return trimmed[start..].trim().to_string();
         }

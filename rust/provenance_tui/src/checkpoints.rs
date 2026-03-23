@@ -3,7 +3,7 @@ use base64::Engine;
 use clap::Parser;
 use flate2::read::GzDecoder;
 use serde::{Deserialize, Serialize};
-use std::collections::{hash_map::DefaultHasher, BTreeMap};
+use std::collections::{hash_map::DefaultHasher, BTreeMap, BTreeSet};
 use std::fs::{self, File};
 use std::hash::{Hash, Hasher};
 use std::io::{self, BufRead, BufReader, Read, Write};
@@ -474,6 +474,52 @@ fn parse_diff_stat_files(diff_stat: &str) -> (Vec<String>, BTreeMap<String, Stri
     (files, stats)
 }
 
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct DiffStatFragment {
+    count: usize,
+    visual: String,
+}
+
+fn parse_diff_stat_fragment(stat: &str) -> Option<DiffStatFragment> {
+    let clean = stat.trim();
+    if clean.is_empty() {
+        return None;
+    }
+    let mut parts = clean.split_whitespace();
+    let count = parts.next()?.parse::<usize>().ok()?;
+    let visual = parts.collect::<Vec<_>>().join(" ");
+    Some(DiffStatFragment { count, visual })
+}
+
+fn merge_diff_stat_value(existing: Option<&str>, incoming: Option<&str>) -> Option<String> {
+    let clean_incoming = incoming.map(str::trim).filter(|value| !value.is_empty())?;
+    let clean_existing = existing.map(str::trim).filter(|value| !value.is_empty());
+
+    match (
+        clean_existing.and_then(parse_diff_stat_fragment),
+        parse_diff_stat_fragment(clean_incoming),
+    ) {
+        (Some(previous), Some(next)) => {
+            let mut visual = previous.visual;
+            visual.push_str(&next.visual);
+            let visual = visual.trim().to_string();
+            if visual.is_empty() {
+                Some(previous.count.saturating_add(next.count).to_string())
+            } else {
+                Some(format!(
+                    "{} {}",
+                    previous.count.saturating_add(next.count),
+                    visual
+                ))
+            }
+        }
+        _ => clean_existing
+            .filter(|value| *value == clean_incoming)
+            .map(str::to_string)
+            .or_else(|| Some(clean_incoming.to_string())),
+    }
+}
+
 fn merge_cumulative_file(
     files: &mut Vec<String>,
     markers: &mut BTreeMap<String, String>,
@@ -493,7 +539,9 @@ fn merge_cumulative_file(
         markers.insert(clean_path.to_string(), value.to_string());
     }
     if let Some(value) = stat.map(str::trim).filter(|value| !value.is_empty()) {
-        stats.insert(clean_path.to_string(), value.to_string());
+        let merged = merge_diff_stat_value(stats.get(clean_path).map(String::as_str), Some(value))
+            .unwrap_or_else(|| value.to_string());
+        stats.insert(clean_path.to_string(), merged);
     }
 }
 
@@ -625,8 +673,13 @@ pub fn enrich_git_checkpoint_records(
         let (status_files, status_markers) = parse_status_porcelain(&record.status_porcelain);
         let (worktree_stat_files, worktree_stats) =
             parse_diff_stat_files(&record.worktree_diff_stat);
-        for file in &status_files {
-            let fallback_marker = if record.untracked_paths.iter().any(|item| item == file) {
+        let mut worktree_files = BTreeSet::new();
+        worktree_files.extend(status_files.iter().cloned());
+        worktree_files.extend(worktree_stat_files.iter().cloned());
+        worktree_files.extend(record.changed_files.iter().cloned());
+        worktree_files.extend(record.untracked_paths.iter().cloned());
+        for file in worktree_files {
+            let fallback_marker = if record.untracked_paths.iter().any(|item| item == &file) {
                 Some("+")
             } else {
                 Some("•")
@@ -635,58 +688,12 @@ pub fn enrich_git_checkpoint_records(
                 &mut delta_files,
                 &mut delta_markers,
                 &mut delta_stats,
-                file,
+                &file,
                 status_markers
-                    .get(file)
+                    .get(&file)
                     .map(String::as_str)
                     .or(fallback_marker),
-                worktree_stats.get(file).map(String::as_str),
-            );
-        }
-        for file in &worktree_stat_files {
-            let fallback_marker = if record.untracked_paths.iter().any(|item| item == file) {
-                Some("+")
-            } else {
-                Some("•")
-            };
-            merge_cumulative_file(
-                &mut delta_files,
-                &mut delta_markers,
-                &mut delta_stats,
-                file,
-                status_markers
-                    .get(file)
-                    .map(String::as_str)
-                    .or(fallback_marker),
-                worktree_stats.get(file).map(String::as_str),
-            );
-        }
-        for file in &record.changed_files {
-            let fallback_marker = if record.untracked_paths.iter().any(|item| item == file) {
-                Some("+")
-            } else {
-                Some("•")
-            };
-            merge_cumulative_file(
-                &mut delta_files,
-                &mut delta_markers,
-                &mut delta_stats,
-                file,
-                status_markers
-                    .get(file)
-                    .map(String::as_str)
-                    .or(fallback_marker),
-                worktree_stats.get(file).map(String::as_str),
-            );
-        }
-        for file in &record.untracked_paths {
-            merge_cumulative_file(
-                &mut delta_files,
-                &mut delta_markers,
-                &mut delta_stats,
-                file,
-                status_markers.get(file).map(String::as_str).or(Some("+")),
-                worktree_stats.get(file).map(String::as_str),
+                worktree_stats.get(&file).map(String::as_str),
             );
         }
 
@@ -959,6 +966,128 @@ mod tests {
         assert!(records[1]
             .cumulative_diff_stat
             .contains("modifications.md | 1 +"));
+
+        let _ = fs::remove_dir_all(repo_root);
+    }
+
+    #[test]
+    fn git_checkpoint_enrichment_sums_repeated_file_stats_across_checkpoints() {
+        let suffix = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .map(|duration| duration.as_nanos())
+            .unwrap_or(0);
+        let repo_root = std::env::temp_dir().join(format!("git-checkpoint-repeat-{suffix}"));
+        fs::create_dir_all(&repo_root).expect("create temp repo root");
+
+        let mut records = vec![
+            GitCheckpointRecord {
+                checkpoint_id: "chkpt-0001".to_string(),
+                seq: 1,
+                timestamp: 100,
+                reason: "first".to_string(),
+                repo_root: repo_root.to_string_lossy().into_owned(),
+                branch: "main".to_string(),
+                head: "base".to_string(),
+                comparison_base_head: "base".to_string(),
+                status_porcelain: "?? modifications.md\n".to_string(),
+                status_fingerprint: String::new(),
+                tracked_patch_sha256: String::new(),
+                committed_diff_stat: String::new(),
+                committed_files: Vec::new(),
+                worktree_diff_stat: "modifications.md | 2 ++\n".to_string(),
+                changed_files: vec!["modifications.md".to_string()],
+                untracked_paths: vec!["modifications.md".to_string()],
+                fingerprint: String::new(),
+                delta_diff_stat: String::new(),
+                delta_files: Vec::new(),
+                delta_file_markers: BTreeMap::new(),
+                cumulative_diff_stat: String::new(),
+                cumulative_files: Vec::new(),
+                cumulative_file_markers: BTreeMap::new(),
+            },
+            GitCheckpointRecord {
+                checkpoint_id: "chkpt-0002".to_string(),
+                seq: 2,
+                timestamp: 101,
+                reason: "second".to_string(),
+                repo_root: repo_root.to_string_lossy().into_owned(),
+                branch: "main".to_string(),
+                head: "base".to_string(),
+                comparison_base_head: "base".to_string(),
+                status_porcelain: " M modifications.md\n".to_string(),
+                status_fingerprint: String::new(),
+                tracked_patch_sha256: String::new(),
+                committed_diff_stat: String::new(),
+                committed_files: Vec::new(),
+                worktree_diff_stat: "modifications.md | 3 +++\n".to_string(),
+                changed_files: vec!["modifications.md".to_string()],
+                untracked_paths: Vec::new(),
+                fingerprint: String::new(),
+                delta_diff_stat: String::new(),
+                delta_files: Vec::new(),
+                delta_file_markers: BTreeMap::new(),
+                cumulative_diff_stat: String::new(),
+                cumulative_files: Vec::new(),
+                cumulative_file_markers: BTreeMap::new(),
+            },
+        ];
+
+        enrich_git_checkpoint_records(&mut records, repo_root.to_str().unwrap_or_default(), "base");
+
+        assert!(records[0]
+            .cumulative_diff_stat
+            .contains("modifications.md | 2 ++"));
+        assert!(records[1]
+            .delta_diff_stat
+            .contains("modifications.md | 3 +++"));
+        assert!(records[1]
+            .cumulative_diff_stat
+            .contains("modifications.md | 5 +++++"));
+
+        let _ = fs::remove_dir_all(repo_root);
+    }
+
+    #[test]
+    fn git_checkpoint_enrichment_sums_committed_and_worktree_stats_within_checkpoint() {
+        let suffix = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .map(|duration| duration.as_nanos())
+            .unwrap_or(0);
+        let repo_root = std::env::temp_dir().join(format!("git-checkpoint-mixed-{suffix}"));
+        fs::create_dir_all(&repo_root).expect("create temp repo root");
+
+        let mut records = vec![GitCheckpointRecord {
+            checkpoint_id: "chkpt-0001".to_string(),
+            seq: 1,
+            timestamp: 100,
+            reason: "mixed".to_string(),
+            repo_root: repo_root.to_string_lossy().into_owned(),
+            branch: "main".to_string(),
+            head: "head-1".to_string(),
+            comparison_base_head: "base".to_string(),
+            status_porcelain: " M testing.md\n".to_string(),
+            status_fingerprint: String::new(),
+            tracked_patch_sha256: String::new(),
+            committed_diff_stat: "testing.md | 2 ++\n".to_string(),
+            committed_files: vec!["testing.md".to_string()],
+            worktree_diff_stat: "testing.md | 3 +++\n".to_string(),
+            changed_files: vec!["testing.md".to_string()],
+            untracked_paths: Vec::new(),
+            fingerprint: String::new(),
+            delta_diff_stat: String::new(),
+            delta_files: Vec::new(),
+            delta_file_markers: BTreeMap::new(),
+            cumulative_diff_stat: String::new(),
+            cumulative_files: Vec::new(),
+            cumulative_file_markers: BTreeMap::new(),
+        }];
+
+        enrich_git_checkpoint_records(&mut records, repo_root.to_str().unwrap_or_default(), "base");
+
+        assert!(records[0].delta_diff_stat.contains("testing.md | 5 +++++"));
+        assert!(records[0]
+            .cumulative_diff_stat
+            .contains("testing.md | 5 +++++"));
 
         let _ = fs::remove_dir_all(repo_root);
     }
