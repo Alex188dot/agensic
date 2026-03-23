@@ -19,7 +19,7 @@
 Agensic upgrades your existing terminal workflow for the AI era. It is built for developers who want the productivity boost of AI agents right in their shell, but refuse to compromise on **auditability, control and privacy**. 
 
 As AI agents increasingly take over the command line and execute tasks autonomously, visibility and control become critical.
-Agensic treats **terminal commands as first-class citizens** and provides a robust framework for tracking, inspecting, and managing them.
+Agensic treats **terminal commands as first-class citizens** and provides a robust framework for tracking, inspecting and managing them.
 
 Instead of flattening all terminal activity into a single ambiguous "shell history", Agensic acts as a forensic observer and a smart co-pilot. It seamlessly tracks interactive AI coding sessions, cryptographically signs agent-executed commands and provides blazing-fast, history-backed IDE-style Tab autocomplete.
 
@@ -94,7 +94,7 @@ or
 codex
 ```
 
-See the [Supported Agents](#-supported-agents) section for a complete list of all supported agents. If your agent is not in the list, you can add it by running <code>agensic --add_agent "executable"</code>, and then use it normally so that Agensic can track it. 
+See the [Supported Agents](#-supported-agents) section for a complete list of all supported agents. If your agent is not in the list, you can add it by running <code>agensic --add_agent "executable"</code> and then use it normally so that Agensic can track it. 
 
 Please note: if you are resuming a previous conversation with your agent, you will need to use the manual command line invocation, for example <code>agensic run codex resume your_convo_id</code>.
 
@@ -119,7 +119,7 @@ Agensic gives you a forensic timeline for every command that matters. It classif
 
 ### 🔍 Full-Screen Provenance Explorer
 <p>
-Need to answer, "What exactly ran here, and who triggered it?" Run <code>agensic provenance</code> to open the full-screen provenance viewer. Filter by label, agent, provider or time window, inspect the exact command trail and export the current view to JSON or CSV when you need a durable record for debugging, incident review or compliance.
+Need to answer, "What exactly ran here and who triggered it?" Run <code>agensic provenance</code> to open the full-screen provenance viewer. Filter by label, agent, provider or time window, inspect the exact command trail and export the current view to JSON or CSV when you need a durable record for debugging, incident review or compliance.
 </p>
 
 
@@ -168,7 +168,7 @@ Ever wonder, "What did my repo look like exactly before the agent made that dest
 
 ### 🗄️ Resilient Local-First State
 <p>
-Your data stays yours. Agensic uses a robust SQLite state backend with an append-only event journal and automated snapshotting. This means your forensic history survives unexpected terminal crashes, system reboots, and long-lived local usage without corruption.
+Your data stays yours. Agensic uses a robust SQLite state backend with an append-only event journal and automated snapshotting. This means your forensic history survives unexpected terminal crashes, system reboots and long-lived local usage without corruption.
 </p>
 
 ### <a id="-supported-agents"></a>🤖 Supported Agents
@@ -254,7 +254,7 @@ Agensic fits into your stack, whether you run models locally or use hosted endpo
 Agensic operates on the principle of least privilege and maximum privacy:
 
 *   **Local Auth:** every localhost API route is strictly authenticated with automatic token rotation
-*   **Secret Redaction:** high-entropy values, `.env` files, URL credentials, and known secret formats (like AWS keys or JWTs) are stripped and redacted **before** any data leaves your machine for an LLM call
+*   **Secret Redaction:** high-entropy values, URL credentials and known secret formats (like AWS keys or JWTs) are stripped and redacted **before** any data leaves your machine for an LLM call
 *   **Command Guardrails:** destructive commands are hard-blocked from both the suggestion engine and the feedback loop
 *   **Rate Limiting:** outbound LLM calls are bounded by strict timeouts and budgets to prevent API abuse
 
