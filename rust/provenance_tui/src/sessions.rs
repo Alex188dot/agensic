@@ -1,7 +1,17 @@
+pub(crate) use crate::sessions_render::copy_button_style;
+
 use crate::checkpoints::{
     checkpoint_path_for_transcript, decode_checkpoint_state, enrich_git_checkpoint_records,
     git_checkpoint_path_for_transcript, load_checkpoint_records, load_git_checkpoint_records,
     CheckpointRecord, GitCheckpointRecord,
+};
+use crate::sessions_render::{
+    collapse_blank_runs, diff_stat_line, flush_terminal_span, pane_block, pane_block_title,
+    push_text_block, rendered_text_height, replay_max_scroll, replay_toggle_style,
+    strip_inline_progress_noise, summarize_terminal_lines, terminal_cell_style,
+    terminal_replay_end_padding,
+    terminal_replay_max_scroll_x as render_terminal_replay_max_scroll_x,
+    terminal_replay_scroll as render_terminal_replay_scroll,
 };
 use base64::engine::general_purpose::STANDARD as BASE64_STANDARD;
 use base64::Engine;
@@ -44,8 +54,6 @@ use vt100::Parser as VtParser;
 const TIMELINE_PAGE_STEP: usize = 500;
 const TEXT_REPLAY_TICK_MS: u64 = 120;
 const TERMINAL_REPLAY_TICK_MS: u64 = TEXT_REPLAY_TICK_MS / 3;
-const TERMINAL_REPLAY_END_PADDING_ROWS: u16 = 20;
-const TERMINAL_REPLAY_CURSOR_BOTTOM_PADDING_ROWS: u16 = 2;
 const MAX_SESSION_DURATION_SECONDS: i64 = 24 * 60 * 60;
 const SESSION_COPY_BUTTON: &str = "[ Copy ]";
 const SESSION_COPIED_BUTTON: &str = "[   ✓   ]";
@@ -4408,138 +4416,6 @@ fn common_prefix_len(left: &str, right: &str) -> usize {
         .count()
 }
 
-fn summarize_terminal_lines(lines: &[String]) -> String {
-    let first = truncate(lines.first().map(String::as_str).unwrap_or("-"), 52);
-    if lines.len() <= 1 {
-        first
-    } else {
-        format!("{} (+{} lines)", first, lines.len() - 1)
-    }
-}
-
-fn pane_block(title: &str, focused: bool) -> Block<'static> {
-    let border_style = if focused {
-        Style::default().fg(Color::LightGreen)
-    } else {
-        Style::default().fg(Color::DarkGray)
-    };
-    let title_style = if focused {
-        Style::default()
-            .fg(Color::LightGreen)
-            .add_modifier(Modifier::BOLD)
-    } else {
-        Style::default().fg(Color::White)
-    };
-    Block::default()
-        .borders(Borders::ALL)
-        .border_style(border_style)
-        .title(Line::from(Span::styled(title.to_string(), title_style)))
-}
-
-fn pane_block_title(title: Line<'static>, focused: bool) -> Block<'static> {
-    let border_style = if focused {
-        Style::default().fg(Color::LightGreen)
-    } else {
-        Style::default().fg(Color::DarkGray)
-    };
-    Block::default()
-        .borders(Borders::ALL)
-        .border_style(border_style)
-        .title(title)
-}
-
-fn replay_toggle_style(hovered: bool) -> Style {
-    if hovered {
-        Style::default()
-            .fg(Color::LightCyan)
-            .add_modifier(Modifier::UNDERLINED | Modifier::BOLD)
-    } else {
-        Style::default()
-            .fg(Color::Cyan)
-            .add_modifier(Modifier::BOLD)
-    }
-}
-
-pub(crate) fn copy_button_style(hovered: bool, copied: bool, selected: bool) -> Style {
-    if selected {
-        let mut style = Style::default()
-            .fg(Color::Black)
-            .add_modifier(Modifier::BOLD);
-        if hovered {
-            style = style.add_modifier(Modifier::UNDERLINED);
-        }
-        return style;
-    }
-    if copied {
-        Style::default()
-            .fg(Color::LightGreen)
-            .add_modifier(Modifier::BOLD)
-    } else if hovered {
-        Style::default()
-            .fg(Color::LightCyan)
-            .add_modifier(Modifier::BOLD | Modifier::UNDERLINED)
-    } else {
-        Style::default()
-            .fg(Color::LightGreen)
-            .add_modifier(Modifier::BOLD)
-    }
-}
-
-fn flush_terminal_span(spans: &mut Vec<Span<'static>>, buffer: &mut String, style: Option<Style>) {
-    if buffer.is_empty() {
-        return;
-    }
-    let text = std::mem::take(buffer);
-    match style {
-        Some(style) => spans.push(Span::styled(text, style)),
-        None => spans.push(Span::raw(text)),
-    }
-}
-
-fn terminal_cell_style(cell: &vt100::Cell) -> Style {
-    let mut style = Style::default()
-        .fg(vt100_color_to_ratatui(cell.fgcolor()))
-        .bg(vt100_color_to_ratatui(cell.bgcolor()));
-    if cell.bold() {
-        style = style.add_modifier(Modifier::BOLD);
-    }
-    if cell.italic() {
-        style = style.add_modifier(Modifier::ITALIC);
-    }
-    if cell.underline() {
-        style = style.add_modifier(Modifier::UNDERLINED);
-    }
-    if cell.inverse() {
-        style = style.add_modifier(Modifier::REVERSED);
-    }
-    style
-}
-
-fn vt100_color_to_ratatui(color: vt100::Color) -> Color {
-    match color {
-        vt100::Color::Default => Color::Reset,
-        vt100::Color::Idx(value) => match value {
-            0 => Color::Black,
-            1 => Color::Red,
-            2 => Color::Green,
-            3 => Color::Yellow,
-            4 => Color::Blue,
-            5 => Color::Magenta,
-            6 => Color::Cyan,
-            7 => Color::Gray,
-            8 => Color::DarkGray,
-            9 => Color::LightRed,
-            10 => Color::LightGreen,
-            11 => Color::LightYellow,
-            12 => Color::LightBlue,
-            13 => Color::LightMagenta,
-            14 => Color::LightCyan,
-            15 => Color::White,
-            _ => Color::Indexed(value),
-        },
-        vt100::Color::Rgb(r, g, b) => Color::Rgb(r, g, b),
-    }
-}
 
 fn timeline_viewport(detail: &DetailState, height: u16) -> TimelineViewport {
     let total = detail.timeline_entries.len();
@@ -4551,15 +4427,6 @@ fn timeline_viewport(detail: &DetailState, height: u16) -> TimelineViewport {
     TimelineViewport {
         start,
         end: min(total, start + visible_rows),
-    }
-}
-
-fn push_text_block(lines: &mut Vec<Line<'static>>, text: &str) {
-    for line in text.lines() {
-        lines.push(Line::from(line.to_string()));
-    }
-    if text.lines().next().is_none() {
-        lines.push(Line::from("-"));
     }
 }
 
@@ -4597,52 +4464,6 @@ fn parse_diff_stat(text: &str) -> ParsedDiffStat {
     out
 }
 
-#[derive(Clone, Copy, PartialEq, Eq)]
-enum DiffStatSegmentKind {
-    Default,
-    Addition,
-    Deletion,
-}
-
-fn diff_stat_line(line: &str) -> Line<'static> {
-    let mut spans = Vec::new();
-    let mut buffer = String::new();
-    let mut current_kind = DiffStatSegmentKind::Default;
-
-    for ch in line.chars() {
-        let next_kind = match ch {
-            '+' => DiffStatSegmentKind::Addition,
-            '-' => DiffStatSegmentKind::Deletion,
-            _ => DiffStatSegmentKind::Default,
-        };
-        if !buffer.is_empty() && next_kind != current_kind {
-            push_diff_stat_span(&mut spans, &mut buffer, current_kind);
-        }
-        current_kind = next_kind;
-        buffer.push(ch);
-    }
-    push_diff_stat_span(&mut spans, &mut buffer, current_kind);
-
-    Line::from(spans)
-}
-
-fn push_diff_stat_span(
-    spans: &mut Vec<Span<'static>>,
-    buffer: &mut String,
-    kind: DiffStatSegmentKind,
-) {
-    if buffer.is_empty() {
-        return;
-    }
-    let text = std::mem::take(buffer);
-    let span = match kind {
-        DiffStatSegmentKind::Default => Span::raw(text),
-        DiffStatSegmentKind::Addition => Span::styled(text, Style::default().fg(Color::Green)),
-        DiffStatSegmentKind::Deletion => Span::styled(text, Style::default().fg(Color::Red)),
-    };
-    spans.push(span);
-}
-
 fn metric(value: Option<&Value>) -> String {
     match value {
         Some(Value::Number(number)) => number.to_string(),
@@ -4651,107 +4472,19 @@ fn metric(value: Option<&Value>) -> String {
     }
 }
 
-fn collapse_blank_runs(value: &str, max_blank_lines: usize) -> String {
-    let mut output: Vec<&str> = Vec::new();
-    let mut blank_run = 0usize;
-    for line in value.lines() {
-        if line.trim().is_empty() {
-            blank_run += 1;
-            if blank_run <= max_blank_lines {
-                output.push(line);
-            }
-        } else {
-            blank_run = 0;
-            output.push(line);
-        }
-    }
-    output.join("\n")
-}
-
-fn replay_max_scroll(value: &str, area: Rect) -> u16 {
-    let content_lines = rendered_text_height(value, area.width.saturating_sub(2).max(1) as usize);
-    let visible_lines = area.height.saturating_sub(2).max(1) as usize;
-    content_lines
-        .saturating_sub(visible_lines)
-        .min(u16::MAX as usize) as u16
-}
-
-fn terminal_replay_end_padding(frame_index: usize, total_frames: usize) -> u16 {
-    if total_frames > 0 && frame_index + 1 >= total_frames {
-        TERMINAL_REPLAY_END_PADDING_ROWS
-    } else {
-        0
-    }
-}
-
 fn terminal_replay_scroll(frame: &TerminalReplayFrame, area: Rect, padding_rows: u16) -> u16 {
-    let visible_lines = area.height.saturating_sub(2).max(1);
-    let content_rows = frame
-        .lines
-        .len()
-        .max(frame.rows as usize)
-        .min(u16::MAX as usize) as u16;
-    let total_rows = content_rows.saturating_add(padding_rows);
-    let cursor_anchor = frame
-        .cursor_row
-        .min(content_rows.saturating_sub(1))
-        .saturating_add(TERMINAL_REPLAY_CURSOR_BOTTOM_PADDING_ROWS);
-    let content_anchor = frame
-        .last_content_row
-        .min(content_rows.saturating_sub(1))
-        .saturating_add(TERMINAL_REPLAY_CURSOR_BOTTOM_PADDING_ROWS)
-        .min(total_rows.saturating_sub(1));
-    let anchor_row = cursor_anchor
-        .max(content_anchor)
-        .min(total_rows.saturating_sub(1));
-    anchor_row
-        .saturating_add(1)
-        .max(visible_lines)
-        .saturating_sub(visible_lines)
+    render_terminal_replay_scroll(
+        frame.lines.len(),
+        frame.rows,
+        frame.cursor_row,
+        frame.last_content_row,
+        area,
+        padding_rows,
+    )
 }
 
 fn terminal_replay_max_scroll_x(frame: &TerminalReplayFrame, area: Rect) -> u16 {
-    let visible_cols = area.width.saturating_sub(2).max(1);
-    frame.cols.saturating_sub(visible_cols)
-}
-
-fn rendered_text_height(value: &str, width: usize) -> usize {
-    value
-        .lines()
-        .map(|line| {
-            let len = line.chars().count();
-            if len == 0 {
-                1
-            } else {
-                ((len - 1) / width.max(1)) + 1
-            }
-        })
-        .sum::<usize>()
-        .max(1)
-}
-
-fn strip_inline_progress_noise(value: &str) -> String {
-    let mut output = value.to_string();
-    loop {
-        let Some(start) = output.find("Working(") else {
-            break;
-        };
-        let Some(relative_end) = output[start..].find(')') else {
-            break;
-        };
-        let mut remove_start = start;
-        while remove_start > 0 {
-            let prev = output[..remove_start].chars().last().unwrap_or(' ');
-            if matches!(prev, ' ' | '\t' | '•' | '~') {
-                remove_start -= prev.len_utf8();
-            } else {
-                break;
-            }
-        }
-        let remove_end = start + relative_end + 1;
-        output.replace_range(remove_start..remove_end, "");
-    }
-    output
+    render_terminal_replay_max_scroll_x(frame.cols, area)
 }
 
 fn format_wall_ts(ts_wall: f64) -> String {
@@ -5423,17 +5156,20 @@ fn rect_contains(rect: Rect, column: u16, row: u16) -> bool {
 mod tests {
     use super::{
         build_changes_lines, build_conversation_export_rows, build_display_model,
-        build_terminal_replay_frames, changes_max_scroll, collect_terminal_lines, diff_stat_line,
+        build_terminal_replay_frames, changes_max_scroll, collect_terminal_lines,
         export_conversation_jsonl, export_timeline_rows, format_duration, format_header_outcome,
         format_outcome, format_timeline_ordinal, handle_key, load_transcript_chunks,
-        rendered_text_height, replay_max_scroll, repo_display_name, sanitize_inline_text,
-        sanitize_terminal_output, session_detail_layout_in_area, strip_inline_progress_noise,
-        terminal_replay_end_padding, terminal_replay_max_scroll_x, terminal_replay_scroll,
-        timeline_category_color, timeline_kind_style, vt100_color_to_ratatui, App,
+        repo_display_name, sanitize_inline_text, sanitize_terminal_output,
+        session_detail_layout_in_area, timeline_category_color, timeline_kind_style, App,
         DeleteModalState, DetailState, FocusPane, GitCheckpointRecord, ReplayMode, SessionEvent,
         SessionFilters, SessionSummary, SessionsArgs, TerminalReplayFrame, TimeTravelModalState,
         TimeTravelPreviewResponse, TimelineCategory, TimelineEntry, TranscriptChunk,
-        TEXT_REPLAY_TICK_MS,
+        TEXT_REPLAY_TICK_MS, terminal_replay_end_padding, terminal_replay_max_scroll_x,
+        terminal_replay_scroll,
+    };
+    use crate::sessions_render::{
+        diff_stat_line, rendered_text_height, replay_max_scroll, strip_inline_progress_noise,
+        vt100_color_to_ratatui,
     };
     use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
     use flate2::write::GzEncoder;

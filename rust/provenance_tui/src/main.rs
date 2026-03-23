@@ -1,6 +1,7 @@
 mod agents;
 mod checkpoints;
 mod sessions;
+mod sessions_render;
 
 use chrono::{Duration as ChronoDuration, Local, NaiveDate, TimeZone};
 use clap::Parser;
