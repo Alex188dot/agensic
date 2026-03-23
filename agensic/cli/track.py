@@ -3473,6 +3473,8 @@ def run_tracked_command(
 
     watcher = threading.Thread(target=_watch_tracked_process_tree, args=(runtime,), daemon=True)
     watcher_started = False
+    watcher.start()
+    watcher_started = True
 
     old_tty = None
     stdin_fd = None
@@ -3551,8 +3553,6 @@ def run_tracked_command(
                 session_id=session_id,
                 replay_metadata=replay_metadata,
             )
-            watcher.start()
-            watcher_started = True
             while True:
                 if stdin_fd is not None and resize_pending:
                     resize_pending = False

@@ -238,6 +238,24 @@ EOF
         self.assertEqual(result.returncode, 0, msg=result.stderr)
         self.assertEqual(result.stdout.strip(), "suggestion_accept|ai")
 
+    def test_preexec_logs_edited_command_after_suggestion_accept(self):
+        result = self._run_bash(
+            """
+            history -s -- 'git status --short'
+            READLINE_LINE="git status"
+            READLINE_POINT=${#READLINE_LINE}
+            AGENSIC_BASH_AT_PROMPT=1
+            AGENSIC_PENDING_LAST_ACTION="human_edit"
+            AGENSIC_PENDING_ACCEPTED_ORIGIN="ag"
+            AGENSIC_PENDING_ACCEPTED_MODE="suffix_append"
+            AGENSIC_PENDING_MANUAL_EDIT_AFTER_ACCEPT=1
+            _agensic_bash_preexec_trap
+            printf '%s\\n' "${AGENSIC_LAST_EXECUTED_CMD}|${AGENSIC_PENDING_LAST_ACTION}|${AGENSIC_PENDING_ACCEPTED_ORIGIN}|${AGENSIC_PENDING_MANUAL_EDIT_AFTER_ACCEPT}"
+            """
+        )
+        self.assertEqual(result.returncode, 0, msg=result.stderr)
+        self.assertEqual(result.stdout.strip(), "git status|human_edit|ag|1")
+
 
 if __name__ == "__main__":
     unittest.main()

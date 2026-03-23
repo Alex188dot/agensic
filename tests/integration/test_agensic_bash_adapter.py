@@ -670,19 +670,21 @@ class AgensicBashAdapterTests(unittest.TestCase):
         self.assertEqual(result.returncode, 0, msg=result.stderr)
         self.assertEqual(result.stdout.strip(), "git status")
 
-    def test_preexec_prefers_history_entry_over_bash_command_internal(self):
+    def test_preexec_prefers_readline_buffer_over_stale_history(self):
         result = self._run_bash(
             """
             history -s -- 'agensic start'
             AGENSIC_BASH_AT_PROMPT=1
-            BASH_COMMAND='[[ -n "${PROMPT_COMMAND:-}" ]]'
+            READLINE_LINE='agensic provenance'
+            READLINE_POINT=${#READLINE_LINE}
+            BASH_COMMAND='agensic provenance'
             _agensic_bash_preexec_trap
             printf '%s\\n' "${AGENSIC_LAST_EXECUTED_CMD}"
             """
         )
 
         self.assertEqual(result.returncode, 0, msg=result.stderr)
-        self.assertEqual(result.stdout.strip(), "agensic start")
+        self.assertEqual(result.stdout.strip(), "agensic provenance")
 
     def test_ignore_debug_command_matches_prompt_command_assignment_for_internal_precmd(self):
         result = self._run_bash(

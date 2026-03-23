@@ -186,6 +186,39 @@ _agensic_bash_last_history_entry() {
     printf '%s\n' "$last"
 }
 
+_agensic_bash_trim() {
+    local value="${1:-}"
+    value="${value#"${value%%[![:space:]]*}"}"
+    value="${value%"${value##*[![:space:]]}"}"
+    printf '%s\n' "$value"
+}
+
+_agensic_bash_resolve_preexec_command() {
+    local readline_command=""
+    local live_command=""
+    local history_command=""
+
+    readline_command="$(_agensic_bash_trim "${READLINE_LINE:-}")"
+    if [[ -n "$readline_command" ]] && ! _agensic_bash_should_ignore_debug_command "$readline_command"; then
+        printf '%s\n' "$readline_command"
+        return 0
+    fi
+
+    live_command="$(_agensic_bash_trim "${BASH_COMMAND:-}")"
+    if [[ -n "$live_command" ]] && ! _agensic_bash_should_ignore_debug_command "$live_command"; then
+        printf '%s\n' "$live_command"
+        return 0
+    fi
+
+    history_command="$(_agensic_bash_last_history_entry)"
+    if [[ -n "$history_command" ]]; then
+        printf '%s\n' "$history_command"
+        return 0
+    fi
+
+    return 1
+}
+
 _agensic_bash_should_ignore_debug_command() {
     local command="${1:-}"
     case "$command" in
@@ -1767,10 +1800,7 @@ _agensic_bash_preexec_trap() {
         return 0
     fi
     local command=""
-    command="$(_agensic_bash_last_history_entry)"
-    if [[ -z "$command" ]]; then
-        command="${BASH_COMMAND:-}"
-    fi
+    command="$(_agensic_bash_resolve_preexec_command)"
     if [[ -z "$command" ]]; then
         return 0
     fi
