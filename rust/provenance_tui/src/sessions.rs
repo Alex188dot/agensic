@@ -27,6 +27,7 @@ use reqwest::blocking::Client;
 use reqwest::Method;
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
+use std::cell::RefCell;
 use std::cmp::{max, min};
 use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::fs::{self, File};
@@ -392,6 +393,7 @@ struct DetailState {
     checkpoint_records: Vec<CheckpointRecord>,
     terminal_replay_frames: Arc<Vec<TerminalReplayFrame>>,
     terminal_replay_cache: HashMap<TerminalReplayCacheKey, Arc<Vec<TerminalReplayFrame>>>,
+    git_change_view_cache: RefCell<HashMap<GitRangeChangeViewCacheKey, GitRangeChangeView>>,
     terminal_cache_key: Option<TerminalReplayCacheKey>,
     pending_replay_cache_key: Option<TerminalReplayCacheKey>,
     replay_cache_rx: Option<Receiver<(TerminalReplayCacheKey, Arc<Vec<TerminalReplayFrame>>)>>,
@@ -468,6 +470,7 @@ impl DetailState {
             checkpoint_records,
             terminal_replay_frames: Arc::new(Vec::new()),
             terminal_replay_cache: HashMap::new(),
+            git_change_view_cache: RefCell::new(HashMap::new()),
             terminal_cache_key: None,
             pending_replay_cache_key: None,
             replay_cache_rx: None,
@@ -2670,29 +2673,33 @@ fn build_changes_lines(detail: &DetailState) -> Vec<Line<'static>> {
             _ => (default_checkpoint_label.clone(), None),
         })
         .unwrap_or_else(|| (default_checkpoint_label.clone(), None));
-    let synthetic_git_view = if let (Some(record), Some(target_head)) =
-        (selected_checkpoint, selected_head.as_deref())
-    {
-        let record_head = record.head.trim();
-        if selected_target_seq > record.seq
-            && !record_head.is_empty()
-            && !target_head.trim().is_empty()
-            && record_head != target_head.trim()
+    let prefer_different_head = selected_event
+        .map(|event| {
+            matches!(
+                event.event_type.as_str(),
+                "git.commit.created" | "git.commit.sess_sync"
+            )
+        })
+        .unwrap_or(false);
+    let synthetic_git_view = selected_head.as_deref().and_then(|target_head| {
+        let base_record = preferred_base_checkpoint_for_synthetic_view(
+            detail,
+            selected_target_seq,
+            target_head,
+            prefer_different_head,
+        )?;
+        let record_head = base_record.head.trim();
+        if record_head.is_empty()
+            || target_head.trim().is_empty()
+            || record_head == target_head.trim()
         {
-            Some((
-                build_git_range_change_view(&detail.session.repo_root, record_head, target_head),
-                build_git_range_change_view(
-                    &detail.session.repo_root,
-                    &detail.session.head_start,
-                    target_head,
-                ),
-            ))
-        } else {
-            None
+            return None;
         }
-    } else {
-        None
-    };
+        Some((
+            build_git_range_change_view_cached(detail, record_head, target_head),
+            build_git_range_change_view_cached(detail, &detail.session.head_start, target_head),
+        ))
+    });
     let (checkpoint_delta_stats, checkpoint_delta_files, checkpoint_delta_markers) =
         if let Some((delta_view, _)) = synthetic_git_view.as_ref() {
             (
@@ -2869,6 +2876,70 @@ struct GitRangeChangeView {
     stats: ParsedDiffStat,
     files: Vec<String>,
     markers: BTreeMap<String, String>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Hash)]
+struct GitRangeChangeViewCacheKey {
+    repo_root: String,
+    start_head: String,
+    end_head: String,
+}
+
+fn build_git_range_change_view_cached(
+    detail: &DetailState,
+    start_head: &str,
+    end_head: &str,
+) -> GitRangeChangeView {
+    let key = GitRangeChangeViewCacheKey {
+        repo_root: detail.session.repo_root.trim().to_string(),
+        start_head: start_head.trim().to_string(),
+        end_head: end_head.trim().to_string(),
+    };
+    if key.repo_root.is_empty()
+        || key.start_head.is_empty()
+        || key.end_head.is_empty()
+        || key.start_head == key.end_head
+    {
+        return GitRangeChangeView::default();
+    }
+    if let Some(cached) = detail.git_change_view_cache.borrow().get(&key).cloned() {
+        return cached;
+    }
+    let view = build_git_range_change_view(&key.repo_root, &key.start_head, &key.end_head);
+    detail
+        .git_change_view_cache
+        .borrow_mut()
+        .insert(key, view.clone());
+    view
+}
+
+fn preferred_base_checkpoint_for_synthetic_view<'a>(
+    detail: &'a DetailState,
+    target_seq: i64,
+    target_head: &str,
+    prefer_different_head: bool,
+) -> Option<&'a GitCheckpointRecord> {
+    let clean_target_head = target_head.trim();
+    let mut same_head_candidate = None;
+    for record in detail.git_checkpoint_records.iter().rev() {
+        if record.seq >= target_seq {
+            continue;
+        }
+        let record_head = record.head.trim();
+        if record_head.is_empty() {
+            continue;
+        }
+        if !prefer_different_head
+            || clean_target_head.is_empty()
+            || record_head != clean_target_head
+        {
+            return Some(record);
+        }
+        if same_head_candidate.is_none() {
+            same_head_candidate = Some(record);
+        }
+    }
+    same_head_candidate
 }
 
 fn build_git_range_change_view(
@@ -5375,7 +5446,8 @@ mod tests {
     use reqwest::blocking::Client;
     use serde_json::json;
     use std::{
-        collections::HashMap,
+        cell::RefCell,
+        collections::{BTreeMap, HashMap},
         env, fs,
         io::{Read, Write},
         net::TcpListener,
@@ -6003,6 +6075,7 @@ mod tests {
                 cols: 4,
             }]),
             terminal_replay_cache: HashMap::new(),
+            git_change_view_cache: RefCell::new(HashMap::new()),
             terminal_cache_key: None,
             pending_replay_cache_key: None,
             replay_cache_rx: None,
@@ -6328,6 +6401,370 @@ mod tests {
         assert!(rendered
             .iter()
             .any(|line| line.contains("modifications.md | 6 ++++++")));
+
+        let _ = fs::remove_dir_all(repo_root);
+    }
+
+    #[test]
+    fn changes_pane_commit_rows_reuse_cached_git_range_views() {
+        let suffix = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|duration| duration.as_nanos())
+            .unwrap_or(0);
+        let repo_root = std::env::temp_dir().join(format!("sessions-commit-cache-{suffix}"));
+        fs::create_dir_all(&repo_root).expect("create repo root");
+
+        Command::new("git")
+            .args(["init"])
+            .current_dir(&repo_root)
+            .output()
+            .expect("git init");
+        Command::new("git")
+            .args(["config", "user.email", "test@example.com"])
+            .current_dir(&repo_root)
+            .output()
+            .expect("git config email");
+        Command::new("git")
+            .args(["config", "user.name", "Test User"])
+            .current_dir(&repo_root)
+            .output()
+            .expect("git config name");
+
+        fs::write(repo_root.join("base.txt"), "base\n").expect("write base");
+        Command::new("git")
+            .args(["add", "base.txt"])
+            .current_dir(&repo_root)
+            .output()
+            .expect("git add base");
+        Command::new("git")
+            .args(["commit", "-m", "base"])
+            .current_dir(&repo_root)
+            .output()
+            .expect("git commit base");
+        let head_start = String::from_utf8(
+            Command::new("git")
+                .args(["rev-parse", "HEAD"])
+                .current_dir(&repo_root)
+                .output()
+                .expect("git rev-parse base")
+                .stdout,
+        )
+        .expect("utf8 start head")
+        .trim()
+        .to_string();
+
+        fs::write(repo_root.join("modifications.md"), "line 1\nline 2\n").expect("write first");
+        Command::new("git")
+            .args(["add", "modifications.md"])
+            .current_dir(&repo_root)
+            .output()
+            .expect("git add first");
+        Command::new("git")
+            .args(["commit", "-m", "commit 1"])
+            .current_dir(&repo_root)
+            .output()
+            .expect("git commit first");
+        let checkpoint_head = String::from_utf8(
+            Command::new("git")
+                .args(["rev-parse", "HEAD"])
+                .current_dir(&repo_root)
+                .output()
+                .expect("git rev-parse checkpoint")
+                .stdout,
+        )
+        .expect("utf8 checkpoint head")
+        .trim()
+        .to_string();
+
+        fs::write(
+            repo_root.join("modifications.md"),
+            "line 1\nline 2\nline 3\nline 4\nline 5\n",
+        )
+        .expect("write second");
+        Command::new("git")
+            .args(["add", "modifications.md"])
+            .current_dir(&repo_root)
+            .output()
+            .expect("git add second");
+        Command::new("git")
+            .args(["commit", "-m", "commit 2"])
+            .current_dir(&repo_root)
+            .output()
+            .expect("git commit second");
+        let commit_head = String::from_utf8(
+            Command::new("git")
+                .args(["rev-parse", "HEAD"])
+                .current_dir(&repo_root)
+                .output()
+                .expect("git rev-parse commit")
+                .stdout,
+        )
+        .expect("utf8 commit head")
+        .trim()
+        .to_string();
+
+        let mut detail = DetailState::new(SessionSummary::default(), Vec::new(), false);
+        detail.session.repo_root = repo_root.to_string_lossy().into_owned();
+        detail.session.head_start = head_start;
+        detail.session.head_end = commit_head.clone();
+        detail.events = vec![SessionEvent {
+            session_id: "sess-1".to_string(),
+            seq: 5,
+            ts_wall: 0.0,
+            ts_monotonic_ms: 0,
+            event_type: "git.commit.created".to_string(),
+            payload: json!({"sha": commit_head}),
+        }];
+        detail.timeline_entries = vec![TimelineEntry {
+            event_index: 0,
+            event_start_index: 0,
+            event_end_index: 0,
+            seq_start: 5,
+            seq_end: 5,
+            ts_wall: 0.0,
+            event_type: "git.commit.created".to_string(),
+            summary: "commit 2".to_string(),
+            copy_command: None,
+        }];
+        detail.timeline_index = 0;
+        detail.git_checkpoint_records = vec![GitCheckpointRecord {
+            checkpoint_id: "chkpt-0001".to_string(),
+            seq: 3,
+            timestamp: 0,
+            reason: String::new(),
+            repo_root: repo_root.to_string_lossy().into_owned(),
+            branch: String::new(),
+            head: checkpoint_head,
+            comparison_base_head: String::new(),
+            status_porcelain: String::new(),
+            status_fingerprint: String::new(),
+            tracked_patch_sha256: String::new(),
+            committed_diff_stat: String::new(),
+            committed_files: Vec::new(),
+            worktree_diff_stat: String::new(),
+            changed_files: vec!["modifications.md".to_string()],
+            untracked_paths: Vec::new(),
+            fingerprint: String::new(),
+            delta_diff_stat: "modifications.md | 2 ++".to_string(),
+            delta_files: vec!["modifications.md".to_string()],
+            delta_file_markers: [("modifications.md".to_string(), "~".to_string())]
+                .into_iter()
+                .collect(),
+            cumulative_diff_stat: "modifications.md | 2 ++".to_string(),
+            cumulative_files: vec!["modifications.md".to_string()],
+            cumulative_file_markers: [("modifications.md".to_string(), "+".to_string())]
+                .into_iter()
+                .collect(),
+        }];
+
+        let _ = build_changes_lines(&detail);
+        let first_cache_size = detail.git_change_view_cache.borrow().len();
+        let _ = build_changes_lines(&detail);
+        let second_cache_size = detail.git_change_view_cache.borrow().len();
+
+        assert_eq!(first_cache_size, 2);
+        assert_eq!(second_cache_size, first_cache_size);
+
+        let _ = fs::remove_dir_all(repo_root);
+    }
+
+    #[test]
+    fn changes_pane_commit_rows_skip_same_head_checkpoint_when_resolving_base() {
+        let suffix = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|duration| duration.as_nanos())
+            .unwrap_or(0);
+        let repo_root = std::env::temp_dir().join(format!("sessions-commit-base-{suffix}"));
+        fs::create_dir_all(&repo_root).expect("create repo root");
+
+        Command::new("git")
+            .args(["init"])
+            .current_dir(&repo_root)
+            .output()
+            .expect("git init");
+        Command::new("git")
+            .args(["config", "user.email", "test@example.com"])
+            .current_dir(&repo_root)
+            .output()
+            .expect("git config email");
+        Command::new("git")
+            .args(["config", "user.name", "Test User"])
+            .current_dir(&repo_root)
+            .output()
+            .expect("git config name");
+
+        fs::write(repo_root.join("base.txt"), "base\n").expect("write base");
+        Command::new("git")
+            .args(["add", "base.txt"])
+            .current_dir(&repo_root)
+            .output()
+            .expect("git add base");
+        Command::new("git")
+            .args(["commit", "-m", "base"])
+            .current_dir(&repo_root)
+            .output()
+            .expect("git commit base");
+        let head_start = String::from_utf8(
+            Command::new("git")
+                .args(["rev-parse", "HEAD"])
+                .current_dir(&repo_root)
+                .output()
+                .expect("git rev-parse base")
+                .stdout,
+        )
+        .expect("utf8 start head")
+        .trim()
+        .to_string();
+
+        fs::write(repo_root.join("modifications.md"), "line 1\nline 2\n").expect("write first");
+        Command::new("git")
+            .args(["add", "modifications.md"])
+            .current_dir(&repo_root)
+            .output()
+            .expect("git add first");
+        Command::new("git")
+            .args(["commit", "-m", "commit 1"])
+            .current_dir(&repo_root)
+            .output()
+            .expect("git commit first");
+        let head_checkpoint = String::from_utf8(
+            Command::new("git")
+                .args(["rev-parse", "HEAD"])
+                .current_dir(&repo_root)
+                .output()
+                .expect("git rev-parse checkpoint")
+                .stdout,
+        )
+        .expect("utf8 checkpoint head")
+        .trim()
+        .to_string();
+
+        fs::write(
+            repo_root.join("modifications.md"),
+            "line 1\nline 2\nline 3\nline 4\nline 5\n",
+        )
+        .expect("write second");
+        Command::new("git")
+            .args(["add", "modifications.md"])
+            .current_dir(&repo_root)
+            .output()
+            .expect("git add second");
+        Command::new("git")
+            .args(["commit", "-m", "commit 2"])
+            .current_dir(&repo_root)
+            .output()
+            .expect("git commit second");
+        let commit_head = String::from_utf8(
+            Command::new("git")
+                .args(["rev-parse", "HEAD"])
+                .current_dir(&repo_root)
+                .output()
+                .expect("git rev-parse commit")
+                .stdout,
+        )
+        .expect("utf8 commit head")
+        .trim()
+        .to_string();
+
+        let mut detail = DetailState::new(SessionSummary::default(), Vec::new(), false);
+        detail.session.repo_root = repo_root.to_string_lossy().into_owned();
+        detail.session.head_start = head_start;
+        detail.events = vec![SessionEvent {
+            session_id: "sess-1".to_string(),
+            seq: 7,
+            ts_wall: 0.0,
+            ts_monotonic_ms: 0,
+            event_type: "git.commit.created".to_string(),
+            payload: json!({"sha": commit_head}),
+        }];
+        detail.timeline_entries = vec![TimelineEntry {
+            event_index: 0,
+            event_start_index: 0,
+            event_end_index: 0,
+            seq_start: 7,
+            seq_end: 7,
+            ts_wall: 0.0,
+            event_type: "git.commit.created".to_string(),
+            summary: "commit 2".to_string(),
+            copy_command: None,
+        }];
+        detail.timeline_index = 0;
+        detail.git_checkpoint_records = vec![
+            GitCheckpointRecord {
+                checkpoint_id: "chkpt-0001".to_string(),
+                seq: 3,
+                timestamp: 0,
+                reason: String::new(),
+                repo_root: repo_root.to_string_lossy().into_owned(),
+                branch: String::new(),
+                head: head_checkpoint,
+                comparison_base_head: String::new(),
+                status_porcelain: String::new(),
+                status_fingerprint: String::new(),
+                tracked_patch_sha256: String::new(),
+                committed_diff_stat: String::new(),
+                committed_files: Vec::new(),
+                worktree_diff_stat: String::new(),
+                changed_files: vec!["modifications.md".to_string()],
+                untracked_paths: Vec::new(),
+                fingerprint: String::new(),
+                delta_diff_stat: "modifications.md | 2 ++".to_string(),
+                delta_files: vec!["modifications.md".to_string()],
+                delta_file_markers: [("modifications.md".to_string(), "~".to_string())]
+                    .into_iter()
+                    .collect(),
+                cumulative_diff_stat: "modifications.md | 2 ++".to_string(),
+                cumulative_files: vec!["modifications.md".to_string()],
+                cumulative_file_markers: [("modifications.md".to_string(), "+".to_string())]
+                    .into_iter()
+                    .collect(),
+            },
+            GitCheckpointRecord {
+                checkpoint_id: "chkpt-0002".to_string(),
+                seq: 6,
+                timestamp: 0,
+                reason: String::new(),
+                repo_root: repo_root.to_string_lossy().into_owned(),
+                branch: String::new(),
+                head: commit_head.clone(),
+                comparison_base_head: String::new(),
+                status_porcelain: String::new(),
+                status_fingerprint: String::new(),
+                tracked_patch_sha256: String::new(),
+                committed_diff_stat: String::new(),
+                committed_files: Vec::new(),
+                worktree_diff_stat: String::new(),
+                changed_files: Vec::new(),
+                untracked_paths: Vec::new(),
+                fingerprint: String::new(),
+                delta_diff_stat: String::new(),
+                delta_files: Vec::new(),
+                delta_file_markers: BTreeMap::new(),
+                cumulative_diff_stat: "modifications.md | 5 +++++".to_string(),
+                cumulative_files: vec!["modifications.md".to_string()],
+                cumulative_file_markers: [("modifications.md".to_string(), "+".to_string())]
+                    .into_iter()
+                    .collect(),
+            },
+        ];
+
+        let rendered = build_changes_lines(&detail)
+            .iter()
+            .map(ToString::to_string)
+            .collect::<Vec<_>>();
+
+        assert!(rendered
+            .iter()
+            .any(|line| line.contains("Changes made in this checkpoint")));
+        assert!(rendered
+            .iter()
+            .any(|line| line.contains("modifications.md | 3 +++")));
+        assert!(rendered
+            .iter()
+            .any(|line| line.contains("Changes made since session start")));
+        assert!(rendered
+            .iter()
+            .any(|line| line.contains("modifications.md | 5 +++++")));
 
         let _ = fs::remove_dir_all(repo_root);
     }
@@ -7072,6 +7509,7 @@ mod tests {
                 cols: 4,
             }]),
             terminal_replay_cache: HashMap::new(),
+            git_change_view_cache: RefCell::new(HashMap::new()),
             terminal_cache_key: None,
             pending_replay_cache_key: None,
             replay_cache_rx: None,

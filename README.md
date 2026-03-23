@@ -49,7 +49,7 @@ Agensic is designed to integrate deeply with your shell environment.
 
 - macOS (Zsh) — fully supported ✅
 
-- Linux (Bash/Zsh) — fully supported ✅
+- Linux (Bash) — fully supported ✅
 
 - Windows (PowerShell) — coming soon 🕐 (estimated end of April 2026)
 
