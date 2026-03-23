@@ -1473,6 +1473,22 @@ def _build_tracked_child_env(launch: TrackLaunch, session_id: str) -> dict[str, 
     env = os.environ.copy()
     for transient_key in ("ZDOTDIR", "BASH_ENV", "ENV"):
         env.pop(transient_key, None)
+    # Avoid inheriting caller-scoped Git repository overrides into tracked shells.
+    # These variables can redirect `git` to the wrong repo/index and cause CI-only
+    # failures when the tracked command runs inside a temporary repository.
+    for git_key in (
+        "GIT_DIR",
+        "GIT_WORK_TREE",
+        "GIT_INDEX_FILE",
+        "GIT_OBJECT_DIRECTORY",
+        "GIT_ALTERNATE_OBJECT_DIRECTORIES",
+        "GIT_COMMON_DIR",
+        "GIT_PREFIX",
+        "GIT_SUPER_PREFIX",
+        "GIT_CEILING_DIRECTORIES",
+        "GIT_DISCOVERY_ACROSS_FILESYSTEM",
+    ):
+        env.pop(git_key, None)
     env["AGENSIC_TRACK_ACTIVE"] = "1"
     env["AGENSIC_TRACK_SESSION_ID"] = session_id
     env["AGENSIC_TRACK_AGENT"] = launch.agent

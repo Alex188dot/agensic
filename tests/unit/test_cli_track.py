@@ -731,7 +731,15 @@ class CliTrackTests(unittest.TestCase):
         self.assertEqual(launch.model, "claude-sonnet-4")
 
     def test_build_tracked_child_env_only_injects_tracking_metadata(self):
-        with self._temp_app_paths():
+        with self._temp_app_paths(), patch.dict(
+            os.environ,
+            {
+                "GIT_DIR": "/tmp/not-the-repo/.git",
+                "GIT_WORK_TREE": "/tmp/not-the-repo",
+                "GIT_INDEX_FILE": "/tmp/not-the-repo/index",
+            },
+            clear=False,
+        ):
             launch = _make_test_launch(["bash", "-lc", "echo hi"])
             child_env = track_module._build_tracked_child_env(launch, "session-policy")
 
@@ -742,6 +750,9 @@ class CliTrackTests(unittest.TestCase):
             self.assertNotIn("AGENSIC_TRACK_POLICY_DIR", child_env)
             self.assertNotIn("ZDOTDIR", child_env)
             self.assertNotIn("BASH_ENV", child_env)
+            self.assertNotIn("GIT_DIR", child_env)
+            self.assertNotIn("GIT_WORK_TREE", child_env)
+            self.assertNotIn("GIT_INDEX_FILE", child_env)
 
     def test_ensure_track_supported_allows_linux_posix_with_openpty(self):
         with patch.object(track_module.sys, "platform", "linux"), patch.object(track_module.os, "name", "posix"):
