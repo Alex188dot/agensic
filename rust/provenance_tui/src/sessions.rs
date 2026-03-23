@@ -2632,13 +2632,116 @@ fn build_changes_lines(detail: &DetailState) -> Vec<Line<'static>> {
         } else {
             worktree_stats
         };
+    let selected_event = detail.selected_event();
+    let selected_entry = detail.selected_timeline_entry();
+    let selected_target_seq = selected_entry
+        .map(|entry| entry.seq_end.max(entry.seq_start))
+        .unwrap_or_default();
     let selected_checkpoint = detail.selected_git_checkpoint();
-    let checkpoint_label = selected_checkpoint
+    let default_checkpoint_label = selected_checkpoint
         .map(|record| sanitize_inline_text(&record.checkpoint_id))
         .filter(|value| !value.is_empty())
         .unwrap_or_else(|| "-".to_string());
-    let (checkpoint_preferred_stats, checkpoint_files, checkpoint_markers) =
-        if let Some(record) = selected_checkpoint {
+    let (checkpoint_label, selected_head) = selected_event
+        .map(|event| match event.event_type.as_str() {
+            "git.snapshot.end" => (
+                "snapshot end".to_string(),
+                event
+                    .payload
+                    .get("head")
+                    .and_then(Value::as_str)
+                    .map(str::to_string),
+            ),
+            "git.commit.created" | "git.commit.sess_sync" => (
+                sanitize_inline_text(
+                    event
+                        .payload
+                        .get("sha")
+                        .and_then(Value::as_str)
+                        .unwrap_or("commit"),
+                ),
+                event
+                    .payload
+                    .get("sha")
+                    .and_then(Value::as_str)
+                    .map(str::to_string),
+            ),
+            "git.snapshot.chkpt" => (default_checkpoint_label.clone(), None),
+            _ => (default_checkpoint_label.clone(), None),
+        })
+        .unwrap_or_else(|| (default_checkpoint_label.clone(), None));
+    let synthetic_git_view = if let (Some(record), Some(target_head)) =
+        (selected_checkpoint, selected_head.as_deref())
+    {
+        let record_head = record.head.trim();
+        if selected_target_seq > record.seq
+            && !record_head.is_empty()
+            && !target_head.trim().is_empty()
+            && record_head != target_head.trim()
+        {
+            Some((
+                build_git_range_change_view(&detail.session.repo_root, record_head, target_head),
+                build_git_range_change_view(
+                    &detail.session.repo_root,
+                    &detail.session.head_start,
+                    target_head,
+                ),
+            ))
+        } else {
+            None
+        }
+    } else {
+        None
+    };
+    let (checkpoint_delta_stats, checkpoint_delta_files, checkpoint_delta_markers) =
+        if let Some((delta_view, _)) = synthetic_git_view.as_ref() {
+            (
+                delta_view.stats.clone(),
+                delta_view.files.clone(),
+                delta_view.markers.clone(),
+            )
+        } else if let Some(record) = selected_checkpoint {
+            let checkpoint_delta_stats =
+                parse_diff_stat(&sanitize_multiline_text(&record.delta_diff_stat));
+            let checkpoint_worktree_stats =
+                parse_diff_stat(&sanitize_multiline_text(&record.worktree_diff_stat));
+            let preferred_stats = if !checkpoint_delta_stats.files.is_empty()
+                || checkpoint_delta_stats.summary.is_some()
+            {
+                checkpoint_delta_stats
+            } else if !checkpoint_worktree_stats.files.is_empty()
+                || checkpoint_worktree_stats.summary.is_some()
+            {
+                checkpoint_worktree_stats
+            } else {
+                ParsedDiffStat::default()
+            };
+            let preferred_files = if !record.delta_files.is_empty() {
+                &record.delta_files
+            } else {
+                &record.changed_files
+            };
+            let files = preferred_files
+                .iter()
+                .map(|item| sanitize_inline_text(item))
+                .filter(|item| !item.is_empty())
+                .collect();
+            (preferred_stats, files, record.delta_file_markers.clone())
+        } else {
+            (
+                session_preferred_stats.clone(),
+                session_files.clone(),
+                BTreeMap::new(),
+            )
+        };
+    let (checkpoint_cumulative_stats, checkpoint_cumulative_files, checkpoint_cumulative_markers) =
+        if let Some((_, cumulative_view)) = synthetic_git_view.as_ref() {
+            (
+                cumulative_view.stats.clone(),
+                cumulative_view.files.clone(),
+                cumulative_view.markers.clone(),
+            )
+        } else if let Some(record) = selected_checkpoint {
             let checkpoint_cumulative_stats =
                 parse_diff_stat(&sanitize_multiline_text(&record.cumulative_diff_stat));
             let checkpoint_worktree_stats =
@@ -2679,7 +2782,7 @@ fn build_changes_lines(detail: &DetailState) -> Vec<Line<'static>> {
 
     lines.push(Line::from(""));
     lines.push(Line::from(Span::styled(
-        "Recap in this session",
+        "Session Summary",
         Style::default()
             .fg(Color::Cyan)
             .add_modifier(Modifier::BOLD),
@@ -2696,41 +2799,156 @@ fn build_changes_lines(detail: &DetailState) -> Vec<Line<'static>> {
     }
     lines.push(Line::from(""));
     lines.push(Line::from(Span::styled(
-        format!("Files changed at selected checkpoint ({checkpoint_label})"),
+        format!("Changes made in this checkpoint ({checkpoint_label})"),
         Style::default()
             .fg(Color::Cyan)
             .add_modifier(Modifier::BOLD),
     )));
-    if checkpoint_files.is_empty() && checkpoint_preferred_stats.files.is_empty() {
-        lines.push(Line::from(
-            "No repo changes recorded at selected checkpoint.",
-        ));
-    } else {
-        let mut rendered_files = BTreeSet::new();
-        for file in checkpoint_files {
-            rendered_files.insert(file.clone());
-            let marker = checkpoint_markers
-                .get(&file)
-                .cloned()
-                .unwrap_or_else(|| "•".to_string());
-            if let Some(stat) = checkpoint_preferred_stats.files.get(&file) {
-                lines.push(diff_stat_line(&format!("{marker} {} | {}", file, stat)));
-            } else {
-                lines.push(Line::from(format!("{marker} {}", file)));
-            }
-        }
-        for (file, stat) in &checkpoint_preferred_stats.files {
-            if rendered_files.insert(file.clone()) {
-                let marker = checkpoint_markers
-                    .get(file)
-                    .cloned()
-                    .unwrap_or_else(|| "•".to_string());
-                lines.push(diff_stat_line(&format!("{marker} {} | {}", file, stat)));
-            }
-        }
-    }
+    render_changes_block(
+        &mut lines,
+        &checkpoint_delta_stats,
+        &checkpoint_delta_files,
+        &checkpoint_delta_markers,
+        "No repo changes recorded in this checkpoint.",
+    );
+    lines.push(Line::from(""));
+    lines.push(Line::from(Span::styled(
+        format!("Changes made since session start ({checkpoint_label})"),
+        Style::default()
+            .fg(Color::Cyan)
+            .add_modifier(Modifier::BOLD),
+    )));
+    render_changes_block(
+        &mut lines,
+        &checkpoint_cumulative_stats,
+        &checkpoint_cumulative_files,
+        &checkpoint_cumulative_markers,
+        "No repo changes recorded since session start.",
+    );
 
     lines
+}
+
+fn render_changes_block(
+    lines: &mut Vec<Line<'static>>,
+    stats: &ParsedDiffStat,
+    files: &[String],
+    markers: &BTreeMap<String, String>,
+    empty_message: &str,
+) {
+    if files.is_empty() && stats.files.is_empty() {
+        lines.push(Line::from(empty_message.to_string()));
+        return;
+    }
+    let mut rendered_files = BTreeSet::new();
+    for file in files {
+        rendered_files.insert(file.clone());
+        let marker = markers
+            .get(file)
+            .cloned()
+            .unwrap_or_else(|| "•".to_string());
+        if let Some(stat) = stats.files.get(file) {
+            lines.push(diff_stat_line(&format!("{marker} {} | {}", file, stat)));
+        } else {
+            lines.push(Line::from(format!("{marker} {}", file)));
+        }
+    }
+    for (file, stat) in &stats.files {
+        if rendered_files.insert(file.clone()) {
+            let marker = markers
+                .get(file)
+                .cloned()
+                .unwrap_or_else(|| "•".to_string());
+            lines.push(diff_stat_line(&format!("{marker} {} | {}", file, stat)));
+        }
+    }
+}
+
+#[derive(Clone, Debug, Default)]
+struct GitRangeChangeView {
+    stats: ParsedDiffStat,
+    files: Vec<String>,
+    markers: BTreeMap<String, String>,
+}
+
+fn build_git_range_change_view(
+    repo_root: &str,
+    start_head: &str,
+    end_head: &str,
+) -> GitRangeChangeView {
+    let clean_repo_root = repo_root.trim();
+    let clean_start = start_head.trim();
+    let clean_end = end_head.trim();
+    if clean_repo_root.is_empty()
+        || clean_start.is_empty()
+        || clean_end.is_empty()
+        || clean_start == clean_end
+    {
+        return GitRangeChangeView::default();
+    }
+    let range = format!("{clean_start}..{clean_end}");
+    let diff_stat =
+        git_capture_text(clean_repo_root, &["diff", "--stat", &range]).unwrap_or_default();
+    let stats = parse_diff_stat(&sanitize_multiline_text(&diff_stat));
+    let name_status =
+        git_capture_text(clean_repo_root, &["diff", "--name-status", &range]).unwrap_or_default();
+    let (files, markers) = parse_name_status_text(&name_status);
+    GitRangeChangeView {
+        stats,
+        files,
+        markers,
+    }
+}
+
+fn git_capture_text(repo_root: &str, args: &[&str]) -> Option<String> {
+    let output = Command::new("git")
+        .arg("-C")
+        .arg(repo_root)
+        .args(args)
+        .output()
+        .ok()?;
+    if !output.status.success() {
+        return None;
+    }
+    String::from_utf8(output.stdout)
+        .ok()
+        .map(|text| text.trim().to_string())
+}
+
+fn parse_name_status_text(text: &str) -> (Vec<String>, BTreeMap<String, String>) {
+    let mut files = Vec::new();
+    let mut markers = BTreeMap::new();
+    for raw_line in text
+        .lines()
+        .map(str::trim_end)
+        .filter(|line| !line.is_empty())
+    {
+        let parts: Vec<&str> = raw_line.split('\t').collect();
+        if parts.len() < 2 {
+            continue;
+        }
+        let status = parts[0].trim();
+        let path = parts.last().copied().unwrap_or_default().trim();
+        if path.is_empty() {
+            continue;
+        }
+        let clean_path = path.to_string();
+        if !files.iter().any(|item| item == &clean_path) {
+            files.push(clean_path.clone());
+        }
+        markers.insert(clean_path, marker_for_git_status(status).to_string());
+    }
+    (files, markers)
+}
+
+fn marker_for_git_status(status: &str) -> &'static str {
+    match status.chars().next().unwrap_or_default() {
+        'A' | 'C' => "+",
+        'D' => "-",
+        'R' => ">",
+        'M' => "~",
+        _ => "•",
+    }
 }
 
 fn changes_plain_text(lines: &[Line<'_>]) -> String {
@@ -5141,8 +5359,8 @@ mod tests {
         sanitize_terminal_output, session_detail_layout_in_area, strip_inline_progress_noise,
         terminal_replay_end_padding, terminal_replay_max_scroll_x, terminal_replay_scroll,
         timeline_category_color, timeline_kind_style, vt100_color_to_ratatui, App,
-        DeleteModalState, DetailState, FocusPane, ReplayMode, SessionEvent, SessionFilters,
-        SessionSummary, SessionsArgs, TerminalReplayFrame, TimeTravelModalState,
+        DeleteModalState, DetailState, FocusPane, GitCheckpointRecord, ReplayMode, SessionEvent,
+        SessionFilters, SessionSummary, SessionsArgs, TerminalReplayFrame, TimeTravelModalState,
         TimeTravelPreviewResponse, TimelineCategory, TimelineEntry, TranscriptChunk,
         TEXT_REPLAY_TICK_MS,
     };
@@ -5161,6 +5379,7 @@ mod tests {
         env, fs,
         io::{Read, Write},
         net::TcpListener,
+        process::Command,
         sync::Arc,
         thread,
         time::{Duration, Instant},
@@ -5854,14 +6073,263 @@ mod tests {
             .expect("summary should be rendered");
         let files_changed_idx = rendered
             .iter()
-            .position(|line| line.contains("Files changed at selected checkpoint"))
-            .expect("Files changed heading should be rendered");
+            .position(|line| line.contains("Changes made in this checkpoint"))
+            .expect("checkpoint heading should be rendered");
 
         assert!(summary_idx < files_changed_idx);
         assert!(rendered
             .iter()
             .any(|line| line.contains("• agensic.bash | 11 +++++++++++")));
         assert!(!rendered.iter().any(|line| line == "Committed diff stat"));
+    }
+
+    #[test]
+    fn changes_pane_shows_checkpoint_delta_and_cumulative_views() {
+        let mut detail = DetailState::new(SessionSummary::default(), Vec::new(), false);
+        detail.session.changes = json!({
+            "files_changed": ["modifications.md"],
+            "committed_diff_stat": "modifications.md | 6 ++++++\n1 file changed, 6 insertions(+)",
+        });
+        detail.timeline_entries = vec![TimelineEntry {
+            event_index: 0,
+            event_start_index: 0,
+            event_end_index: 0,
+            seq_start: 3,
+            seq_end: 3,
+            ts_wall: 0.0,
+            event_type: "git.snapshot.chkpt".to_string(),
+            summary: "chkpt-0003".to_string(),
+            copy_command: None,
+        }];
+        detail.timeline_index = 0;
+        detail.git_checkpoint_records = vec![GitCheckpointRecord {
+            checkpoint_id: "chkpt-0003".to_string(),
+            seq: 3,
+            timestamp: 0,
+            reason: String::new(),
+            repo_root: String::new(),
+            branch: String::new(),
+            head: String::new(),
+            comparison_base_head: String::new(),
+            status_porcelain: String::new(),
+            status_fingerprint: String::new(),
+            tracked_patch_sha256: String::new(),
+            committed_diff_stat: String::new(),
+            committed_files: Vec::new(),
+            worktree_diff_stat: String::new(),
+            changed_files: vec!["modifications.md".to_string()],
+            untracked_paths: Vec::new(),
+            fingerprint: String::new(),
+            delta_diff_stat: "modifications.md | 3 +++".to_string(),
+            delta_files: vec!["modifications.md".to_string()],
+            delta_file_markers: [("modifications.md".to_string(), "~".to_string())]
+                .into_iter()
+                .collect(),
+            cumulative_diff_stat: "modifications.md | 6 ++++++".to_string(),
+            cumulative_files: vec!["modifications.md".to_string()],
+            cumulative_file_markers: [("modifications.md".to_string(), "~".to_string())]
+                .into_iter()
+                .collect(),
+        }];
+
+        let rendered = build_changes_lines(&detail)
+            .iter()
+            .map(ToString::to_string)
+            .collect::<Vec<_>>();
+
+        assert!(rendered
+            .iter()
+            .any(|line| line.contains("Changes made in this checkpoint (chkpt-0003)")));
+        assert!(rendered
+            .iter()
+            .any(|line| line.contains("~ modifications.md | 3 +++")));
+        assert!(rendered
+            .iter()
+            .any(|line| line.contains("Changes made since session start (chkpt-0003)")));
+        assert!(rendered
+            .iter()
+            .any(|line| line.contains("~ modifications.md | 6 ++++++")));
+    }
+
+    #[test]
+    fn changes_pane_uses_selected_end_snapshot_after_last_checkpoint() {
+        let suffix = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|duration| duration.as_nanos())
+            .unwrap_or(0);
+        let repo_root = std::env::temp_dir().join(format!("sessions-end-snapshot-{suffix}"));
+        fs::create_dir_all(&repo_root).expect("create repo root");
+
+        Command::new("git")
+            .args(["init"])
+            .current_dir(&repo_root)
+            .output()
+            .expect("git init");
+        Command::new("git")
+            .args(["config", "user.email", "test@example.com"])
+            .current_dir(&repo_root)
+            .output()
+            .expect("git config email");
+        Command::new("git")
+            .args(["config", "user.name", "Test User"])
+            .current_dir(&repo_root)
+            .output()
+            .expect("git config name");
+
+        fs::write(repo_root.join("base.txt"), "base\n").expect("write base file");
+        Command::new("git")
+            .args(["add", "base.txt"])
+            .current_dir(&repo_root)
+            .output()
+            .expect("git add base");
+        Command::new("git")
+            .args(["commit", "-m", "base"])
+            .current_dir(&repo_root)
+            .output()
+            .expect("git commit base");
+        let head_start = String::from_utf8(
+            Command::new("git")
+                .args(["rev-parse", "HEAD"])
+                .current_dir(&repo_root)
+                .output()
+                .expect("git rev-parse base")
+                .stdout,
+        )
+        .expect("utf8 head")
+        .trim()
+        .to_string();
+
+        fs::write(
+            repo_root.join("modifications.md"),
+            "# Modifications\nline 1\nline 2\n",
+        )
+        .expect("write first version");
+        Command::new("git")
+            .args(["add", "modifications.md"])
+            .current_dir(&repo_root)
+            .output()
+            .expect("git add first");
+        Command::new("git")
+            .args(["commit", "-m", "commit 1"])
+            .current_dir(&repo_root)
+            .output()
+            .expect("git commit first");
+        let checkpoint_head = String::from_utf8(
+            Command::new("git")
+                .args(["rev-parse", "HEAD"])
+                .current_dir(&repo_root)
+                .output()
+                .expect("git rev-parse checkpoint")
+                .stdout,
+        )
+        .expect("utf8 checkpoint head")
+        .trim()
+        .to_string();
+
+        fs::write(
+            repo_root.join("modifications.md"),
+            "# Modifications\nline 1\nline 2\nline 3\nline 4\nline 5\n",
+        )
+        .expect("write second version");
+        Command::new("git")
+            .args(["add", "modifications.md"])
+            .current_dir(&repo_root)
+            .output()
+            .expect("git add second");
+        Command::new("git")
+            .args(["commit", "-m", "commit 2"])
+            .current_dir(&repo_root)
+            .output()
+            .expect("git commit second");
+        let head_end = String::from_utf8(
+            Command::new("git")
+                .args(["rev-parse", "HEAD"])
+                .current_dir(&repo_root)
+                .output()
+                .expect("git rev-parse end")
+                .stdout,
+        )
+        .expect("utf8 end head")
+        .trim()
+        .to_string();
+
+        let mut detail = DetailState::new(SessionSummary::default(), Vec::new(), false);
+        detail.session.repo_root = repo_root.to_string_lossy().into_owned();
+        detail.session.head_start = head_start;
+        detail.session.head_end = head_end.clone();
+        detail.session.changes = json!({
+            "files_changed": ["modifications.md"],
+            "committed_diff_stat": "modifications.md | 6 ++++++\n1 file changed, 6 insertions(+)",
+        });
+        detail.events = vec![SessionEvent {
+            session_id: "sess-1".to_string(),
+            seq: 5,
+            ts_wall: 0.0,
+            ts_monotonic_ms: 0,
+            event_type: "git.snapshot.end".to_string(),
+            payload: json!({"head": head_end}),
+        }];
+        detail.timeline_entries = vec![TimelineEntry {
+            event_index: 0,
+            event_start_index: 0,
+            event_end_index: 0,
+            seq_start: 5,
+            seq_end: 5,
+            ts_wall: 0.0,
+            event_type: "git.snapshot.end".to_string(),
+            summary: "snapshot end".to_string(),
+            copy_command: None,
+        }];
+        detail.timeline_index = 0;
+        detail.git_checkpoint_records = vec![GitCheckpointRecord {
+            checkpoint_id: "chkpt-0003".to_string(),
+            seq: 3,
+            timestamp: 0,
+            reason: String::new(),
+            repo_root: repo_root.to_string_lossy().into_owned(),
+            branch: String::new(),
+            head: checkpoint_head,
+            comparison_base_head: String::new(),
+            status_porcelain: String::new(),
+            status_fingerprint: String::new(),
+            tracked_patch_sha256: String::new(),
+            committed_diff_stat: String::new(),
+            committed_files: Vec::new(),
+            worktree_diff_stat: String::new(),
+            changed_files: vec!["modifications.md".to_string()],
+            untracked_paths: Vec::new(),
+            fingerprint: String::new(),
+            delta_diff_stat: "modifications.md | 3 +++".to_string(),
+            delta_files: vec!["modifications.md".to_string()],
+            delta_file_markers: [("modifications.md".to_string(), "~".to_string())]
+                .into_iter()
+                .collect(),
+            cumulative_diff_stat: "modifications.md | 3 +++".to_string(),
+            cumulative_files: vec!["modifications.md".to_string()],
+            cumulative_file_markers: [("modifications.md".to_string(), "+".to_string())]
+                .into_iter()
+                .collect(),
+        }];
+
+        let rendered = build_changes_lines(&detail)
+            .iter()
+            .map(ToString::to_string)
+            .collect::<Vec<_>>();
+
+        assert!(rendered
+            .iter()
+            .any(|line| line.contains("Changes made in this checkpoint (snapshot end)")));
+        assert!(rendered
+            .iter()
+            .any(|line| line.contains("modifications.md | 3 +++")));
+        assert!(rendered
+            .iter()
+            .any(|line| line.contains("Changes made since session start (snapshot end)")));
+        assert!(rendered
+            .iter()
+            .any(|line| line.contains("modifications.md | 6 ++++++")));
+
+        let _ = fs::remove_dir_all(repo_root);
     }
 
     #[test]

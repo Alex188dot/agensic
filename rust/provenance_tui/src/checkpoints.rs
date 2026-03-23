@@ -73,6 +73,12 @@ pub struct GitCheckpointRecord {
     #[serde(default)]
     pub fingerprint: String,
     #[serde(skip)]
+    pub delta_diff_stat: String,
+    #[serde(skip)]
+    pub delta_files: Vec<String>,
+    #[serde(skip)]
+    pub delta_file_markers: BTreeMap<String, String>,
+    #[serde(skip)]
     pub cumulative_diff_stat: String,
     #[serde(skip)]
     pub cumulative_files: Vec<String>,
@@ -524,6 +530,9 @@ pub fn load_git_checkpoint_records(path: &str) -> Vec<GitCheckpointRecord> {
     records.sort_by_key(|record| (record.seq, record.timestamp));
     let mut previous_head = String::new();
     for record in &mut records {
+        record.delta_diff_stat.clear();
+        record.delta_files.clear();
+        record.delta_file_markers.clear();
         record.cumulative_diff_stat.clear();
         record.cumulative_files.clear();
         record.cumulative_file_markers.clear();
@@ -570,9 +579,15 @@ pub fn enrich_git_checkpoint_records(
     let mut cumulative_markers = BTreeMap::new();
     let mut cumulative_stats = BTreeMap::new();
     for record in records {
+        record.delta_diff_stat.clear();
+        record.delta_files.clear();
+        record.delta_file_markers.clear();
         record.cumulative_diff_stat.clear();
         record.cumulative_files.clear();
         record.cumulative_file_markers.clear();
+        let mut delta_files = Vec::new();
+        let mut delta_markers = BTreeMap::new();
+        let mut delta_stats = BTreeMap::new();
         let mut committed_files = record.committed_files.clone();
         let mut committed_markers = BTreeMap::new();
         let (_, committed_stats) = parse_diff_stat_files(&record.committed_diff_stat);
@@ -595,9 +610,9 @@ pub fn enrich_git_checkpoint_records(
         }
         for file in &committed_files {
             merge_cumulative_file(
-                &mut cumulative_files,
-                &mut cumulative_markers,
-                &mut cumulative_stats,
+                &mut delta_files,
+                &mut delta_markers,
+                &mut delta_stats,
                 file,
                 committed_markers
                     .get(file)
@@ -617,9 +632,9 @@ pub fn enrich_git_checkpoint_records(
                 Some("•")
             };
             merge_cumulative_file(
-                &mut cumulative_files,
-                &mut cumulative_markers,
-                &mut cumulative_stats,
+                &mut delta_files,
+                &mut delta_markers,
+                &mut delta_stats,
                 file,
                 status_markers
                     .get(file)
@@ -635,9 +650,9 @@ pub fn enrich_git_checkpoint_records(
                 Some("•")
             };
             merge_cumulative_file(
-                &mut cumulative_files,
-                &mut cumulative_markers,
-                &mut cumulative_stats,
+                &mut delta_files,
+                &mut delta_markers,
+                &mut delta_stats,
                 file,
                 status_markers
                     .get(file)
@@ -653,9 +668,9 @@ pub fn enrich_git_checkpoint_records(
                 Some("•")
             };
             merge_cumulative_file(
-                &mut cumulative_files,
-                &mut cumulative_markers,
-                &mut cumulative_stats,
+                &mut delta_files,
+                &mut delta_markers,
+                &mut delta_stats,
                 file,
                 status_markers
                     .get(file)
@@ -666,12 +681,27 @@ pub fn enrich_git_checkpoint_records(
         }
         for file in &record.untracked_paths {
             merge_cumulative_file(
+                &mut delta_files,
+                &mut delta_markers,
+                &mut delta_stats,
+                file,
+                status_markers.get(file).map(String::as_str).or(Some("+")),
+                worktree_stats.get(file).map(String::as_str),
+            );
+        }
+
+        record.delta_files = delta_files.clone();
+        record.delta_file_markers = delta_markers.clone();
+        record.delta_diff_stat = build_cumulative_diff_stat(&delta_files, &delta_stats);
+
+        for file in &delta_files {
+            merge_cumulative_file(
                 &mut cumulative_files,
                 &mut cumulative_markers,
                 &mut cumulative_stats,
                 file,
-                status_markers.get(file).map(String::as_str).or(Some("+")),
-                worktree_stats.get(file).map(String::as_str),
+                delta_markers.get(file).map(String::as_str),
+                delta_stats.get(file).map(String::as_str),
             );
         }
 
@@ -858,6 +888,9 @@ mod tests {
                 changed_files: vec!["agensic/cli/track.py".to_string()],
                 untracked_paths: Vec::new(),
                 fingerprint: String::new(),
+                delta_diff_stat: String::new(),
+                delta_files: Vec::new(),
+                delta_file_markers: BTreeMap::new(),
                 cumulative_diff_stat: String::new(),
                 cumulative_files: Vec::new(),
                 cumulative_file_markers: BTreeMap::new(),
@@ -880,6 +913,9 @@ mod tests {
                 changed_files: vec!["modifications.md".to_string()],
                 untracked_paths: vec!["modifications.md".to_string()],
                 fingerprint: String::new(),
+                delta_diff_stat: String::new(),
+                delta_files: Vec::new(),
+                delta_file_markers: BTreeMap::new(),
                 cumulative_diff_stat: String::new(),
                 cumulative_files: Vec::new(),
                 cumulative_file_markers: BTreeMap::new(),
@@ -905,6 +941,14 @@ mod tests {
         assert_eq!(
             records[1]
                 .cumulative_file_markers
+                .get("modifications.md")
+                .map(String::as_str),
+            Some("+")
+        );
+        assert_eq!(records[1].delta_files, vec!["modifications.md".to_string()]);
+        assert_eq!(
+            records[1]
+                .delta_file_markers
                 .get("modifications.md")
                 .map(String::as_str),
             Some("+")
