@@ -934,9 +934,24 @@ class CliTrackTests(unittest.TestCase):
                 transcript_text,
             )
             self.assertIn(
-                " / Time Travel activated. A new branch called agensic/time-travel/sess-1-2",
+                " / \x1b[38;5;214mTime Travel activated. A new branch called agensic/time-travel/sess-1-2",
                 transcript_text,
             )
+            self.assertIn(
+                "\x1b[0m",
+                transcript_text,
+            )
+
+    def test_build_startup_terminal_lines_colors_time_travel_banner_after_slash(self):
+        lines = track_module._build_startup_terminal_lines(
+            "sess-123",
+            replay_metadata={"fork_branch": "agensic/time-travel/sess-123"},
+        )
+
+        self.assertEqual(len(lines), 1)
+        self.assertTrue(lines[0].startswith("agensic session id sess-123 / "))
+        self.assertIn("\x1b[38;5;214mTime Travel activated.", lines[0])
+        self.assertTrue(lines[0].endswith("\x1b[0m"))
 
     def test_run_tracked_command_emits_git_commit_created_before_session_end(self):
         with self._temp_app_paths() as (_, temp_paths), self._mock_track_daemon(temp_paths), tempfile.TemporaryDirectory() as repo_dir:

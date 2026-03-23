@@ -27,6 +27,7 @@ from typing import Any
 import psutil
 import requests
 from rich.console import Console
+from rich.text import Text
 
 from agensic.config.auth import AuthTokenCache, build_auth_headers
 from agensic.engine.provenance import (
@@ -73,6 +74,8 @@ TRACK_ESCAPE_PRIMITIVE_TOKENS = (
     "launchctl ",
 )
 TRACK_TTY_RESET_SEQ = "\x1b[?1000l\x1b[?1002l\x1b[?1003l\x1b[?1004l\x1b[?1006l\x1b[?1015l"
+TRACK_TIME_TRAVEL_BANNER_COLOR_SEQ = "\x1b[38;5;214m"
+TRACK_ANSI_RESET_SEQ = "\x1b[0m"
 TRACK_CHECKPOINT_INTERVAL_MS = 120
 TRACK_CHECKPOINT_INTERVAL_EVENTS = 48
 DEFAULT_LOCAL_REGISTRY_VERSION = "local-override"
@@ -2560,10 +2563,18 @@ def _build_startup_terminal_lines(
     if replay_metadata:
         branch_name = str(replay_metadata.get("fork_branch", "") or "").strip() or "the time-travel branch"
         line += (
-            " / Time Travel activated. A new branch called "
+            f" / {TRACK_TIME_TRAVEL_BANNER_COLOR_SEQ}"
+            "Time Travel activated. A new branch called "
             f"{branch_name} has been created and your session and repo have been switched to it"
+            f"{TRACK_ANSI_RESET_SEQ}"
         )
     return [line]
+
+
+def _render_startup_terminal_line(line: str) -> Text:
+    if "\x1b[" in line:
+        return Text.from_ansi(line)
+    return Text(line)
 
 
 def _record_startup_terminal_output(
@@ -3505,7 +3516,7 @@ def run_tracked_command(
             stdin_fd = sys.stdin.fileno()
             stdout_fd = sys.stdout.fileno()
             for line in _build_startup_terminal_lines(session_id, replay_metadata=replay_metadata):
-                console.print(line, highlight=False)
+                console.print(_render_startup_terminal_line(line), highlight=False)
             old_tty = termios.tcgetattr(stdin_fd)
             tty.setraw(stdin_fd)
             pending_initial_winsize = _apply_winsize(master_fd, stdin_fd)
