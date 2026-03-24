@@ -25,3 +25,4 @@ jobs:
           path-to-signatures: 'cla-signatures.json'
           path-to-document: '${{ github.server_url }}/${{ github.repository }}/blob/main/CONTRIBUTING.md'
           branch: 'main'
+          allowlist: 'Alex188dot,bot*'
