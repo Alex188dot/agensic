@@ -2704,6 +2704,24 @@ def _command_runs_git_commit(command_text: str) -> bool:
     if not tokens:
         return False
 
+    shell_commands = {
+        "sh",
+        "bash",
+        "zsh",
+        "dash",
+        "ksh",
+        "fish",
+    }
+    shell_eval_flags = {"-c", "-lc", "-ic"}
+    executable = os.path.basename(tokens[0])
+    if executable in shell_commands:
+        for index, token in enumerate(tokens[1:], start=1):
+            if token not in shell_eval_flags:
+                continue
+            if index + 1 >= len(tokens):
+                return False
+            return _command_runs_git_commit(tokens[index + 1])
+
     options_with_values = {"-c", "-C", "--git-dir", "--work-tree", "--namespace", "--super-prefix", "--config-env"}
     for index, token in enumerate(tokens):
         if os.path.basename(token) != "git":
