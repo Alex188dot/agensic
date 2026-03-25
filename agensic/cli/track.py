@@ -2843,15 +2843,37 @@ def _read_live_process_tree(root_pid: int) -> dict[int, dict[str, Any]]:
         return {}
 
     out: dict[int, dict[str, Any]] = {}
-    processes: list[psutil.Process] = [root_proc]
+    root_session_id = _safe_getsid(root_pid)
+    root_process_group_id = _safe_getpgid(root_pid)
+    processes_by_pid: dict[int, psutil.Process] = {int(root_proc.pid): root_proc}
     try:
-        processes.extend(root_proc.children(recursive=True))
+        for child in root_proc.children(recursive=True):
+            processes_by_pid[int(child.pid)] = child
     except (psutil.NoSuchProcess, psutil.ZombieProcess):
         pass
     except Exception:
         pass
 
-    for proc in processes:
+    if root_session_id > 0 or root_process_group_id > 0:
+        try:
+            for proc in psutil.process_iter():
+                pid = int(getattr(proc, "pid", 0) or 0)
+                if pid <= 0 or pid in processes_by_pid:
+                    continue
+                session_id = _safe_getsid(pid)
+                process_group_id = _safe_getpgid(pid)
+                if (
+                    root_session_id > 0
+                    and session_id == root_session_id
+                ) or (
+                    root_process_group_id > 0
+                    and process_group_id == root_process_group_id
+                ):
+                    processes_by_pid[pid] = proc
+        except Exception:
+            pass
+
+    for proc in processes_by_pid.values():
         try:
             with proc.oneshot():
                 pid = int(proc.pid)
