@@ -39,10 +39,11 @@ Instead of flattening all terminal activity into a single ambiguous "shell histo
 6. [Agensic Autocomplete](#-agensic-autocomplete)
    - [Features](#-features-autocomplete)
    - [Supported Providers](#-supported-providers)
-7. [Safety & Privacy](#-safety--privacy)
-8. [Project Creator](#-project-creator)
-9. [Support](#-support)
-10. [License](#-license)
+7. [Available Commands](#-available-commands)
+8. [Safety & Privacy](#-safety--privacy)
+9. [Project Creator](#-project-creator)
+10. [Support](#-support)
+11. [License](#-license)
 
 ---
 
@@ -60,13 +61,21 @@ Agensic is designed to integrate deeply with your shell environment.
 
 ## 🚀 <a id="-installation"></a>Installation
 
-The fastest path is using the managed installer:
+The fastest path is the managed one-line installer:
 
 ```bash
+curl -fsSL https://raw.githubusercontent.com/Alex188dot/agensic/main/bootstrap.sh | bash
+```
+
+If you prefer to clone manually:
+
+```bash
+git clone https://github.com/Alex188dot/agensic.git
+cd agensic
 bash ./install.sh
 ```
 
-The installer defaults to a CPU-only PyTorch wheel to avoid large CUDA downloads on machines that do not need GPU inference. If you already have `uv`, the installer will use it automatically for faster setup.
+If you already have `uv`, the installer will use it automatically for faster setup.
 
 On first run, Agensic will prompt you to choose your preferred LLM provider and configure your API keys for command autocomplete.
 
@@ -113,7 +122,11 @@ agensic provenance
 ---
 
 ## 🧾 <a id="-agensic-provenance"></a>Agensic Provenance
-Agensic gives you a forensic timeline for every command that matters. It classifies what happened, records rich metadata and surfaces a clear audit trail so you can tell whether a command was manually typed, accepted from a suggestion or executed directly by an agent.
+Agensic gives you a forensic transcript for every command. It classifies what happened, records rich metadata and surfaces a clear audit trail so you can tell whether a command was manually typed, accepted from a suggestion or executed directly by an agent.
+
+<p align="center">
+  <img src="./assets/provenance.gif" alt="Agensic provenance demo" width="75%" />
+</p>
 
 ### <a id="-features-provenance"></a>✨ Features
 
@@ -150,7 +163,11 @@ Agensic currently supports the following provenance labels:
 ---
 
 ## 🕵️‍♂️ <a id="-agensic-sessions"></a>Agensic Sessions
-Agensic records command provenance and tracks interactive agent sessions, giving you undeniable proof of what happened and the ability to safely manipulate repo state, via the Time Travel feature.
+Agensic records interactive agent sessions, giving you undeniable proof of what happened and the ability to safely manipulate repo state, via the Time Travel feature.
+
+<p align="center">
+  <img src="./assets/replay.gif" alt="Agensic replay demo" width="75%" />
+</p>
 
 ### <a id="-features-sessions"></a>✨ Features
 
@@ -196,12 +213,17 @@ Agensic provides support for a set of pre-configured built-in agents that can be
 - Pi.dev
 - Kilo Code
 - Continue CLI
-- Custom Agents
+
+Custom Agents: insert any agent executable in agensic setup and it will work immediately with no configuration
 
 ---
 
 ## ⚡ <a id="-agensic-autocomplete"></a>Agensic Autocomplete
 Agensic reimagines terminal suggestions. Context-aware, semantic and always fast IDE-style, satisfying Tab autocomplete.
+
+<p align="center">
+  <img src="./assets/autocomplete.gif" alt="Agensic autocomplete demo" width="50%" />
+</p>
 
 ### <a id="-features-autocomplete"></a>✨ Features
 
@@ -246,6 +268,39 @@ Agensic fits into your stack, whether you run models locally or use hosted endpo
 *   **Hosted:** OpenAI, Anthropic, Gemini, Azure, DeepSeek, Groq, Mistral, Qwen (DashScope), MiniMax, Moonshot, OpenRouter, Xiaomi MiMo, Z.AI, AWS SageMaker
 *   **Custom:** any OpenAI-compatible endpoint
 *   **History Only:** run entirely offline without AI calls, using only your local command history
+
+## 🧰 <a id="-available-commands"></a>Available Commands
+
+The table below lists every CLI command currently available in Agensic.
+
+| Command | What it does |
+| --- | --- |
+| <code>agensic --help</code> | Show the main CLI help and all standard user-facing commands |
+| <code>agensic --version</code> | Print the installed Agensic version and exit |
+| <code>agensic setup</code> | Open the interactive setup flow for Agensic Sessions and Autocomplete |
+| <code>agensic enable-startup</code> | Configure Agensic to start automatically on login or boot |
+| <code>agensic first-run</code> | Run the first-install onboarding flow |
+| <code>agensic start</code> | Start the Agensic background daemon manually |
+| <code>agensic stop</code> | Stop the Agensic daemon |
+| <code>agensic logs</code> | Tail the daemon log output in real time |
+| <code>agensic test</code> | Send a test autocomplete request to the daemon to verify connectivity |
+| <code>agensic provenance</code> | Open the command provenance history view. Supports filters such as <code>--limit</code>, <code>--label</code>, and <code>--contains</code> |
+| <code>agensic sessions</code> | Open the tracked sessions browser. Use <code>--text</code> for plain text output |
+| <code>agensic --explain "your command here"</code> | Explain a shell command in plain language and exit |
+| <code>agensic --add_agent "executable"</code> | Add a custom tracked agent executable and exit |
+| <code>agensic doctor</code> | Run diagnostics for the suggestion pipeline and local state |
+| <code>agensic fix</code> | Repair Agensic storage state. Supports <code>--safe</code>, <code>--recover</code>, and <code>--factory-reset</code> |
+| <code>agensic shortcuts</code> | Show the keyboard shortcuts for autocomplete |
+| <code>agensic auth rotate</code> | Rotate the local daemon auth token |
+| <code>agensic auth status</code> | Show metadata about the local daemon auth token |
+| <code>agensic run &lt;agent&gt; [agent args...]</code> | Launch a supported agent under Agensic session tracking |
+| <code>agensic run inspect [session_id]</code> | Inspect a tracked session. Supports <code>--text</code>, <code>--replay</code>, and <code>--tail N</code> |
+| <code>agensic run status</code> | Print the status of currently tracked agent sessions |
+| <code>agensic run stop [session_id]</code> | Stop a tracked session by id |
+| <code>agensic run stop --all</code> | Stop all currently tracked sessions |
+| <code>agensic uninstall</code> | Remove Agensic startup wiring and local install state |
+
+
 
 ---
 
