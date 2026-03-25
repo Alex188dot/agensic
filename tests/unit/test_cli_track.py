@@ -774,6 +774,8 @@ class CliTrackTests(unittest.TestCase):
                 "GIT_DIR": "/tmp/not-the-repo/.git",
                 "GIT_WORK_TREE": "/tmp/not-the-repo",
                 "GIT_INDEX_FILE": "/tmp/not-the-repo/index",
+                "GIT_CONFIG_GLOBAL": "/tmp/not-the-repo/gitconfig",
+                "GIT_CONFIG_COUNT": "1",
             },
             clear=False,
         ):
@@ -790,6 +792,8 @@ class CliTrackTests(unittest.TestCase):
             self.assertNotIn("GIT_DIR", child_env)
             self.assertNotIn("GIT_WORK_TREE", child_env)
             self.assertNotIn("GIT_INDEX_FILE", child_env)
+            self.assertNotIn("GIT_CONFIG_GLOBAL", child_env)
+            self.assertNotIn("GIT_CONFIG_COUNT", child_env)
 
     def test_ensure_track_supported_allows_linux_posix_with_openpty(self):
         with patch.object(track_module.sys, "platform", "linux"), patch.object(track_module.os, "name", "posix"):
