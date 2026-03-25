@@ -98,12 +98,18 @@ fi
 if [ -n "$CARGO_BIN" ]; then
     export PATH="$(dirname "$CARGO_BIN"):$PATH"
 fi
-if [ -f "$TUI_MANIFEST_PATH" ] && [ -n "$CARGO_BIN" ]; then
+LOCAL_TUI_BUILD_READY=0
+if [ -n "$CARGO_BIN" ]; then
+    if "$CARGO_BIN" --version >/dev/null 2>&1; then
+        LOCAL_TUI_BUILD_READY=1
+    else
+        echo "⚠️ cargo is present but no usable Rust toolchain is configured; falling back to published TUI sidecar."
+    fi
+fi
+if [ -f "$TUI_MANIFEST_PATH" ] && [ "$LOCAL_TUI_BUILD_READY" -eq 1 ]; then
     echo "🛠️ Building TUI sidecar from source..."
     "$CARGO_BIN" build --manifest-path "$TUI_MANIFEST_PATH" --release || {
-        echo "❌ Failed to build TUI sidecar from source."
-        echo "   Fix the Rust build or install without local sidecar changes."
-        exit 1
+        echo "⚠️ Failed to build TUI sidecar from source; falling back to published sidecar."
     }
 elif [ -f "$TUI_MANIFEST_PATH" ]; then
     echo "⚠️ cargo not found; local Rust sidecar changes will not be included."

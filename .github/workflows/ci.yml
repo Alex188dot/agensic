@@ -65,3 +65,22 @@ jobs:
             echo "==> Running ${module}"
             python -m unittest -v "$module"
           done
+
+  tuis-build:
+    name: TUIs Build (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest]
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Rust
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Build TUIs
+        shell: bash
+        run: cargo build --manifest-path rust/tuis/Cargo.toml --release --locked

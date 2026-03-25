@@ -2696,6 +2696,34 @@ def _stop_checkpoint_recorder(
             pass
 
 
+def _command_runs_git_commit(command_text: str) -> bool:
+    try:
+        tokens = shlex.split(str(command_text or "").strip(), posix=True)
+    except Exception:
+        tokens = str(command_text or "").strip().split()
+    if not tokens:
+        return False
+
+    options_with_values = {"-c", "-C", "--git-dir", "--work-tree", "--namespace", "--super-prefix", "--config-env"}
+    for index, token in enumerate(tokens):
+        if os.path.basename(token) != "git":
+            continue
+        cursor = index + 1
+        while cursor < len(tokens):
+            current = tokens[cursor]
+            if current == "commit":
+                return True
+            if current == "--":
+                break
+            if not current.startswith("-"):
+                break
+            cursor += 1
+            if current in options_with_values and cursor < len(tokens):
+                cursor += 1
+        return False
+    return False
+
+
 def _write_session_event(
     handle: Any,
     *,
@@ -3253,8 +3281,8 @@ class TrackRuntime:
     def _emit_runtime_git_commits(self, proc: ObservedProcess, *, exit_code: int | None = None) -> None:
         if int(exit_code or 0) != 0:
             return
-        command_text = str(proc.command or "").strip().lower()
-        if "git commit" not in command_text:
+        command_text = str(proc.command or "").strip()
+        if not _command_runs_git_commit(command_text):
             return
         repo_root = str(
             self.end_snapshot.get("repo_root", "")

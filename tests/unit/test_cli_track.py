@@ -76,6 +76,8 @@ def _test_git_commit_env() -> dict[str, str]:
             "GIT_AUTHOR_EMAIL": "test@example.com",
             "GIT_COMMITTER_NAME": "Test User",
             "GIT_COMMITTER_EMAIL": "test@example.com",
+            "GIT_CONFIG_GLOBAL": os.devnull,
+            "GIT_CONFIG_NOSYSTEM": "1",
         }
     )
     return env
@@ -89,6 +91,17 @@ def _run_test_git_commit(repo_dir: str, message: str) -> None:
         capture_output=True,
         text=True,
         env=_test_git_commit_env(),
+    )
+
+
+def _tracked_test_commit_command(message: str) -> str:
+    quoted_message = shlex.quote(message)
+    return (
+        "git add README.md; "
+        "git -c user.name='Test User' "
+        "-c user.email='test@example.com' "
+        "-c commit.gpgsign=false "
+        f"commit -m {quoted_message}"
     )
 
 
@@ -875,13 +888,7 @@ class CliTrackTests(unittest.TestCase):
                     [
                         "bash",
                         "-lc",
-                        "echo changed > README.md; "
-                        "git add README.md; "
-                        "GIT_AUTHOR_NAME='Test User' "
-                        "GIT_AUTHOR_EMAIL='test@example.com' "
-                        "GIT_COMMITTER_NAME='Test User' "
-                        "GIT_COMMITTER_EMAIL='test@example.com' "
-                        "git commit -m 'update readme'",
+                        "echo changed > README.md; " + _tracked_test_commit_command("update readme"),
                     ],
                 )
             code = track_module.run_tracked_command(launch)
@@ -968,13 +975,7 @@ class CliTrackTests(unittest.TestCase):
                     [
                         "bash",
                         "-lc",
-                        "echo changed > README.md; "
-                        "git add README.md; "
-                        "GIT_AUTHOR_NAME='Test User' "
-                        "GIT_AUTHOR_EMAIL='test@example.com' "
-                        "GIT_COMMITTER_NAME='Test User' "
-                        "GIT_COMMITTER_EMAIL='test@example.com' "
-                        "git commit -m 'update readme'",
+                        "echo changed > README.md; " + _tracked_test_commit_command("update readme"),
                     ],
                 )
             code = track_module.run_tracked_command(launch)
