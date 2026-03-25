@@ -112,6 +112,8 @@ AGENSIC_BASH_ORIGINAL_PS1="${PS1-}"
 AGENSIC_BASH_ORIGINAL_PROMPT_COMMAND="${PROMPT_COMMAND:-}"
 AGENSIC_BASH_RUNTIME_HOOKS_REGISTERED=0
 AGENSIC_BASH_TAB_BINDING_MODE=""
+AGENSIC_BASH_BIND_FALLBACK_X_BINDINGS=()
+AGENSIC_BASH_BIND_FALLBACK_FUNCTION_BINDINGS=()
 
 if [[ -f "$AGENSIC_SHARED_HELPERS_PATH" ]]; then
     # shellcheck disable=SC1090
@@ -153,6 +155,163 @@ _agensic_bash_get_agent_registry_state() {
 
 _agensic_bash_is_interactive() {
     [[ "$-" == *i* ]]
+}
+
+_agensic_bash_bind_normalize_keyseq() {
+    local keyseq="${1:-}"
+    case "$keyseq" in
+        '\t')
+            printf '%s\n' '\C-i'
+            return 0
+            ;;
+    esac
+    printf '%s\n' "$keyseq"
+}
+
+_agensic_bash_bind_trim() {
+    local value="${1:-}"
+    value="${value#"${value%%[![:space:]]*}"}"
+    value="${value%"${value##*[![:space:]]}"}"
+    printf '%s\n' "$value"
+}
+
+_agensic_bash_bind_store_entry() {
+    local array_name="$1"
+    local mode="$2"
+    local keyseq="$3"
+    local command="$4"
+    local entry="${mode}|${keyseq}|${command}"
+    local -a next=()
+    local item=""
+    local item_mode=""
+    local item_keyseq=""
+    local item_command=""
+
+    eval "for item in \"\${${array_name}[@]}\"; do
+        item_mode=\${item%%|*}
+        item_keyseq=\${item#*|}
+        item_keyseq=\${item_keyseq%%|*}
+        item_command=\${item##*|}
+        if [[ \$item_mode == \"$mode\" && \$item_keyseq == \"$keyseq\" ]]; then
+            continue
+        fi
+        next+=(\"\$item\")
+    done"
+    next+=("$entry")
+    eval "${array_name}=(\"\${next[@]}\")"
+}
+
+_agensic_bash_bind_list_x_bindings() {
+    local item=""
+    local keyseq=""
+    local command=""
+    local display_key=""
+    local printed=$'\n'
+    local line=""
+
+    for item in "${AGENSIC_BASH_BIND_FALLBACK_X_BINDINGS[@]}"; do
+        keyseq="${item#*|}"
+        keyseq="${keyseq%%|*}"
+        command="${item##*|}"
+        [[ -n "$command" ]] || continue
+        display_key="$(_agensic_bash_bind_normalize_keyseq "$keyseq")"
+        line="\"${display_key}\": \"${command}\""
+        if [[ "$printed" == *$'\n'"${line}"$'\n'* ]]; then
+            continue
+        fi
+        printf '%s\n' "$line"
+        printed+="${line}"$'\n'
+    done
+}
+
+_agensic_bash_bind_query_function() {
+    local target="${1:-}"
+    local item=""
+    local keyseq=""
+    local command=""
+    local display_key=""
+
+    for item in "${AGENSIC_BASH_BIND_FALLBACK_FUNCTION_BINDINGS[@]}"; do
+        keyseq="${item#*|}"
+        keyseq="${keyseq%%|*}"
+        command="${item##*|}"
+        if [[ -z "$command" || "$command" != "$target" ]]; then
+            continue
+        fi
+        display_key="$(_agensic_bash_bind_normalize_keyseq "$keyseq")"
+        printf '%s can be invoked via "%s".\n' "$target" "$display_key"
+        return 0
+    done
+    return 1
+}
+
+_agensic_bash_bind_apply_fallback() {
+    local args=("$@")
+    local mode="emacs-standard"
+    local action=""
+    local spec=""
+    local keyseq=""
+    local command=""
+    local index=0
+
+    if [[ ${#args[@]} -eq 1 && "${args[0]}" == "-X" ]]; then
+        _agensic_bash_bind_list_x_bindings
+        return 0
+    fi
+    if [[ ${#args[@]} -eq 2 && "${args[0]}" == "-q" ]]; then
+        _agensic_bash_bind_query_function "${args[1]}"
+        return $?
+    fi
+
+    while (( index < ${#args[@]} )); do
+        case "${args[index]}" in
+            -m)
+                ((index += 1))
+                if (( index >= ${#args[@]} )); then
+                    return 1
+                fi
+                mode="${args[index]}"
+                ;;
+            -x)
+                action="x"
+                ((index += 1))
+                if (( index >= ${#args[@]} )); then
+                    return 1
+                fi
+                spec="${args[index]}"
+                ;;
+            *)
+                action="function"
+                spec="${args[index]}"
+                ;;
+        esac
+        ((index += 1))
+    done
+
+    [[ -n "$spec" ]] || return 1
+    keyseq="${spec%%:*}"
+    command="${spec#*:}"
+    keyseq="$(_agensic_bash_bind_trim "$keyseq")"
+    command="$(_agensic_bash_bind_trim "$command")"
+    keyseq="${keyseq#\"}"
+    keyseq="${keyseq%\"}"
+    if [[ "$action" == "x" ]]; then
+        _agensic_bash_bind_store_entry AGENSIC_BASH_BIND_FALLBACK_X_BINDINGS "$mode" "$keyseq" "$command"
+        _agensic_bash_bind_store_entry AGENSIC_BASH_BIND_FALLBACK_FUNCTION_BINDINGS "$mode" "$keyseq" ""
+        return 0
+    fi
+    _agensic_bash_bind_store_entry AGENSIC_BASH_BIND_FALLBACK_FUNCTION_BINDINGS "$mode" "$keyseq" "$command"
+    _agensic_bash_bind_store_entry AGENSIC_BASH_BIND_FALLBACK_X_BINDINGS "$mode" "$keyseq" ""
+    return 0
+}
+
+bind() {
+    builtin bind "$@"
+    local status=$?
+    if [[ $status -eq 0 ]]; then
+        return 0
+    fi
+    _agensic_bash_bind_apply_fallback "$@"
 }
 
 _agensic_bash_lower() {
