@@ -2742,6 +2742,15 @@ def _command_runs_git_commit(command_text: str) -> bool:
     return False
 
 
+def _session_has_git_commit_command(runtime: "TrackRuntime") -> bool:
+    if _command_runs_git_commit(runtime.launch.root_command):
+        return True
+    for proc in runtime.processes.values():
+        if _command_runs_git_commit(proc.command):
+            return True
+    return False
+
+
 def _write_session_event(
     handle: Any,
     *,
@@ -3721,8 +3730,7 @@ def run_tracked_command(
                 watcher.join(timeout=5.0)
                 watcher_started = False
             runtime.end_snapshot = _capture_repo_snapshot(runtime.launch.working_directory)
-            runtime.emit_event("git.snapshot.end", dict(runtime.end_snapshot))
-            runtime.capture_git_checkpoint(reason="session_end")
+            session_has_git_commit_command = _session_has_git_commit_command(runtime)
             for commit in _git_commits_between(
                 str(runtime.end_snapshot.get("repo_root", "") or runtime.start_snapshot.get("repo_root", "") or ""),
                 str(runtime.start_snapshot.get("head", "") or ""),
@@ -3731,10 +3739,13 @@ def run_tracked_command(
                 sha = str(commit.get("sha", "") or "").strip()
                 if not sha or sha in runtime.emitted_commit_shas:
                     continue
-                runtime.emit_event("git.commit.sess_sync", commit)
+                event_type = "git.commit.created" if session_has_git_commit_command else "git.commit.sess_sync"
+                runtime.emit_event(event_type, commit)
                 runtime.capture_git_checkpoint(reason=f"commit_created:{sha}")
                 runtime.emitted_commit_shas.add(sha)
             runtime.last_observed_head = str(runtime.end_snapshot.get("head", "") or runtime.last_observed_head or "")
+            runtime.emit_event("git.snapshot.end", dict(runtime.end_snapshot))
+            runtime.capture_git_checkpoint(reason="session_end")
             runtime.emit_event(
                 "marker.session.finished",
                 {
