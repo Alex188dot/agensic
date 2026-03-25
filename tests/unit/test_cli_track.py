@@ -998,6 +998,48 @@ class CliTrackTests(unittest.TestCase):
             snapshot_end_index = event_types.index("git.snapshot.end")
             self.assertLess(commit_indices[0], snapshot_end_index)
 
+    def test_run_tracked_command_ignores_parent_git_repo_overrides(self):
+        with self._temp_app_paths() as (_, temp_paths), self._mock_track_daemon(temp_paths), tempfile.TemporaryDirectory() as repo_dir:
+            subprocess.run(["git", "init"], cwd=repo_dir, check=True, capture_output=True, text=True)
+            subprocess.run(["git", "config", "user.email", "test@example.com"], cwd=repo_dir, check=True)
+            subprocess.run(["git", "config", "user.name", "Test User"], cwd=repo_dir, check=True)
+            subprocess.run(["git", "config", "commit.gpgsign", "false"], cwd=repo_dir, check=True)
+            Path(repo_dir, "README.md").write_text("hello\n", encoding="utf-8")
+            subprocess.run(["git", "add", "README.md"], cwd=repo_dir, check=True)
+            _run_test_git_commit(repo_dir, "init")
+
+            poisoned_env = {
+                "GIT_DIR": "/tmp/not-the-repo/.git",
+                "GIT_WORK_TREE": "/tmp/not-the-repo",
+                "GIT_INDEX_FILE": "/tmp/not-the-repo/index",
+            }
+            with patch.dict(os.environ, poisoned_env, clear=False), patch("os.getcwd", return_value=repo_dir):
+                launch = _make_test_launch(
+                    [
+                        "bash",
+                        "-lc",
+                        "echo changed > README.md; " + _tracked_test_commit_command("update readme"),
+                    ],
+                )
+                code = track_module.run_tracked_command(launch)
+
+            self.assertEqual(code, 0)
+            store = SQLiteStateStore(temp_paths.state_sqlite_path, journal=None)
+            session = store.get_latest_tracked_session()
+            self.assertIsNotNone(session)
+            summary = store.get_session_summary(str(session["session_id"]))
+            self.assertIsNotNone(summary)
+            self.assertEqual(os.path.realpath(str(summary["repo_root"])), os.path.realpath(repo_dir))
+            self.assertTrue(list(summary["changes"].get("commits_created", []) or []))
+
+            event_stream_path = Path(str(summary.get("event_stream_path", "") or ""))
+            self.assertTrue(event_stream_path.is_file())
+            with gzip.open(event_stream_path, "rt", encoding="utf-8") as handle:
+                events = [json.loads(line) for line in handle if line.strip()]
+
+            event_types = [str(event.get("type", "") or "") for event in events]
+            self.assertIn("git.commit.created", event_types)
+
     def test_run_tracked_command_marks_external_commits_as_session_sync(self):
         with self._temp_app_paths() as (_, temp_paths), self._mock_track_daemon(temp_paths), tempfile.TemporaryDirectory() as repo_dir:
             subprocess.run(["git", "init"], cwd=repo_dir, check=True, capture_output=True, text=True)

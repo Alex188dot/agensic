@@ -111,6 +111,8 @@ if [ -f "$TUI_MANIFEST_PATH" ] && [ "$LOCAL_TUI_BUILD_READY" -eq 1 ]; then
     "$CARGO_BIN" build --manifest-path "$TUI_MANIFEST_PATH" --release || {
         echo "⚠️ Failed to build TUI sidecar from source; falling back to published sidecar."
     }
+elif [ -f "$TUI_MANIFEST_PATH" ] && [ -n "$CARGO_BIN" ]; then
+    echo "⚠️ Local Rust sidecar build is unavailable; published sidecar fallback will be used."
 elif [ -f "$TUI_MANIFEST_PATH" ]; then
     echo "⚠️ cargo not found; local Rust sidecar changes will not be included."
 fi
@@ -120,7 +122,7 @@ if [ -x "$LOCAL_TUI_BIN" ]; then
     chmod +x "$INSTALL_BIN_DIR/agensic-tuis"
     echo "✅ Installed local TUI sidecar to $INSTALL_BIN_DIR"
 else
-    MANIFEST_URL="${AGENSIC_TUIS_MANIFEST_URL:-https://github.com/Alex188dot/agensic/releases/latest/download/tuis_manifest.json}"
+    MANIFEST_URL="${AGENSIC_TUIS_MANIFEST_URL:-https://github.com/Alex188dot/agensic/releases/download/tuis-latest/tuis_manifest.json}"
     python3 - "$MANIFEST_URL" "$INSTALL_BIN_DIR/agensic-tuis" <<'PY' || echo "⚠️ TUI sidecar was not installed; CLI fallback will still work."
 import hashlib
 import json
@@ -151,7 +153,7 @@ elif system == "linux" and machine in {"arm64", "aarch64"}:
 else:
     raise SystemExit(1)
 
-default_manifest = "https://github.com/Alex188dot/agensic/releases/latest/download/tuis_manifest.json"
+default_manifest = "https://github.com/Alex188dot/agensic/releases/download/tuis-latest/tuis_manifest.json"
 published_platforms = {"darwin-arm64", "darwin-x64", "linux-arm64", "linux-x64", "windows-x64"}
 manifest_overridden = manifest_url != default_manifest
 

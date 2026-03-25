@@ -1552,12 +1552,31 @@ def _format_debug_preview(data: bytes, limit: int = 120) -> str:
     return text[:limit] + ("..." if len(text) > limit else "")
 
 
+def _build_git_command_env() -> dict[str, str]:
+    env = os.environ.copy()
+    for git_key in (
+        "GIT_DIR",
+        "GIT_WORK_TREE",
+        "GIT_INDEX_FILE",
+        "GIT_OBJECT_DIRECTORY",
+        "GIT_ALTERNATE_OBJECT_DIRECTORIES",
+        "GIT_COMMON_DIR",
+        "GIT_PREFIX",
+        "GIT_SUPER_PREFIX",
+        "GIT_CEILING_DIRECTORIES",
+        "GIT_DISCOVERY_ACROSS_FILESYSTEM",
+    ):
+        env.pop(git_key, None)
+    return env
+
+
 def _run_git_capture(working_directory: str, args: list[str], *, timeout_seconds: float = 1.5) -> tuple[int, str, str]:
     cwd = str(working_directory or "").strip() or None
     try:
         run = subprocess.run(
             ["git", *args],
             cwd=cwd,
+            env=_build_git_command_env(),
             capture_output=True,
             text=True,
             check=False,
@@ -1580,6 +1599,7 @@ def _run_git_capture_bytes(
         run = subprocess.run(
             ["git", *args],
             cwd=cwd,
+            env=_build_git_command_env(),
             input=stdin_bytes,
             capture_output=True,
             check=False,
@@ -2738,7 +2758,7 @@ def _command_runs_git_commit(command_text: str) -> bool:
             cursor += 1
             if current in options_with_values and cursor < len(tokens):
                 cursor += 1
-        return False
+        continue
     return False
 
 
