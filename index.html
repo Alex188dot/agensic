@@ -1,0 +1,396 @@
+<!DOCTYPE html>
+<html class="dark" lang="en">
+<head>
+    <meta charset="utf-8"/>
+    <meta content="width=device-width, initial-scale=1.0" name="viewport"/>
+    <title>Agensic | Forensic Observability for AI Agents</title>
+    <script src="https://cdn.tailwindcss.com?plugins=forms,container-queries"></script>
+    <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;700;800;900&amp;family=Space+Grotesk:wght@300;400;500;600;700&amp;display=swap" rel="stylesheet"/>
+    <link href="https://fonts.googleapis.com/css2?family=Material+Symbols+Outlined:wght,FILL@100..700,0..1&amp;display=swap" rel="stylesheet"/>
+    <script id="tailwind-config">
+        tailwind.config = {
+            darkMode: "class",
+            theme: {
+                extend: {
+                    colors: {
+                        "error-container": "#93000a",
+                        "surface-container-highest": "#353535",
+                        "secondary-container": "#3e4945",
+                        "primary": "#f1ffef",
+                        "primary-container": "#00ff88",
+                        "surface-container-lowest": "#0e0e0e",
+                        "error": "#ffb4ab",
+                        "on-surface": "#e2e2e2",
+                        "surface": "#131313",
+                        "outline-variant": "#3b4b3d",
+                        "surface-container": "#1f1f1f"
+                    },
+                    fontFamily: {
+                        "headline": ["Inter"],
+                        "body": ["Space Grotesk"],
+                        "label": ["Space Grotesk"]
+                    },
+                },
+            },
+        }
+    </script>
+    <style>
+        .glow-sm { box-shadow: 0 0 15px rgba(0, 255, 136, 0.3); }
+        .glow-md { box-shadow: 0 0 30px rgba(0, 255, 136, 0.2); }
+        .terminal-window { border: 1px solid rgba(0, 255, 136, 0.1); }
+        .text-glow { text-shadow: 0 0 10px rgba(0, 255, 136, 0.5); }
+        body { background-color: #000000; color: #e2e2e2; }
+        .glass-panel { background: rgba(31, 31, 31, 0.6); backdrop-filter: blur(20px); }
+    </style>
+</head>
+<body class="font-body selection:bg-primary-container selection:text-[#007139] scroll-smooth">
+
+<!-- TopNavBar -->
+<nav class="fixed top-0 w-full z-50 bg-black/80 backdrop-blur-xl border-b border-[#00FF88]/10">
+    <div class="flex justify-between items-center w-full px-6 py-4 max-w-7xl mx-auto">
+        <div class="flex items-center gap-8">
+            <a class="text-xl font-black tracking-tighter text-[#00FF88] uppercase" href="#">Agensic</a>
+            <div class="hidden md:flex gap-6 items-center">
+                <a class="text-gray-400 font-mono text-sm uppercase tracking-widest hover:text-[#00FF88] transition-all duration-200" href="#provenance">Provenance</a>
+                <a class="text-gray-400 font-mono text-sm uppercase tracking-widest hover:text-[#00FF88] transition-all duration-200" href="#sessions">Sessions</a>
+                <a class="text-gray-400 font-mono text-sm uppercase tracking-widest hover:text-[#00FF88] transition-all duration-200" href="#autocomplete">Autocomplete</a>
+            </div>
+        </div>
+        <div class="flex items-center gap-4">
+            <a class="bg-primary-container text-[#003919] px-5 py-2 font-bold text-sm uppercase tracking-tighter hover:glow-sm transition-all flex items-center gap-2" href="https://github.com/Alex188dot/agensic" target="_blank">
+                <span class="material-symbols-outlined text-[18px]">star</span> Star on GitHub
+            </a>
+        </div>
+    </div>
+</nav>
+
+<!-- Hero Section -->
+<section class="relative pt-32 pb-20 px-6 overflow-hidden min-h-[90vh] flex flex-col justify-center">
+    <div class="max-w-7xl mx-auto flex flex-col items-center text-center relative z-10 w-full">
+        <h1 class="font-headline font-black text-6xl md:text-8xl tracking-tight mb-6 max-w-5xl leading-none">
+            Know what your <span class="text-primary-container text-glow">AI agents</span> actually did.
+        </h1>
+        <p class="font-mono text-gray-400 text-lg md:text-xl mb-10 max-w-2xl uppercase tracking-tight">
+            The missing forensic observability layer for AI-powered terminal workflows. Audit your AI before it audits you.
+        </p>
+        
+        <div class="flex flex-col sm:flex-row gap-4 mb-20">
+            <a href="https://github.com/Alex188dot/agensic" target="_blank" class="bg-primary-container text-[#003919] px-8 py-4 font-black uppercase text-base flex items-center justify-center gap-3 hover:glow-md transition-all">
+                View on GitHub
+                <span class="material-symbols-outlined text-lg">code</span>
+            </a>
+        </div>
+
+        <!-- Animated Terminal Mockup -->
+        <div class="w-full max-w-3xl mx-auto glass-panel terminal-window rounded-lg overflow-hidden shadow-[0_20px_50px_rgba(0,255,136,0.08)]">
+            <div class="bg-surface-container-highest px-4 py-2 flex items-center justify-between border-b border-outline-variant/30">
+                <div class="flex gap-2">
+                    <div class="w-3 h-3 rounded-full bg-error-container/50"></div>
+                    <div class="w-3 h-3 rounded-full bg-secondary-container"></div>
+                    <div class="w-3 h-3 rounded-full bg-primary-container/50"></div>
+                </div>
+                <span class="text-[10px] font-mono uppercase tracking-widest text-gray-500">agensic_copilot</span>
+                <div class="w-12"></div>
+            </div>
+            <div class="p-6 text-left font-mono text-sm leading-relaxed overflow-x-auto min-h-[120px] flex flex-col justify-center">
+                <div class="flex gap-2 items-center">
+                    <span class="text-primary-container font-bold text-lg">&gt;</span>
+                    <span class="text-on-surface text-lg" id="typewriter-text"></span>
+                    <span class="text-gray-500 italic text-lg" id="ghost-text"></span>
+                    <span class="w-2 h-5 bg-primary-container animate-pulse inline-block"></span>
+                </div>
+            </div>
+        </div>
+    </div>
+    
+    <!-- Background Decor -->
+    <div class="absolute top-1/4 left-1/2 -translate-x-1/2 w-[800px] h-[500px] bg-primary-container/5 blur-[120px] rounded-full -z-10"></div>
+</section>
+
+<!-- Problem Section -->
+<section class="py-24 px-6 bg-surface-container-lowest border-y border-outline-variant/10">
+    <div class="max-w-7xl mx-auto">
+        <div class="flex flex-col md:flex-row justify-between items-end mb-16 gap-6">
+            <div class="max-w-2xl">
+                <span class="font-mono text-xs uppercase tracking-[0.3em] text-primary-container mb-4 block">System Vulnerability</span>
+                <h2 class="font-headline font-extrabold text-4xl md:text-5xl leading-tight">The Blind Spot of <br/>AI Agents</h2>
+            </div>
+        </div>
+        
+        <div class="grid grid-cols-1 md:grid-cols-4 gap-1">
+            <div class="p-8 bg-surface border border-outline-variant/10 hover:border-primary-container/20 transition-all">
+                <span class="material-symbols-outlined text-error mb-4 block text-3xl">warning</span>
+                <h3 class="font-mono font-bold text-lg mb-2 uppercase tracking-tight">Non-deterministic</h3>
+                <p class="text-gray-500 text-sm leading-relaxed">Agent behavior changes constantly. What worked locally might wipe your directory next time.</p>
+            </div>
+            <div class="p-8 bg-surface border border-outline-variant/10 hover:border-primary-container/20 transition-all">
+                <span class="material-symbols-outlined text-error mb-4 block text-3xl">bug_report</span>
+                <h3 class="font-mono font-bold text-lg mb-2 uppercase tracking-tight">Hard to debug</h3>
+                <p class="text-gray-500 text-sm leading-relaxed">Traditional shells flatten all terminal activity into a single ambiguous history file.</p>
+            </div>
+            <div class="p-8 bg-surface border border-outline-variant/10 hover:border-primary-container/20 transition-all">
+                <span class="material-symbols-outlined text-error mb-4 block text-3xl">policy</span>
+                <h3 class="font-mono font-bold text-lg mb-2 uppercase tracking-tight">Impossible to audit</h3>
+                <p class="text-gray-500 text-sm leading-relaxed">No way to prove whether a human developer or an autonomous agent executed a specific command.</p>
+            </div>
+            <div class="p-8 bg-surface border border-outline-variant/10 hover:border-primary-container/20 transition-all">
+                <span class="material-symbols-outlined text-error mb-4 block text-3xl">dangerous</span>
+                <h3 class="font-mono font-bold text-lg mb-2 uppercase tracking-tight">Prod Danger</h3>
+                <p class="text-gray-500 text-sm leading-relaxed">Unchecked write access to active workspaces is a ticking time bomb for your repo state.</p>
+            </div>
+        </div>
+    </div>
+</section>
+
+<!-- Solution 1: Provenance -->
+<section id="provenance" class="py-24 px-6 overflow-hidden">
+    <div class="max-w-7xl mx-auto grid md:grid-cols-2 gap-20 items-center">
+        <div>
+            <span class="font-mono text-xs uppercase tracking-[0.3em] text-primary-container mb-4 block">Cryptographic Tracking</span>
+            <h2 class="font-headline font-black text-4xl md:text-5xl mb-8 tracking-tight">Agensic Provenance</h2>
+            <p class="text-gray-400 text-lg mb-8 font-mono tracking-tight leading-relaxed">
+                Agensic gives you a forensic transcript for every command. It classifies what happened, records rich metadata and surfaces a clear audit trail so you can tell exactly who triggered what.
+            </p>
+            <ul class="space-y-4 font-mono text-sm tracking-widest text-on-surface uppercase">
+                <li class="flex items-center gap-4"><span class="text-primary-container">&gt;</span> Cryptographic Ed25519 Origin Signing</li>
+                <li class="flex items-center gap-4"><span class="text-primary-container">&gt;</span> Structured Attribution Labels</li>
+                <li class="flex items-center gap-4"><span class="text-primary-container">&gt;</span> Full-Screen JSON/CSV Exportable Explorer</li>
+            </ul>
+        </div>
+        <div class="relative">
+            <img src="./assets/provenance.gif" alt="Agensic Provenance Demo" class="glass-panel terminal-window rounded-lg w-full shadow-[0_0_40px_rgba(0,255,136,0.15)] relative z-10" />
+            <div class="absolute -top-10 -right-10 w-64 h-64 bg-primary-container/10 blur-[80px] -z-0"></div>
+        </div>
+    </div>
+</section>
+
+<!-- Solution 2: Sessions -->
+<section id="sessions" class="py-24 px-6 overflow-hidden bg-surface-container-lowest">
+    <div class="max-w-7xl mx-auto grid md:grid-cols-2 gap-20 items-center">
+        <div class="order-2 md:order-1 relative">
+            <img src="./assets/replay.gif" alt="Agensic Replay Demo" class="glass-panel terminal-window rounded-lg w-full shadow-[0_0_40px_rgba(0,255,136,0.15)] relative z-10" />
+            <div class="absolute -top-10 -left-10 w-64 h-64 bg-primary-container/10 blur-[80px] -z-0"></div>
+        </div>
+        <div class="order-1 md:order-2">
+            <span class="font-mono text-xs uppercase tracking-[0.3em] text-primary-container mb-4 block">Interactive Auditing</span>
+            <h2 class="font-headline font-black text-4xl md:text-5xl mb-8 tracking-tight">Agensic Sessions</h2>
+            <p class="text-gray-400 text-lg mb-8 font-mono tracking-tight leading-relaxed">
+                Agensic records interactive agent sessions, giving you undeniable proof of what happened and the ability to safely manipulate repo state after an agent goes rogue.
+            </p>
+            <ul class="space-y-4 font-mono text-sm tracking-widest text-on-surface uppercase">
+                <li class="flex items-center gap-4"><span class="text-primary-container">&gt;</span> Blazing-Fast TUI Session Replay</li>
+                <li class="flex items-center gap-4"><span class="text-primary-container">&gt;</span> Git Time Travel to Rewind State</li>
+                <li class="flex items-center gap-4"><span class="text-primary-container">&gt;</span> Resilient Local-First SQLite Backend</li>
+            </ul>
+        </div>
+    </div>
+</section>
+
+<!-- Solution 3: Autocomplete -->
+<section id="autocomplete" class="py-24 px-6 overflow-hidden">
+    <div class="max-w-7xl mx-auto grid md:grid-cols-2 gap-20 items-center">
+        <div>
+            <span class="font-mono text-xs uppercase tracking-[0.3em] text-primary-container mb-4 block">IDE-Style Intelligence</span>
+            <h2 class="font-headline font-black text-4xl md:text-5xl mb-8 tracking-tight">Agensic Autocomplete</h2>
+            <p class="text-gray-400 text-lg mb-8 font-mono tracking-tight leading-relaxed">
+                Agensic reimagines terminal suggestions. Context-aware, semantic and always fast IDE-style, satisfying Tab autocomplete driven by your actual history.
+            </p>
+            <ul class="space-y-4 font-mono text-sm tracking-widest text-on-surface uppercase">
+                <li class="flex items-center gap-4"><span class="text-primary-container">&gt;</span> Instant Local History Ghost Text</li>
+                <li class="flex items-center gap-4"><span class="text-primary-container">&gt;</span> Semantic Search & Typo Recovery</li>
+                <li class="flex items-center gap-4"><span class="text-primary-container">&gt;</span> Natural Language Command Modes</li>
+            </ul>
+        </div>
+        <div class="relative">
+            <img src="./assets/autocomplete.gif" alt="Agensic Autocomplete Demo" class="glass-panel terminal-window rounded-lg w-full shadow-[0_0_40px_rgba(0,255,136,0.15)] relative z-10" />
+            <div class="absolute -top-10 -right-10 w-64 h-64 bg-primary-container/10 blur-[80px] -z-0"></div>
+        </div>
+    </div>
+</section>
+
+<!-- Features Grid -->
+<section class="py-24 px-6 bg-surface-container-lowest border-y border-outline-variant/10">
+    <div class="max-w-7xl mx-auto">
+        <div class="text-center mb-20">
+            <h2 class="font-headline font-black text-4xl uppercase tracking-tighter mb-4">Command Center Arsenal</h2>
+            <div class="w-20 h-1 bg-primary-container mx-auto"></div>
+        </div>
+        
+        <div class="grid grid-cols-1 md:grid-cols-3 gap-6">
+            <!-- Card 1 -->
+            <div class="p-8 bg-surface border border-outline-variant/10 hover:border-primary-container/40 hover:glow-sm transition-all group">
+                <span class="material-symbols-outlined text-primary-container mb-6 text-4xl" data-weight="fill">verified</span>
+                <h3 class="font-mono font-bold text-xl mb-3 uppercase tracking-tighter">Signed Provenance</h3>
+                <p class="text-gray-500 text-sm leading-relaxed">Local Ed25519 signing for every agent-executed run. Tamper-proof logs that hold up in forensic audits.</p>
+            </div>
+            <!-- Card 2 -->
+            <div class="p-8 bg-surface border border-outline-variant/10 hover:border-primary-container/40 hover:glow-sm transition-all group">
+                <span class="material-symbols-outlined text-primary-container mb-6 text-4xl" data-weight="fill">history</span>
+                <h3 class="font-mono font-bold text-xl mb-3 uppercase tracking-tighter">Replayable Sessions</h3>
+                <p class="text-gray-500 text-sm leading-relaxed">Blazing-fast TUI for browsing and replaying history. Watch exactly how the agent navigated your file system.</p>
+            </div>
+            <!-- Card 3 -->
+            <div class="p-8 bg-surface border border-outline-variant/10 hover:border-primary-container/40 hover:glow-sm transition-all group">
+                <span class="material-symbols-outlined text-primary-container mb-6 text-4xl" data-weight="fill">settings_backup_restore</span>
+                <h3 class="font-mono font-bold text-xl mb-3 uppercase tracking-tighter">Git Time Travel</h3>
+                <p class="text-gray-500 text-sm leading-relaxed">Rewind your repository state to specific session checkpoints. Undo agent mistakes with surgical precision.</p>
+            </div>
+            <!-- Card 4 -->
+            <div class="p-8 bg-surface border border-outline-variant/10 hover:border-primary-container/40 hover:glow-sm transition-all group">
+                <span class="material-symbols-outlined text-primary-container mb-6 text-4xl" data-weight="fill">label</span>
+                <h3 class="font-mono font-bold text-xl mb-3 uppercase tracking-tighter">Agent Attribution</h3>
+                <p class="text-gray-500 text-sm leading-relaxed">Distinctive provenance labels distinguishing AI_EXECUTED vs HUMAN_TYPED commands natively in history.</p>
+            </div>
+            <!-- Card 5 -->
+            <div class="p-8 bg-surface border border-outline-variant/10 hover:border-primary-container/40 hover:glow-sm transition-all group">
+                <span class="material-symbols-outlined text-primary-container mb-6 text-4xl" data-weight="fill">bolt</span>
+                <h3 class="font-mono font-bold text-xl mb-3 uppercase tracking-tighter">Smart Autocomplete</h3>
+                <p class="text-gray-500 text-sm leading-relaxed">Context-aware, semantic search across your entire history, recovering from typos and offering natural language generation.</p>
+            </div>
+            <!-- Card 6 -->
+            <div class="p-8 bg-surface border border-outline-variant/10 hover:border-primary-container/40 hover:glow-sm transition-all group">
+                <span class="material-symbols-outlined text-primary-container mb-6 text-4xl" data-weight="fill">security</span>
+                <h3 class="font-mono font-bold text-xl mb-3 uppercase tracking-tighter">Security Guardrails</h3>
+                <p class="text-gray-500 text-sm leading-relaxed">Automatic secret redaction and strict blocking of destructive commands from being suggested or fed to LLMs.</p>
+            </div>
+        </div>
+    </div>
+</section>
+
+<!-- How It Works -->
+<section class="py-24 px-6">
+    <div class="max-w-4xl mx-auto">
+        <div class="text-center mb-16">
+            <span class="font-mono text-xs uppercase tracking-[0.3em] text-primary-container mb-4 block">Initialization Protocol</span>
+            <h2 class="font-headline font-black text-4xl uppercase tracking-tighter">Zero-Config Deployment</h2>
+        </div>
+        
+        <div class="space-y-12 relative">
+            <div class="absolute left-[23px] top-0 bottom-0 w-[1px] bg-outline-variant/30 -z-10"></div>
+            
+            <!-- Step 1 -->
+            <div class="flex gap-8 items-start">
+                <div class="w-12 h-12 flex-shrink-0 bg-surface border border-primary-container/40 flex items-center justify-center font-mono font-bold text-primary-container text-xl glow-sm">01</div>
+                <div>
+                    <h3 class="font-mono font-bold text-lg mb-2 uppercase tracking-tight">Install Agensic</h3>
+                    <p class="text-gray-500 text-sm font-mono mb-4">Run the one-line managed installer to configure your shell.</p>
+                    <div class="bg-surface-container-lowest p-4 border border-outline-variant/20 font-mono text-sm text-on-surface overflow-x-auto whitespace-nowrap">
+                        <span class="text-primary-container">$</span> curl -fsSL https://raw.githubusercontent.com/Alex188dot/agensic/main/bootstrap.sh | bash
+                    </div>
+                </div>
+            </div>
+            
+            <!-- Step 2 -->
+            <div class="flex gap-8 items-start">
+                <div class="w-12 h-12 flex-shrink-0 bg-surface border border-primary-container/40 flex items-center justify-center font-mono font-bold text-primary-container text-xl glow-sm">02</div>
+                <div>
+                    <h3 class="font-mono font-bold text-lg mb-2 uppercase tracking-tight">Run your Agent</h3>
+                    <p class="text-gray-500 text-sm font-mono mb-4">Start working as you normally would. Use your favorite AI coding assistant; Agensic tracks it automatically.</p>
+                    <div class="bg-surface-container-lowest p-4 border border-outline-variant/20 font-mono text-sm text-on-surface">
+                        <span class="text-primary-container">$</span> claude
+                    </div>
+                </div>
+            </div>
+            
+            <!-- Step 3 -->
+            <div class="flex gap-8 items-start">
+                <div class="w-12 h-12 flex-shrink-0 bg-surface border border-primary-container/40 flex items-center justify-center font-mono font-bold text-primary-container text-xl glow-sm">03</div>
+                <div>
+                    <h3 class="font-mono font-bold text-lg mb-2 uppercase tracking-tight">Inspect & Verify</h3>
+                    <p class="text-gray-500 text-sm font-mono mb-4">Open the TUI to replay sessions or review forensic provenance.</p>
+                    <div class="bg-surface-container-lowest p-4 border border-outline-variant/20 font-mono text-sm text-on-surface">
+                        <span class="text-primary-container">$</span> agensic sessions
+                    </div>
+                </div>
+            </div>
+        </div>
+    </div>
+</section>
+
+<!-- Footer CTA -->
+<section class="py-32 px-6 relative overflow-hidden bg-surface-container-lowest border-t border-outline-variant/10">
+    <div class="max-w-4xl mx-auto text-center relative z-10">
+        <h2 class="font-headline font-black text-5xl md:text-7xl mb-10 tracking-tighter uppercase leading-none">
+            Bring observability to your terminal.
+        </h2>
+        <div class="flex flex-wrap justify-center gap-6">
+            <a href="https://github.com/Alex188dot/agensic" target="_blank" class="bg-primary-container text-[#003919] px-10 py-5 font-black uppercase text-lg hover:glow-md transition-all flex items-center gap-3">
+                Star on GitHub <span class="material-symbols-outlined">star</span>
+            </a>
+        </div>
+    </div>
+    <div class="absolute bottom-0 left-0 right-0 h-64 bg-gradient-to-t from-primary-container/10 to-transparent -z-10"></div>
+</section>
+
+<!-- Footer -->
+<footer class="bg-[#0e0e0e] w-full border-t border-[#1b1b1b] py-12">
+    <div class="max-w-7xl mx-auto px-8 grid grid-cols-1 md:grid-cols-2 gap-8 items-center text-center md:text-left">
+        <div>
+            <a class="text-lg font-bold text-gray-200 uppercase tracking-tighter mb-2 block" href="#">Agensic</a>
+            <p class="font-mono text-[10px] text-gray-500 uppercase tracking-widest leading-loose">
+                Forensic Observability for the Terminal. Built for the AI era.
+            </p>
+        </div>
+        <div class="md:text-right">
+            <p class="font-mono text-[10px] text-gray-600 uppercase tracking-[0.3em]">
+                © 2026 Agensic. Licensed under Apache-2.0.
+            </p>
+        </div>
+    </div>
+</footer>
+
+<script>
+    // Terminal Ghost Text Typing Animation
+    const phrases =[
+        { typed: "dokcer", ghost: "Did you mean: docker" },
+        { typed: "docker records", ghost: "Did you mean: docker logs" },
+        { typed: "# find large files", ghost: "find . -type f -size +10M" }
+    ];
+    let phraseIndex = 0;
+    let charIndex = 0;
+    let isTyping = true;
+    let isGhosting = false;
+    
+    const typeText = document.getElementById("typewriter-text");
+    const ghostText = document.getElementById("ghost-text");
+
+    function typeRoutine() {
+        const current = phrases[phraseIndex];
+        
+        if (isTyping) {
+            if (charIndex < current.typed.length) {
+                typeText.textContent += current.typed.charAt(charIndex);
+                charIndex++;
+                setTimeout(typeRoutine, Math.random() * 100 + 50);
+            } else {
+                isTyping = false;
+                setTimeout(() => {
+                    ghostText.textContent = current.ghost;
+                    setTimeout(() => {
+                        isGhosting = true;
+                        typeRoutine();
+                    }, 2500); // Show suggestion for 2.5s
+                }, 150);
+            }
+        } else if (isGhosting) {
+            // Delete text backwards
+            ghostText.textContent = "";
+            if (charIndex > 0) {
+                typeText.textContent = current.typed.substring(0, charIndex - 1);
+                charIndex--;
+                setTimeout(typeRoutine, 30);
+            } else {
+                isGhosting = false;
+                isTyping = true;
+                phraseIndex = (phraseIndex + 1) % phrases.length;
+                setTimeout(typeRoutine, 800);
+            }
+        }
+    }
+    
+    // Start animation loop
+    setTimeout(typeRoutine, 1000);
+</script>
+
+</body>
+</html>
