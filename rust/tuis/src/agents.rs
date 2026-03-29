@@ -244,36 +244,15 @@ fn draw_ui(frame: &mut ratatui::Frame<'_>, app: &App) {
     draw_agent_list(frame, split[0], app);
     draw_agent_detail(frame, split[1], app);
 
-    let footer = Paragraph::new(Text::from(Line::from(vec![
-        Span::styled(
-            "q",
-            Style::default()
-                .fg(Color::LightCyan)
-                .add_modifier(Modifier::BOLD),
-        ),
-        Span::raw(" quit  "),
-        Span::styled(
-            "j/k",
-            Style::default()
-                .fg(Color::LightCyan)
-                .add_modifier(Modifier::BOLD),
-        ),
-        Span::raw(" move  "),
-        Span::styled(
-            "g/G",
-            Style::default()
-                .fg(Color::LightCyan)
-                .add_modifier(Modifier::BOLD),
-        ),
-        Span::raw(" first/last  "),
-        Span::styled(
-            "c",
-            Style::default()
-                .fg(Color::LightCyan)
-                .add_modifier(Modifier::BOLD),
-        ),
-        Span::raw(" copy agent id"),
-    ])))
+    let footer = Paragraph::new(Text::from(crate::tui_hint_line(
+        &[
+            ("q", "quit"),
+            ("j/k", "move"),
+            ("g/G", "first/last"),
+            ("c", "copy agent id"),
+        ],
+        Color::LightCyan,
+    )))
     .block(Block::default().borders(Borders::ALL));
     frame.render_widget(footer, root[2]);
 }
