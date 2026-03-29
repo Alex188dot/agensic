@@ -1495,6 +1495,16 @@ def _build_tracked_child_env(launch: TrackLaunch, session_id: str) -> dict[str, 
             "GIT_CONFIG",
         } or clean_key.startswith("GIT_CONFIG_"):
             env.pop(git_key, None)
+    # Keep tracked shells deterministic across CI and local machines. User/global Git
+    # config can inject signing, hooks, templates, or other commit-time behavior that
+    # breaks temporary-repo tests and tracked commands non-deterministically.
+    env.setdefault("GIT_CONFIG_GLOBAL", os.devnull)
+    env.setdefault("GIT_CONFIG_NOSYSTEM", "1")
+    env.setdefault("GIT_TERMINAL_PROMPT", "0")
+    env.setdefault("GIT_AUTHOR_NAME", "Agensic")
+    env.setdefault("GIT_AUTHOR_EMAIL", "agensic@local")
+    env.setdefault("GIT_COMMITTER_NAME", env["GIT_AUTHOR_NAME"])
+    env.setdefault("GIT_COMMITTER_EMAIL", env["GIT_AUTHOR_EMAIL"])
     env["AGENSIC_TRACK_ACTIVE"] = "1"
     env["AGENSIC_TRACK_SESSION_ID"] = session_id
     env["AGENSIC_TRACK_AGENT"] = launch.agent
@@ -3379,79 +3389,87 @@ class TrackRuntime:
         self.last_observed_head = current_head
 
 
+def _scan_tracked_process_tree(runtime: TrackRuntime, detached_finalize_deadline: float) -> tuple[float, bool]:
+    descendants = _read_live_process_tree(runtime.root_pid)
+    descendant_ids = set(descendants.keys())
+
+    for pid, row in descendants.items():
+        existing = runtime.processes.get(pid)
+        if existing is None:
+            runtime.processes[pid] = ObservedProcess(
+                pid=pid,
+                ppid=int(row.get("ppid", 0) or 0),
+                command=str(row.get("args", "") or "").strip() or str(row.get("comm", "") or "").strip(),
+                working_directory=str(row.get("working_directory", "") or "").strip() or _best_effort_cwd(pid),
+                started_at=float(row.get("started_at", 0.0) or time.time()),
+                session_id=int(row.get("session_id", 0) or 0),
+                process_group_id=int(row.get("process_group_id", 0) or 0),
+            )
+            existing = runtime.processes[pid]
+            runtime.emit_event(
+                "process.spawned",
+                {
+                    "pid": pid,
+                    "ppid": int(row.get("ppid", 0) or 0),
+                    "command": existing.command,
+                    "working_directory": existing.working_directory,
+                },
+            )
+            command_text = str(existing.command or "").strip().lower()
+            if command_text.startswith("git push") or " git push" in command_text:
+                runtime.emit_event(
+                    "git.push.attempted",
+                    {
+                        "pid": pid,
+                        "command": existing.command,
+                    },
+                )
+        else:
+            command = str(row.get("args", "") or "").strip() or str(row.get("comm", "") or "").strip()
+            if command and (not existing.command or existing.command.startswith("(")):
+                existing.command = command
+            working_directory = str(row.get("working_directory", "") or "").strip()
+            if working_directory:
+                existing.working_directory = working_directory
+            existing.ppid = int(row.get("ppid", 0) or existing.ppid or 0)
+            existing.session_id = int(row.get("session_id", 0) or existing.session_id or 0)
+            existing.process_group_id = int(row.get("process_group_id", 0) or existing.process_group_id or 0)
+        if pid != runtime.root_pid and _leaves_allowed_session(row, root_session_id=runtime.root_session_id):
+            existing.session_escape = True
+            runtime.note_violation("session_boundary_escape")
+        if _looks_like_escape_primitive(row):
+            runtime.note_violation("escape_primitive_blocked")
+        if _looks_like_unmanaged_terminal_launch(row):
+            runtime.note_violation("unmanaged_child_launch")
+
+    if runtime.root_exit_code is not None and detached_finalize_deadline <= 0:
+        detached_finalize_deadline = time.monotonic() + TRACK_FINAL_POLL_GRACE_SECONDS
+
+    for pid, proc in list(runtime.processes.items()):
+        if proc.finalized:
+            continue
+        if pid in descendant_ids:
+            continue
+        if _is_pid_alive(pid):
+            proc.detached = True
+            runtime.note_violation("detached_descendants")
+            if detached_finalize_deadline > 0 and time.monotonic() >= detached_finalize_deadline:
+                runtime.finalize_process(proc, exit_code=None)
+            continue
+        exit_code = runtime.root_exit_code if pid == runtime.root_pid else None
+        runtime.finalize_process(proc, exit_code=exit_code)
+
+    all_finalized = all(proc.finalized for proc in runtime.processes.values())
+    return detached_finalize_deadline, all_finalized
+
+
 def _watch_tracked_process_tree(runtime: TrackRuntime) -> None:
     detached_finalize_deadline = 0.0
     while True:
-        descendants = _read_live_process_tree(runtime.root_pid)
-        descendant_ids = set(descendants.keys())
-
-        for pid, row in descendants.items():
-            existing = runtime.processes.get(pid)
-            if existing is None:
-                runtime.processes[pid] = ObservedProcess(
-                    pid=pid,
-                    ppid=int(row.get("ppid", 0) or 0),
-                    command=str(row.get("args", "") or "").strip() or str(row.get("comm", "") or "").strip(),
-                    working_directory=str(row.get("working_directory", "") or "").strip() or _best_effort_cwd(pid),
-                    started_at=float(row.get("started_at", 0.0) or time.time()),
-                    session_id=int(row.get("session_id", 0) or 0),
-                    process_group_id=int(row.get("process_group_id", 0) or 0),
-                )
-                existing = runtime.processes[pid]
-                runtime.emit_event(
-                    "process.spawned",
-                    {
-                        "pid": pid,
-                        "ppid": int(row.get("ppid", 0) or 0),
-                        "command": existing.command,
-                        "working_directory": existing.working_directory,
-                    },
-                )
-                command_text = str(existing.command or "").strip().lower()
-                if command_text.startswith("git push") or " git push" in command_text:
-                    runtime.emit_event(
-                        "git.push.attempted",
-                        {
-                            "pid": pid,
-                            "command": existing.command,
-                        },
-                    )
-            else:
-                command = str(row.get("args", "") or "").strip() or str(row.get("comm", "") or "").strip()
-                if command and (not existing.command or existing.command.startswith("(")):
-                    existing.command = command
-                working_directory = str(row.get("working_directory", "") or "").strip()
-                if working_directory:
-                    existing.working_directory = working_directory
-                existing.ppid = int(row.get("ppid", 0) or existing.ppid or 0)
-                existing.session_id = int(row.get("session_id", 0) or existing.session_id or 0)
-                existing.process_group_id = int(row.get("process_group_id", 0) or existing.process_group_id or 0)
-            if pid != runtime.root_pid and _leaves_allowed_session(row, root_session_id=runtime.root_session_id):
-                existing.session_escape = True
-                runtime.note_violation("session_boundary_escape")
-            if _looks_like_escape_primitive(row):
-                runtime.note_violation("escape_primitive_blocked")
-            if _looks_like_unmanaged_terminal_launch(row):
-                runtime.note_violation("unmanaged_child_launch")
-
-        if runtime.root_exit_code is not None and detached_finalize_deadline <= 0:
-            detached_finalize_deadline = time.monotonic() + TRACK_FINAL_POLL_GRACE_SECONDS
-
-        for pid, proc in list(runtime.processes.items()):
-            if proc.finalized:
-                continue
-            if pid in descendant_ids:
-                continue
-            if _is_pid_alive(pid):
-                proc.detached = True
-                runtime.note_violation("detached_descendants")
-                if detached_finalize_deadline > 0 and time.monotonic() >= detached_finalize_deadline:
-                    runtime.finalize_process(proc, exit_code=None)
-                continue
-            exit_code = runtime.root_exit_code if pid == runtime.root_pid else None
-            runtime.finalize_process(proc, exit_code=exit_code)
-
-        all_finalized = all(proc.finalized for proc in runtime.processes.values())
+        detached_finalize_deadline, all_finalized = _scan_tracked_process_tree(
+            runtime,
+            detached_finalize_deadline,
+        )
         if runtime.root_exit_code is not None and all_finalized:
             break
         if runtime.stop_event.is_set() and all_finalized:
@@ -3605,6 +3623,9 @@ def run_tracked_command(
     watcher_started = False
     watcher.start()
     watcher_started = True
+    # Seed the observed process table immediately so fast background children are not missed
+    # when the watcher thread loses its first scheduling slice on busy CI runners.
+    _scan_tracked_process_tree(runtime, 0.0)
 
     old_tty = None
     stdin_fd = None

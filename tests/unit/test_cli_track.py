@@ -792,8 +792,10 @@ class CliTrackTests(unittest.TestCase):
             self.assertNotIn("GIT_DIR", child_env)
             self.assertNotIn("GIT_WORK_TREE", child_env)
             self.assertNotIn("GIT_INDEX_FILE", child_env)
-            self.assertNotIn("GIT_CONFIG_GLOBAL", child_env)
             self.assertNotIn("GIT_CONFIG_COUNT", child_env)
+            self.assertEqual(child_env["GIT_CONFIG_GLOBAL"], os.devnull)
+            self.assertEqual(child_env["GIT_CONFIG_NOSYSTEM"], "1")
+            self.assertEqual(child_env["GIT_TERMINAL_PROMPT"], "0")
 
     def test_ensure_track_supported_allows_linux_posix_with_openpty(self):
         with patch.object(track_module.sys, "platform", "linux"), patch.object(track_module.os, "name", "posix"):
