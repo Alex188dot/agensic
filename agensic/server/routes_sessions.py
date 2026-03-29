@@ -32,7 +32,6 @@ def list_sessions(
 ) -> SessionSummariesResponse:
     deps.enter_request_or_503()
     try:
-        track_runtime.reconcile_tracked_sessions()
         sessions = deps.engine.list_session_summaries(
             limit=limit,
             before_started_at=before_started_at,
@@ -58,7 +57,6 @@ def list_sessions(
 def get_session(session_id: str) -> SessionDetailResponse:
     deps.enter_request_or_503()
     try:
-        track_runtime.reconcile_tracked_sessions()
         session = deps.engine.get_session_summary(session_id)
         if session is None:
             raise HTTPException(status_code=404, detail="session_not_found")
@@ -78,7 +76,6 @@ def get_session(session_id: str) -> SessionDetailResponse:
 def get_session_events(session_id: str) -> SessionEventsResponse:
     deps.enter_request_or_503()
     try:
-        track_runtime.reconcile_tracked_sessions()
         session = deps.engine.get_session_summary(session_id)
         if session is None:
             raise HTTPException(status_code=404, detail="session_not_found")

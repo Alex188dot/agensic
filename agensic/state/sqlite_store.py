@@ -942,6 +942,33 @@ class SQLiteStateStore:
             ).fetchall()
         return [dict(row) for row in rows]
 
+    def list_tracked_sessions_by_statuses(
+        self,
+        statuses: Iterable[str],
+        *,
+        limit: int = 200,
+    ) -> List[Dict[str, object]]:
+        clean_statuses = [
+            str(status or "").strip().lower()
+            for status in statuses
+            if str(status or "").strip()
+        ]
+        if not clean_statuses:
+            return []
+        row_limit = max(1, min(500, int(limit or 200)))
+        placeholders = ",".join("?" for _ in clean_statuses)
+        query = f"""
+            SELECT *
+            FROM tracked_sessions
+            WHERE status IN ({placeholders})
+            ORDER BY updated_at DESC, session_id DESC
+            LIMIT ?
+        """
+        params: list[object] = [*clean_statuses, row_limit]
+        with self._lock, self._conn() as conn:
+            rows = conn.execute(query, tuple(params)).fetchall()
+        return [dict(row) for row in rows]
+
     def get_latest_tracked_session(self, status: str = "") -> Optional[Dict[str, object]]:
         clean_status = str(status or "").strip().lower()
         query = [
