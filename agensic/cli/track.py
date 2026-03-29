@@ -45,6 +45,7 @@ console = Console()
 DAEMON_BASE_URL = "http://127.0.0.1:22000"
 TRACK_POLL_INTERVAL_SECONDS = 0.01
 TRACK_FINAL_POLL_GRACE_SECONDS = 0.25
+TRACK_RECONCILE_TTL_SECONDS = 2.0
 TRACK_STOP_GRACE_SECONDS = 2.0
 TRACK_INSPECT_TAIL_EVENTS = 8
 TRACK_TRANSCRIPT_RETENTION_SECONDS = 7 * 24 * 3600
@@ -79,6 +80,8 @@ TRACK_ANSI_RESET_SEQ = "\x1b[0m"
 TRACK_CHECKPOINT_INTERVAL_MS = 120
 TRACK_CHECKPOINT_INTERVAL_EVENTS = 48
 DEFAULT_LOCAL_REGISTRY_VERSION = "local-override"
+_RECONCILE_TRACKED_SESSIONS_LOCK = threading.Lock()
+_RECONCILE_TRACKED_SESSIONS_LAST_TS = 0.0
 
 
 @dataclass
@@ -834,15 +837,30 @@ def _tracked_state_looks_live(state: dict[str, Any]) -> bool:
     return controller_alive or root_alive
 
 
-def reconcile_tracked_sessions() -> None:
-    for row in _state_store().list_tracked_sessions(limit=500):
-        state = _session_cache_payload(row)
-        status = str(state.get("status", "") or "").strip().lower()
-        if status not in {"active", "stopping", "launching"}:
-            continue
-        if _tracked_state_looks_live(state):
-            continue
-        _mark_tracked_session_errored(state, str(state.get("violation_code", "") or "stale_session"))
+def reconcile_tracked_sessions(*, force: bool = False) -> bool:
+    global _RECONCILE_TRACKED_SESSIONS_LAST_TS
+    now = time.monotonic()
+    if not force and (now - _RECONCILE_TRACKED_SESSIONS_LAST_TS) < TRACK_RECONCILE_TTL_SECONDS:
+        return False
+    acquired = _RECONCILE_TRACKED_SESSIONS_LOCK.acquire(blocking=force)
+    if not acquired:
+        return False
+    try:
+        now = time.monotonic()
+        if not force and (now - _RECONCILE_TRACKED_SESSIONS_LAST_TS) < TRACK_RECONCILE_TTL_SECONDS:
+            return False
+        for row in _state_store().list_tracked_sessions_by_statuses(
+            ("active", "stopping", "launching"),
+            limit=500,
+        ):
+            state = _session_cache_payload(row)
+            if _tracked_state_looks_live(state):
+                continue
+            _mark_tracked_session_errored(state, str(state.get("violation_code", "") or "stale_session"))
+        _RECONCILE_TRACKED_SESSIONS_LAST_TS = time.monotonic()
+        return True
+    finally:
+        _RECONCILE_TRACKED_SESSIONS_LOCK.release()
 
 
 def _refresh_track_state_cache(active_states: list[dict[str, Any]] | None = None) -> None:
@@ -2778,6 +2796,53 @@ def _command_runs_git_commit(command_text: str) -> bool:
     return False
 
 
+def _shell_eval_script(command_text: str) -> str:
+    try:
+        tokens = shlex.split(str(command_text or "").strip())
+    except Exception:
+        tokens = str(command_text or "").strip().split()
+    if not tokens:
+        return ""
+    shell_commands = {"sh", "bash", "zsh", "dash", "ksh", "fish"}
+    shell_eval_flags = {"-c", "-lc", "-ic"}
+    executable = os.path.basename(tokens[0])
+    if executable not in shell_commands:
+        return ""
+    for index, token in enumerate(tokens[1:], start=1):
+        if token not in shell_eval_flags or index + 1 >= len(tokens):
+            continue
+        return str(tokens[index + 1] or "").strip()
+    return ""
+
+
+def _shell_background_commands(command_text: str) -> list[str]:
+    script = _shell_eval_script(command_text)
+    if not script:
+        return []
+    try:
+        lexer = shlex.shlex(script, posix=True, punctuation_chars=";&|()")
+        lexer.whitespace_split = True
+        tokens = list(lexer)
+    except Exception:
+        return []
+    out: list[str] = []
+    current: list[str] = []
+    for token in tokens:
+        if token == "&":
+            command = shlex.join(current).strip()
+            if command and command not in out:
+                head = current[0] if current else ""
+                if head not in {"wait", ":"}:
+                    out.append(command)
+            current = []
+            continue
+        if token in {";", "&&", "||", "|", "(", ")"}:
+            current = []
+            continue
+        current.append(token)
+    return out
+
+
 def _session_has_git_commit_command(runtime: "TrackRuntime") -> bool:
     if _command_runs_git_commit(runtime.launch.root_command):
         return True
@@ -3268,10 +3333,42 @@ class TrackRuntime:
             return None
         return "AI_EXECUTED"
 
+    def _record_missing_shell_background_commands(
+        self,
+        proc: ObservedProcess,
+        *,
+        exit_code: int | None = None,
+    ) -> None:
+        if proc.pid != self.root_pid:
+            return
+        background_commands = _shell_background_commands(proc.command)
+        if not background_commands:
+            return
+        observed_commands = {
+            str(item.command or "").strip()
+            for item in self.processes.values()
+            if item.pid != self.root_pid and str(item.command or "").strip()
+        }
+        synthetic_exit_code = 0 if int(exit_code or 0) == 0 else None
+        for index, command in enumerate(background_commands, start=1):
+            if command in observed_commands:
+                continue
+            synthetic = ObservedProcess(
+                pid=-(self.root_pid * 1000 + index),
+                ppid=self.root_pid,
+                command=command,
+                working_directory=proc.working_directory or self.launch.working_directory,
+                started_at=float(proc.started_at or time.time()),
+                session_id=self.root_session_id,
+                process_group_id=self.root_process_group_id,
+            )
+            self.finalize_process(synthetic, exit_code=synthetic_exit_code)
+
     def finalize_process(self, proc: ObservedProcess, *, exit_code: int | None = None) -> None:
         if proc.finalized:
             return
         proc.finalized = True
+        self._record_missing_shell_background_commands(proc, exit_code=exit_code)
         duration_ms = max(0, int((time.time() - float(proc.started_at or time.time())) * 1000.0))
         working_directory = proc.working_directory or self.launch.working_directory
         trace_id = f"track-{self.session_id}-{proc.pid}"
