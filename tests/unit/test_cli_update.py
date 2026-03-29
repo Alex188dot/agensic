@@ -11,6 +11,12 @@ from typer.testing import CliRunner
 cli_app = importlib.import_module("agensic.cli.app")
 app = cli_app.app
 ANSI_RE = re.compile(r"\x1b\[[0-9;]*m")
+CURRENT_VERSION = cli_app.__version__
+
+
+def _next_patch(version: str) -> str:
+    major, minor, patch = (int(part) for part in version.split("."))
+    return f"{major}.{minor}.{patch + 1}"
 
 
 class CliUpdateTests(unittest.TestCase):
@@ -56,18 +62,20 @@ class CliUpdateTests(unittest.TestCase):
         get_mock.assert_not_called()
 
     def test_print_update_notice_shows_newer_release(self):
+        next_version = _next_patch(CURRENT_VERSION)
         with patch.object(
-            cli_app, "_fetch_latest_release_info", return_value={"version": "0.1.1", "tarball_url": "", "html_url": ""}
+            cli_app, "_fetch_latest_release_info", return_value={"version": next_version, "tarball_url": "", "html_url": ""}
         ), patch.object(cli_app.console, "print") as print_mock:
             cli_app._print_update_notice_if_available()
 
         rendered = "\n".join(str(call.args[0]) for call in print_mock.call_args_list)
-        self.assertIn("0.1.0 -> 0.1.1", rendered)
+        self.assertIn(f"{CURRENT_VERSION} -> {next_version}", rendered)
         self.assertIn("agensic update", rendered)
 
     def test_update_command_reinstalls_latest_release(self):
+        next_version = _next_patch(CURRENT_VERSION)
         release = {
-            "version": "0.1.1",
+            "version": next_version,
             "tarball_url": "https://example.com/agensic.tar.gz",
             "html_url": "https://example.com/release",
         }
@@ -84,21 +92,21 @@ class CliUpdateTests(unittest.TestCase):
 
         output = ANSI_RE.sub("", result.stdout)
         self.assertEqual(result.exit_code, 0)
-        self.assertIn("Updating Agensic from 0.1.0 to 0.1.1", output)
-        self.assertIn("Agensic updated successfully: 0.1.0 -> 0.1.1", output)
+        self.assertIn(f"Updating Agensic from {CURRENT_VERSION} to {next_version}", output)
+        self.assertIn(f"Agensic updated successfully: {CURRENT_VERSION} -> {next_version}", output)
         download_mock.assert_called_once()
         extract_mock.assert_called_once()
         install_mock.assert_called_once_with(Path("/tmp/agensic-src"))
 
     def test_update_command_reports_up_to_date(self):
         with patch.object(cli_app, "ensure_config_dir"), patch.object(
-            cli_app, "_fetch_latest_release_info", return_value={"version": "0.1.0", "tarball_url": "https://example.com/a.tgz", "html_url": ""}
+            cli_app, "_fetch_latest_release_info", return_value={"version": CURRENT_VERSION, "tarball_url": "https://example.com/a.tgz", "html_url": ""}
         ), patch.object(cli_app, "_download_release_tarball") as download_mock:
             result = self.runner.invoke(app, ["update"])
 
         output = ANSI_RE.sub("", result.stdout)
         self.assertEqual(result.exit_code, 0)
-        self.assertIn("Agensic is already up to date (0.1.0).", output)
+        self.assertIn(f"Agensic is already up to date ({CURRENT_VERSION}).", output)
         download_mock.assert_not_called()
 
 
