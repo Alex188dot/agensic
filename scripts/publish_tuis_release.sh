@@ -6,7 +6,17 @@ REPO="${GITHUB_REPO:-Alex188dot/agensic}"
 TAG="${1:-}"
 
 if [[ -z "$TAG" ]]; then
-  TAG="$(git -C "$ROOT_DIR" describe --tags --always --dirty 2>/dev/null || date +%Y%m%d%H%M%S)"
+  TAG="$(git -C "$ROOT_DIR" describe --tags --abbrev=0 2>/dev/null || true)"
+fi
+
+if [[ -z "$TAG" ]]; then
+  echo "[publish] missing tag. Pass a semver release tag like v0.1.1." >&2
+  exit 1
+fi
+
+if [[ ! "$TAG" =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+  echo "[publish] tag must match vX.Y.Z, got '$TAG'." >&2
+  exit 1
 fi
 
 ARTIFACT_NAME="agensic-tuis-darwin-arm64.tar.gz"
@@ -36,7 +46,7 @@ if ! gh release view "$TAG" --repo "$REPO" >/dev/null 2>&1; then
   gh release create "$TAG" \
     --repo "$REPO" \
     --title "$TAG" \
-    --notes "TUI release $TAG"
+    --notes "Release $TAG"
 else
   echo "[publish] release $TAG already exists on $REPO"
 fi

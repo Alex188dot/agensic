@@ -19,6 +19,7 @@ FIRST_INSTALL=0
 if [ ! -x "$USER_BIN_DIR/agensic" ]; then
     FIRST_INSTALL=1
 fi
+SKIP_FIRST_RUN="${AGENSIC_INSTALL_SKIP_FIRST_RUN:-0}"
 mkdir -p "$APP_CONFIG_DIR"
 mkdir -p "$APP_STATE_DIR"
 mkdir -p "$APP_CACHE_DIR"
@@ -410,7 +411,7 @@ else
 fi
 echo "------------------------------------------------"
 
-if [ "$FIRST_INSTALL" -eq 1 ]; then
+if [ "$FIRST_INSTALL" -eq 1 ] && [ "$SKIP_FIRST_RUN" != "1" ]; then
     echo ""
     if [ -t 0 ] && [ -t 1 ]; then
         echo "Opening first-time Agensic onboarding..."

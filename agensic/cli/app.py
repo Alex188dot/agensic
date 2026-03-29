@@ -168,6 +168,7 @@ BIN_DIR = APP_PATHS.install_bin_dir
 TUIS_BIN = APP_PATHS.tuis_bin
 SERVER_LOG_FILE = APP_PATHS.server_log_file
 PLUGIN_LOG_FILE = APP_PATHS.plugin_log_file
+VERSION_CACHE_FILE = os.path.join(CACHE_DIR, "latest_release.json")
 MOUSE_REPORTING_RESET_SEQ = "\x1b[?1000l\x1b[?1002l\x1b[?1003l\x1b[?1006l\x1b[?1015l"
 CURSOR_SAVE_SEQ = "\x1b7"
 CURSOR_RESTORE_SEQ = "\x1b8"
@@ -176,6 +177,9 @@ ALT_SCREEN_EXIT_SEQ = "\x1b[?1049l"
 DEFAULT_TUIS_MANIFEST_URL = (
     "https://github.com/Alex188dot/agensic/releases/latest/download/tuis_manifest.json"
 )
+DEFAULT_RELEASE_API_URL = "https://api.github.com/repos/Alex188dot/agensic/releases/latest"
+VERSION_CHECK_TIMEOUT_SECONDS = 4.0
+VERSION_CACHE_TTL_SECONDS = 6 * 60 * 60
 PUBLISHED_TUIS_PLATFORMS = {"darwin-arm64"}
 DEFAULT_SIGNING_AGENT = "unknown"
 DEFAULT_SIGNING_MODEL = "unknown-model"
@@ -525,6 +529,162 @@ def _load_config() -> dict:
 
 def _save_config(config: dict):
     save_config_file(config, CONFIG_FILE)
+
+
+def _normalize_semver(raw: object) -> str:
+    value = str(raw or "").strip()
+    if value.lower().startswith("v"):
+        value = value[1:]
+    return value
+
+
+def _parse_semver(raw: object) -> tuple[int, int, int] | None:
+    value = _normalize_semver(raw)
+    match = re.fullmatch(r"(\d+)\.(\d+)\.(\d+)", value)
+    if match is None:
+        return None
+    return tuple(int(part) for part in match.groups())
+
+
+def _is_newer_version(current_version: object, candidate_version: object) -> bool:
+    current = _parse_semver(current_version)
+    candidate = _parse_semver(candidate_version)
+    if current is None or candidate is None:
+        return False
+    return candidate > current
+
+
+def _read_latest_release_cache() -> dict[str, Any] | None:
+    try:
+        payload = json.loads(Path(VERSION_CACHE_FILE).read_text(encoding="utf-8"))
+    except Exception:
+        return None
+    if not isinstance(payload, dict):
+        return None
+    return payload
+
+
+def _write_latest_release_cache(payload: dict[str, Any]) -> None:
+    ensure_config_dir()
+    atomic_write_json_private(VERSION_CACHE_FILE, payload)
+
+
+def _build_release_info(payload: dict[str, Any]) -> dict[str, str] | None:
+    tag_name = _normalize_semver(payload.get("tag_name"))
+    tarball_url = str(payload.get("tarball_url", "") or "").strip()
+    html_url = str(payload.get("html_url", "") or "").strip()
+    if not tag_name or not tarball_url:
+        return None
+    if _parse_semver(tag_name) is None:
+        return None
+    return {
+        "version": tag_name,
+        "tarball_url": tarball_url,
+        "html_url": html_url,
+    }
+
+
+def _fetch_latest_release_info(*, force_refresh: bool = False) -> dict[str, str] | None:
+    now_ts = int(time.time())
+    if not force_refresh:
+        cached = _read_latest_release_cache()
+        if isinstance(cached, dict):
+            checked_at = int(cached.get("checked_at", 0) or 0)
+            info = cached.get("release")
+            if (
+                isinstance(info, dict)
+                and now_ts - checked_at < VERSION_CACHE_TTL_SECONDS
+                and _build_release_info(info) is not None
+            ):
+                return _build_release_info(info)
+    try:
+        response = requests.get(
+            DEFAULT_RELEASE_API_URL,
+            headers={"Accept": "application/vnd.github+json"},
+            timeout=VERSION_CHECK_TIMEOUT_SECONDS,
+        )
+        response.raise_for_status()
+        payload = response.json()
+    except Exception:
+        cached = _read_latest_release_cache()
+        if isinstance(cached, dict):
+            info = cached.get("release")
+            if isinstance(info, dict):
+                return _build_release_info(info)
+        return None
+    if not isinstance(payload, dict):
+        return None
+    info = _build_release_info(payload)
+    if info is None:
+        return None
+    _write_latest_release_cache(
+        {
+            "checked_at": now_ts,
+            "release": {
+                "tag_name": info["version"],
+                "tarball_url": info["tarball_url"],
+                "html_url": info["html_url"],
+            },
+        }
+    )
+    return info
+
+
+def _print_update_notice_if_available() -> None:
+    release = _fetch_latest_release_info()
+    if release is None:
+        return
+    latest_version = release.get("version", "")
+    if not _is_newer_version(__version__, latest_version):
+        return
+    console.print(
+        f"[bold #ff8c00]A new Agensic version is available, update now: {__version__} -> {latest_version}[/bold #ff8c00]"
+    )
+    console.print("[bold #ff8c00]Run 'agensic update' to get the latest version[/bold #ff8c00]")
+
+
+def _download_release_tarball(url: str, destination: Path) -> None:
+    with requests.get(
+        url,
+        headers={"Accept": "application/vnd.github+json"},
+        timeout=30,
+        stream=True,
+    ) as response:
+        response.raise_for_status()
+        with destination.open("wb") as handle:
+            for chunk in response.iter_content(chunk_size=1024 * 128):
+                if not chunk:
+                    continue
+                handle.write(chunk)
+
+
+def _extract_release_tarball(archive_path: Path, destination_dir: Path) -> Path:
+    with tarfile.open(archive_path, "r:gz") as archive:
+        archive.extractall(destination_dir)
+    extracted_roots = [path for path in destination_dir.iterdir() if path.is_dir()]
+    if not extracted_roots:
+        raise RuntimeError("release archive did not contain an extracted project directory")
+    root_dir = extracted_roots[0]
+    install_script = root_dir / "install.sh"
+    if not install_script.is_file():
+        raise RuntimeError("release archive did not contain install.sh")
+    return root_dir
+
+
+def _run_release_installer(source_dir: Path) -> None:
+    env = os.environ.copy()
+    env["AGENSIC_INSTALL_SKIP_FIRST_RUN"] = "1"
+    result = subprocess.run(
+        ["bash", "install.sh"],
+        cwd=str(source_dir),
+        env=env,
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    if result.returncode != 0:
+        detail = (result.stderr or result.stdout or "installer failed").strip()
+        raise RuntimeError(detail)
 
 
 def _daemon_auth_headers() -> dict[str, str]:
@@ -2967,6 +3127,7 @@ def _setup_sessions_menu() -> None:
 def setup():
     """Configure Agensic sessions and autocomplete."""
     ensure_config_dir()
+    _print_update_notice_if_available()
     _clear_uninstall_sentinel()
     _rotate_auth_token_or_exit("setup")
     with _setup_screen_session():
@@ -3374,6 +3535,40 @@ def uninstall(
         console.print("[yellow]Nothing to remove.[/yellow]")
     console.print("[dim]Current shell plugin disabled. Open a new shell for a fully clean session.[/dim]")
 
+
+@app.command()
+def update():
+    """Install the latest published Agensic release from GitHub."""
+    ensure_config_dir()
+    release = _fetch_latest_release_info(force_refresh=True)
+    if release is None:
+        console.print("[red]Could not determine the latest Agensic release from GitHub.[/red]")
+        raise typer.Exit(code=1)
+
+    latest_version = str(release.get("version", "") or "").strip()
+    tarball_url = str(release.get("tarball_url", "") or "").strip()
+    if not latest_version or not tarball_url:
+        console.print("[red]Latest release metadata is incomplete.[/red]")
+        raise typer.Exit(code=1)
+
+    if not _is_newer_version(__version__, latest_version):
+        console.print(f"[green]Agensic is already up to date ({__version__}).[/green]")
+        return
+
+    console.print(f"[cyan]Updating Agensic from {__version__} to {latest_version}...[/cyan]")
+    with tempfile.TemporaryDirectory(prefix="agensic-update-") as tmpdir:
+        archive_path = Path(tmpdir) / "agensic-release.tar.gz"
+        try:
+            _download_release_tarball(tarball_url, archive_path)
+            source_dir = _extract_release_tarball(archive_path, Path(tmpdir))
+            _run_release_installer(source_dir)
+        except Exception as exc:
+            console.print(f"[red]Update failed:[/red] {exc}")
+            raise typer.Exit(code=1)
+
+    console.print(f"[green]Agensic updated successfully: {__version__} -> {latest_version}[/green]")
+    console.print("[dim]Open a new terminal or run `hash -r` if your shell still points to the old launcher.[/dim]")
+
 @app.command()
 def doctor():
     """Run diagnostics for Agensic suggestion pipeline."""
@@ -3565,6 +3760,7 @@ def provenance(
     as_json: bool = typer.Option(False, "--json", help="Print raw JSON payload"),
 ):
     """Show command provenance attribution history."""
+    _print_update_notice_if_available()
     export_format = str(export or "").strip().lower()
     out_path = str(out or "").strip()
     if export_format and export_format not in {"json", "csv"}:
@@ -3734,6 +3930,7 @@ def sessions(
     text: bool = typer.Option(False, "--text", help="Print sessions as text instead of opening the TUI"),
 ):
     """Browse tracked sessions."""
+    _print_update_notice_if_available()
     from . import track as track_runtime
 
     if text:

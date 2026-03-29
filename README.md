@@ -275,6 +275,7 @@ The table below lists every CLI command currently available in Agensic.
 | --- | --- |
 | <code>agensic --help</code> | Show the main CLI help and all standard user-facing commands |
 | <code>agensic --version</code> | Print the installed Agensic version and exit |
+| <code>agensic update</code> | Download and install the latest published Agensic GitHub release |
 | <code>agensic setup</code> | Open the interactive setup flow for Agensic Sessions and Autocomplete |
 | <code>agensic enable-startup</code> | Configure Agensic to start automatically on login or boot |
 | <code>agensic first-run</code> | Run the first-install onboarding flow |
@@ -284,6 +285,23 @@ The table below lists every CLI command currently available in Agensic.
 | <code>agensic test</code> | Send a test autocomplete request to the daemon to verify connectivity |
 | <code>agensic provenance</code> | Open the command provenance history view. Supports filters such as <code>--limit</code>, <code>--label</code>, and <code>--contains</code> |
 | <code>agensic sessions</code> | Open the tracked sessions browser. Use <code>--text</code> for plain text output |
+
+## Releasing
+
+To prepare a new CLI release, bump the package version, create the release commit, and tag it in one step:
+
+```bash
+./scripts/release.sh 0.1.1
+```
+
+Optional flags:
+
+```bash
+./scripts/release.sh 0.1.1 --push
+./scripts/release.sh 0.1.1 --publish --push
+```
+
+The script updates [`pyproject.toml`](./pyproject.toml) and [`agensic/version.py`](./agensic/version.py), creates a commit named `Release vX.Y.Z`, and creates an annotated tag `vX.Y.Z`. `--publish` uses GitHub CLI to create the GitHub Release that powers Agensic's update checks.
 | <code>agensic --explain "your command here"</code> | Explain a shell command in plain language and exit |
 | <code>agensic --add_agent "executable"</code> | Add a custom tracked agent executable and exit |
 | <code>agensic doctor</code> | Run diagnostics for the suggestion pipeline and local state |

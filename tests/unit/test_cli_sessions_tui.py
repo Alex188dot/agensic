@@ -14,7 +14,9 @@ class CliSessionsTuiTests(unittest.TestCase):
         self.runner = CliRunner()
 
     def test_sessions_command_uses_tui_by_default(self):
-        with patch("agensic.cli.app._run_sessions_tui", return_value=True) as run_tui, patch.object(
+        with patch("agensic.cli.app._print_update_notice_if_available"), patch(
+            "agensic.cli.app._run_sessions_tui", return_value=True
+        ) as run_tui, patch.object(
             app_module.sys.stdin, "isatty", return_value=True
         ), patch.object(app_module.sys.stdout, "isatty", return_value=True):
             result = self.runner.invoke(app, ["sessions"])
@@ -23,7 +25,9 @@ class CliSessionsTuiTests(unittest.TestCase):
         run_tui.assert_called_once_with()
 
     def test_sessions_command_falls_back_to_text(self):
-        with patch("agensic.cli.app._run_sessions_tui", return_value=False), patch.object(
+        with patch("agensic.cli.app._print_update_notice_if_available"), patch(
+            "agensic.cli.app._run_sessions_tui", return_value=False
+        ), patch.object(
             track_module, "print_sessions_text", return_value=0
         ) as print_text, patch.object(app_module.sys.stdin, "isatty", return_value=True), patch.object(
             app_module.sys.stdout, "isatty", return_value=True
