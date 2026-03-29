@@ -113,7 +113,15 @@ class CliTrackTests(unittest.TestCase):
     def _temp_app_paths(self):
         with tempfile.TemporaryDirectory() as temp_dir:
             home_path = Path(temp_dir)
-            for filename in (".bash_profile", ".bashrc"):
+            for filename in (
+                ".bash_profile",
+                ".bash_login",
+                ".bashrc",
+                ".profile",
+                ".zprofile",
+                ".zshenv",
+                ".zshrc",
+            ):
                 (home_path / filename).write_text("", encoding="utf-8")
             env = {
                 "HOME": temp_dir,
@@ -123,20 +131,20 @@ class CliTrackTests(unittest.TestCase):
             }
             with patch.dict(os.environ, env, clear=False):
                 temp_paths = ag_paths.get_app_paths()
-            with patch.object(cli_app, "APP_PATHS", temp_paths), patch.object(
-                ag_paths,
-                "APP_PATHS",
-                temp_paths,
-            ), patch.object(
-                track_module,
-                "APP_PATHS",
-                temp_paths,
-            ), patch.object(
-                provenance_module,
-                "APP_PATHS",
-                temp_paths,
-            ):
-                yield env, temp_paths
+                with patch.object(cli_app, "APP_PATHS", temp_paths), patch.object(
+                    ag_paths,
+                    "APP_PATHS",
+                    temp_paths,
+                ), patch.object(
+                    track_module,
+                    "APP_PATHS",
+                    temp_paths,
+                ), patch.object(
+                    provenance_module,
+                    "APP_PATHS",
+                    temp_paths,
+                ):
+                    yield env, temp_paths
 
     def _wait_for_active_session(self, temp_paths: ag_paths.AppPaths, timeout: float = 5.0) -> dict[str, object] | None:
         deadline = time.time() + timeout
