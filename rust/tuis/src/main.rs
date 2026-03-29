@@ -78,6 +78,35 @@ pub(crate) fn agensic_title_style() -> Style {
         .add_modifier(Modifier::BOLD)
 }
 
+pub(crate) fn tui_hint_style(color: Color) -> Style {
+    Style::default().fg(color)
+}
+
+pub(crate) fn tui_hint_key(text: impl Into<String>, color: Color) -> Span<'static> {
+    Span::styled(
+        text.into(),
+        tui_hint_style(color).add_modifier(Modifier::BOLD),
+    )
+}
+
+pub(crate) fn tui_hint_desc(text: impl Into<String>, color: Color) -> Span<'static> {
+    Span::styled(text.into(), tui_hint_style(color))
+}
+
+pub(crate) fn tui_hint_line(items: &[(&str, &str)], color: Color) -> Line<'static> {
+    let mut spans: Vec<Span<'static>> = Vec::new();
+    for (index, (key, description)) in items.iter().enumerate() {
+        if index > 0 {
+            spans.push(Span::raw("  "));
+        }
+        spans.push(tui_hint_key((*key).to_string(), color));
+        if !description.is_empty() {
+            spans.push(tui_hint_desc(format!(" {}", description), color));
+        }
+    }
+    Line::from(spans)
+}
+
 pub(crate) fn copy_to_clipboard(text: &str) -> Result<(), String> {
     let text = text.trim_end_matches('\n');
     if text.is_empty() {
@@ -573,10 +602,6 @@ impl App {
 
     fn command_style() -> Style {
         Style::default().fg(Color::Rgb(255, 165, 0))
-    }
-
-    fn key_hint_style() -> Style {
-        Style::default().fg(Color::Yellow)
     }
 
     fn header_style() -> Style {
@@ -1698,26 +1723,26 @@ fn build_provenance_detail_content(
         } else {
             "x expand command"
         };
-        let summary_text = if app.details_command_expanded {
+        let summary_suffix = if app.details_command_expanded {
             format!(
-                "{} ({}/{})",
-                toggle_text,
+                " {} ({}/{})",
+                &toggle_text[2..],
                 wrapped_command_lines.len(),
                 wrapped_command_lines.len()
             )
         } else {
             format!(
-                "{} ({}/{} rows shown, {} hidden)",
-                toggle_text,
+                " {} ({}/{} rows shown, {} hidden)",
+                &toggle_text[2..],
                 visible_command_lines,
                 wrapped_command_lines.len(),
                 hidden_rows
             )
         };
-        lines.push(Line::from(Span::styled(
-            summary_text,
-            App::key_hint_style(),
-        )));
+        lines.push(Line::from(vec![
+            crate::tui_hint_key("x", Color::Yellow),
+            crate::tui_hint_desc(summary_suffix, Color::Yellow),
+        ]));
     }
     for command_line in wrapped_command_lines.iter().take(visible_command_lines) {
         lines.push(Line::from(Span::styled(
@@ -2009,13 +2034,33 @@ fn draw_ui(terminal: &mut Terminal<CrosstermBackend<Stdout>>, app: &App) -> io::
         frame.render_stateful_widget(table, chunks[1], &mut table_state);
 
         let footer = Paragraph::new(vec![
-            Line::from(Span::styled(
-                format!(
-                "↑↓: Select  Tab/Shift+Tab: Page  c: Copy  Ctrl+F: Search  f: Filters  s: Sort={}  Enter: Details  r: Refresh  e: Export(json)  E: Export(csv)  Esc: Quit",
-                app.sort_mode.label(),
+            Line::from(vec![
+                crate::tui_hint_key("↑↓:", Color::Yellow),
+                crate::tui_hint_desc(" Select  ", Color::Yellow),
+                crate::tui_hint_key("Tab/Shift+Tab:", Color::Yellow),
+                crate::tui_hint_desc(" Page  ", Color::Yellow),
+                crate::tui_hint_key("c:", Color::Yellow),
+                crate::tui_hint_desc(" Copy  ", Color::Yellow),
+                crate::tui_hint_key("Ctrl+F:", Color::Yellow),
+                crate::tui_hint_desc(" Search  ", Color::Yellow),
+                crate::tui_hint_key("f:", Color::Yellow),
+                crate::tui_hint_desc(" Filters  ", Color::Yellow),
+                crate::tui_hint_key("s:", Color::Yellow),
+                crate::tui_hint_desc(
+                    format!(" Sort={}  ", app.sort_mode.label()),
+                    Color::Yellow,
                 ),
-                App::key_hint_style(),
-            )),
+                crate::tui_hint_key("Enter:", Color::Yellow),
+                crate::tui_hint_desc(" Details  ", Color::Yellow),
+                crate::tui_hint_key("r:", Color::Yellow),
+                crate::tui_hint_desc(" Refresh  ", Color::Yellow),
+                crate::tui_hint_key("e:", Color::Yellow),
+                crate::tui_hint_desc(" Export(json)  ", Color::Yellow),
+                crate::tui_hint_key("E:", Color::Yellow),
+                crate::tui_hint_desc(" Export(csv)  ", Color::Yellow),
+                crate::tui_hint_key("Esc:", Color::Yellow),
+                crate::tui_hint_desc(" Quit", Color::Yellow),
+            ]),
             Line::from(Span::styled(
                 app.status_text().to_string(),
                 Style::default().fg(Color::White),
@@ -2028,9 +2073,15 @@ fn draw_ui(terminal: &mut Terminal<CrosstermBackend<Stdout>>, app: &App) -> io::
             let popup = centered_rect(58, 46, area);
             let fields = App::filter_fields();
             let mut lines: Vec<Line> = Vec::new();
-            lines.push(Line::from(
-                "Filter panel (Left/Right change, Up/Down move, Enter/Esc close)",
-            ));
+            lines.push(Line::from(vec![
+                Span::raw("Filter panel ("),
+                crate::tui_hint_key("Left/Right", Color::Yellow),
+                crate::tui_hint_desc(" change, ", Color::Yellow),
+                crate::tui_hint_key("Up/Down", Color::Yellow),
+                crate::tui_hint_desc(" move, ", Color::Yellow),
+                crate::tui_hint_key("Enter/Esc", Color::Yellow),
+                crate::tui_hint_desc(" close)", Color::Yellow),
+            ]));
             lines.push(Line::from(
                 "Use time=custom to set start/end dates (YYYY-MM-DD)",
             ));
@@ -2071,7 +2122,14 @@ fn draw_ui(terminal: &mut Terminal<CrosstermBackend<Stdout>>, app: &App) -> io::
                 Line::from(
                     "Custom time range (YYYY-MM-DD, last 365 days, max 30 days inclusive)",
                 ),
-                Line::from("Tab/Up/Down move  Enter apply  Esc cancel"),
+                crate::tui_hint_line(
+                    &[
+                        ("Tab/Up/Down", "move"),
+                        ("Enter", "apply"),
+                        ("Esc", "cancel"),
+                    ],
+                    Color::Yellow,
+                ),
                 Line::from("Typing overwrites current field value"),
                 Line::from(""),
                 Line::from(vec![Span::styled(
@@ -2116,15 +2174,23 @@ fn draw_ui(terminal: &mut Terminal<CrosstermBackend<Stdout>>, app: &App) -> io::
                     };
                     let mut title_spans = vec![
                         Span::styled("Run details ", App::header_style()),
-                        Span::styled("(Enter/Esc: close, c: copy, Tab: end)", App::key_hint_style()),
+                        Span::raw("("),
+                        crate::tui_hint_key("Enter/Esc:", Color::Yellow),
+                        crate::tui_hint_desc(" close, ", Color::Yellow),
+                        crate::tui_hint_key("c:", Color::Yellow),
+                        crate::tui_hint_desc(" copy, ", Color::Yellow),
+                        crate::tui_hint_key("Tab:", Color::Yellow),
+                        crate::tui_hint_desc(" end)", Color::Yellow),
                     ];
                     if detail_content.command_expandable {
                         title_spans.push(Span::raw("  "));
-                        title_spans.push(Span::styled("x: expand/collapse", App::key_hint_style()));
+                        title_spans.push(crate::tui_hint_key("x:", Color::Yellow));
+                        title_spans.push(crate::tui_hint_desc(" expand/collapse", Color::Yellow));
                     }
                     if has_overflow {
                         title_spans.push(Span::raw("  "));
-                        title_spans.push(Span::styled("↑↓: scroll", App::key_hint_style()));
+                        title_spans.push(crate::tui_hint_key("↑↓:", Color::Yellow));
+                        title_spans.push(crate::tui_hint_desc(" scroll", Color::Yellow));
                     }
                     let panel = Paragraph::new(details)
                         .block(

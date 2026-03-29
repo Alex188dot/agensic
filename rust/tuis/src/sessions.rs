@@ -2216,11 +2216,24 @@ fn draw_browser(frame: &mut ratatui::Frame<'_>, app: &App) {
     }
     frame.render_stateful_widget(table, chunks[0], &mut state);
     frame.render_widget(
-        Paragraph::new(format!(
-            "↑↓ move  Enter open  f filters  R rename  D delete  r refresh  Esc quit    {}",
-            app.status_text()
-        ))
-        .style(Style::default().fg(Color::White)),
+        Paragraph::new(Line::from(vec![
+            crate::tui_hint_key("↑↓:", Color::Yellow),
+            crate::tui_hint_desc(" move  ", Color::Yellow),
+            crate::tui_hint_key("Enter:", Color::Yellow),
+            crate::tui_hint_desc(" open  ", Color::Yellow),
+            crate::tui_hint_key("f:", Color::Yellow),
+            crate::tui_hint_desc(" filters  ", Color::Yellow),
+            crate::tui_hint_key("R:", Color::Yellow),
+            crate::tui_hint_desc(" rename  ", Color::Yellow),
+            crate::tui_hint_key("D:", Color::Yellow),
+            crate::tui_hint_desc(" delete  ", Color::Yellow),
+            crate::tui_hint_key("r:", Color::Yellow),
+            crate::tui_hint_desc(" refresh  ", Color::Yellow),
+            crate::tui_hint_key("Esc:", Color::Yellow),
+            crate::tui_hint_desc(" quit", Color::Yellow),
+            Span::raw("    "),
+            Span::styled(app.status_text().to_string(), Style::default().fg(Color::White)),
+        ])),
         chunks[1],
     );
     frame.render_widget(
@@ -2237,9 +2250,15 @@ fn draw_browser(frame: &mut ratatui::Frame<'_>, app: &App) {
         let popup = crate::centered_rect(58, 42, area);
         let fields = App::filter_fields();
         let mut lines: Vec<Line> = Vec::new();
-        lines.push(Line::from(
-            "Filter panel (Left/Right change, Up/Down move, Enter/Esc close)",
-        ));
+        lines.push(Line::from(vec![
+            Span::raw("Filter panel ("),
+            crate::tui_hint_key("Left/Right:", Color::Yellow),
+            crate::tui_hint_desc(" change, ", Color::Yellow),
+            crate::tui_hint_key("Up/Down:", Color::Yellow),
+            crate::tui_hint_desc(" move, ", Color::Yellow),
+            crate::tui_hint_key("Enter/Esc:", Color::Yellow),
+            crate::tui_hint_desc(" close)", Color::Yellow),
+        ]));
         lines.push(Line::from(""));
         for (idx, field) in fields.iter().enumerate() {
             let value = app.field_current(field);
@@ -2290,10 +2309,7 @@ fn draw_detail(frame: &mut ratatui::Frame<'_>, app: &App, detail: &DetailState) 
     }
     frame.render_widget(build_replay(app, detail, layout.replay), layout.replay);
     let mut footer_lines = vec![
-        Line::from(Span::styled(
-            detail_footer_hints(),
-            Style::default().fg(Color::Yellow),
-        )),
+        detail_footer_hints(),
         Line::from(app.status_text().to_string()),
     ];
     if detail.replay_loading {
@@ -2720,10 +2736,11 @@ fn draw_event_modal(
                             .fg(Color::LightGreen)
                             .add_modifier(Modifier::BOLD),
                     ),
-                    Span::styled(
-                        "(Enter/Esc close, ↑↓ scroll)",
-                        Style::default().fg(Color::DarkGray),
-                    ),
+                    Span::raw("("),
+                    crate::tui_hint_key("Enter/Esc:", Color::DarkGray),
+                    crate::tui_hint_desc(" close, ", Color::DarkGray),
+                    crate::tui_hint_key("↑↓:", Color::DarkGray),
+                    crate::tui_hint_desc(" scroll)", Color::DarkGray),
                 ])),
         )
         .scroll((scroll, 0))
@@ -2741,10 +2758,14 @@ fn draw_rename_modal(frame: &mut ratatui::Frame<'_>, modal: &RenameModalState) {
         Line::from(format!("session: {}", modal.session_id)),
         Line::from(format!("name: {}", modal.input)),
         Line::from(""),
-        Line::from(Span::styled(
-            "Enter: save  Esc: cancel  Backspace/Delete: edit",
-            Style::default().fg(Color::Yellow),
-        )),
+        crate::tui_hint_line(
+            &[
+                ("Enter:", "save"),
+                ("Esc:", "cancel"),
+                ("Backspace/Delete:", "edit"),
+            ],
+            Color::Yellow,
+        ),
     ];
     frame.render_widget(
         Paragraph::new(content)
@@ -2777,10 +2798,10 @@ fn draw_delete_modal(frame: &mut ratatui::Frame<'_>, modal: &DeleteModalState) {
         Line::from(""),
         Line::from("This permanently removes the tracked session and its artifacts."),
         Line::from(""),
-        Line::from(Span::styled(
-            "Enter: delete  Esc: cancel",
-            Style::default().fg(Color::Yellow),
-        )),
+        crate::tui_hint_line(
+            &[("Enter:", "delete"), ("Esc:", "cancel")],
+            Color::Yellow,
+        ),
     ];
     frame.render_widget(
         Paragraph::new(content)
@@ -2901,10 +2922,10 @@ fn draw_time_travel_modal(frame: &mut ratatui::Frame<'_>, modal: &TimeTravelModa
         }
     }
     content.push(Line::from(""));
-    content.push(Line::from(Span::styled(
-        "Enter: fork + launch replay  Esc: cancel",
-        Style::default().fg(Color::Yellow),
-    )));
+    content.push(crate::tui_hint_line(
+        &[("Enter:", "fork + launch replay"), ("Esc:", "cancel")],
+        Color::Yellow,
+    ));
     frame.render_widget(
         Paragraph::new(content)
             .block(
@@ -3293,13 +3314,46 @@ fn detail_footer_height(detail: &DetailState) -> u16 {
 }
 
 #[cfg(target_os = "linux")]
-fn detail_footer_hints() -> &'static str {
-    "Space Play  ↑↓ Move/Scroll  ←→ Replay X  Tab Jump  c Copy  D Delete  T Time Travel  e/E Export  f Fullscreen  s Pane  Enter Details  Esc Back"
+fn detail_footer_hints() -> Line<'static> {
+    crate::tui_hint_line(
+        &[
+            ("Space:", "Play"),
+            ("↑↓:", "Move/Scroll"),
+            ("←→:", "Replay X"),
+            ("Tab:", "Jump"),
+            ("c:", "Copy"),
+            ("D:", "Delete"),
+            ("T:", "Time Travel"),
+            ("e/E:", "Export"),
+            ("f:", "Fullscreen"),
+            ("s:", "Pane"),
+            ("Enter:", "Details"),
+            ("Esc:", "Back"),
+        ],
+        Color::Yellow,
+    )
 }
 
 #[cfg(not(target_os = "linux"))]
-fn detail_footer_hints() -> &'static str {
-    "Space: Play/Pause   ↑↓: Move  ←/→: Horiz. Scroll  Tab/Shift+Tab: Jump 500  c: Copy  D: Delete  T: Time Travel  e: Export Conv(jsonl)  E: Export TL(csv)  f: Fullscreen  s: Switch pane  Enter: Details  Esc: Back"
+fn detail_footer_hints() -> Line<'static> {
+    crate::tui_hint_line(
+        &[
+            ("Space:", "Play/Pause"),
+            ("↑↓:", "Move"),
+            ("←/→:", "Horiz. Scroll"),
+            ("Tab/Shift+Tab:", "Jump 500"),
+            ("c:", "Copy"),
+            ("D:", "Delete"),
+            ("T:", "Time Travel"),
+            ("e:", "Export Conv(jsonl)"),
+            ("E:", "Export TL(csv)"),
+            ("f:", "Fullscreen"),
+            ("s:", "Switch pane"),
+            ("Enter:", "Details"),
+            ("Esc:", "Back"),
+        ],
+        Color::Yellow,
+    )
 }
 
 fn changes_panel_constraints(detail: &DetailState) -> [Constraint; 2] {
