@@ -2,12 +2,8 @@ name: Release TUIs
 
 on:
   push:
-    branches:
-      - main
     tags:
       - "v*"
-      - "tuis-*"
-  workflow_dispatch:
 
 jobs:
   meta:
@@ -15,19 +11,16 @@ jobs:
     runs-on: ubuntu-latest
     outputs:
       version: ${{ steps.meta.outputs.version }}
-      rolling: ${{ steps.meta.outputs.rolling }}
 
     steps:
       - id: meta
         shell: bash
         run: |
-          if [[ "${GITHUB_REF}" == refs/tags/* ]]; then
-            echo "version=${GITHUB_REF_NAME}" >> "$GITHUB_OUTPUT"
-            echo "rolling=false" >> "$GITHUB_OUTPUT"
-          else
-            echo "version=tuis-latest" >> "$GITHUB_OUTPUT"
-            echo "rolling=true" >> "$GITHUB_OUTPUT"
+          if [[ "${GITHUB_REF}" != refs/tags/v* ]]; then
+            echo "This workflow only publishes sidecars for semver release tags (vX.Y.Z)." >&2
+            exit 1
           fi
+          echo "version=${GITHUB_REF_NAME}" >> "$GITHUB_OUTPUT"
 
   build:
     name: ${{ matrix.platform }}
@@ -156,19 +149,6 @@ jobs:
       contents: write
 
     steps:
-      - uses: actions/checkout@v4
-        with:
-          fetch-depth: 0
-
-      - name: Update Rolling Release Tag
-        if: needs.meta.outputs.rolling == 'true'
-        shell: bash
-        run: |
-          git config user.name "github-actions[bot]"
-          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
-          git tag -f "${{ needs.meta.outputs.version }}" "${GITHUB_SHA}"
-          git push origin "refs/tags/${{ needs.meta.outputs.version }}" --force
-
       - uses: actions/download-artifact@v4
         with:
           name: tuis-release-assets
@@ -178,7 +158,5 @@ jobs:
         uses: softprops/action-gh-release@v2
         with:
           tag_name: ${{ needs.meta.outputs.version }}
-          name: TUI Sidecars ${{ needs.meta.outputs.version }}
           files: release-assets/*
           overwrite_files: true
-          generate_release_notes: ${{ needs.meta.outputs.rolling != 'true' }}

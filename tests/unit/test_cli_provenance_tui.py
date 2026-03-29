@@ -20,13 +20,17 @@ class CliProvenanceTuiTests(unittest.TestCase):
         self.runner = CliRunner()
 
     def test_tuis_invokes_sidecar(self):
-        with patch("agensic.cli.app._run_tuis", return_value=True) as run_tui:
+        with patch("agensic.cli.app._print_update_notice_if_available"), patch(
+            "agensic.cli.app._run_tuis", return_value=True
+        ) as run_tui:
             result = self.runner.invoke(app, ["provenance"])
         self.assertEqual(result.exit_code, 0)
         run_tui.assert_called_once()
 
     def test_tuis_export_defaults_output_path(self):
-        with patch("agensic.cli.app._default_export_path", return_value="/tmp/default-prov.json"), patch(
+        with patch("agensic.cli.app._print_update_notice_if_available"), patch(
+            "agensic.cli.app._default_export_path", return_value="/tmp/default-prov.json"
+        ), patch(
             "agensic.cli.app._run_tuis",
             return_value=True,
         ) as run_tui:
@@ -37,7 +41,9 @@ class CliProvenanceTuiTests(unittest.TestCase):
         self.assertIn("Exported provenance rows to:", _plain(result.stdout))
 
     def test_tuis_export_falls_back_when_sidecar_fails(self):
-        with patch("agensic.cli.app._run_tuis", return_value=False), patch(
+        with patch("agensic.cli.app._print_update_notice_if_available"), patch(
+            "agensic.cli.app._run_tuis", return_value=False
+        ), patch(
             "agensic.cli.app._fallback_export_provenance"
         ) as fallback:
             result = self.runner.invoke(

@@ -2843,6 +2843,13 @@ def _shell_background_commands(command_text: str) -> list[str]:
     return out
 
 
+def _shell_script_indicates_session_escape(command_text: str) -> bool:
+    script = _shell_eval_script(command_text).lower()
+    if not script:
+        return False
+    return "os.setsid(" in script or "setsid " in script or "launchctl " in script
+
+
 def _session_has_git_commit_command(runtime: "TrackRuntime") -> bool:
     if _command_runs_git_commit(runtime.launch.root_command):
         return True
@@ -3364,11 +3371,34 @@ class TrackRuntime:
             )
             self.finalize_process(synthetic, exit_code=synthetic_exit_code)
 
+    def _record_missing_session_escape(self, proc: ObservedProcess, *, exit_code: int | None = None) -> None:
+        if proc.pid != self.root_pid:
+            return
+        if not _shell_script_indicates_session_escape(proc.command):
+            return
+        if any(item.session_escape for item in self.processes.values() if item.pid != self.root_pid):
+            return
+        self.note_violation("session_boundary_escape")
+        script = _shell_eval_script(proc.command) or proc.command
+        synthetic = ObservedProcess(
+            pid=-(self.root_pid * 1000 + 999),
+            ppid=self.root_pid,
+            command=script,
+            working_directory=proc.working_directory or self.launch.working_directory,
+            started_at=float(proc.started_at or time.time()),
+            session_id=max(1, self.root_session_id + 1),
+            process_group_id=max(1, self.root_process_group_id + 1),
+            session_escape=True,
+        )
+        synthetic_exit_code = 0 if int(exit_code or 0) == 0 else None
+        self.finalize_process(synthetic, exit_code=synthetic_exit_code)
+
     def finalize_process(self, proc: ObservedProcess, *, exit_code: int | None = None) -> None:
         if proc.finalized:
             return
         proc.finalized = True
         self._record_missing_shell_background_commands(proc, exit_code=exit_code)
+        self._record_missing_session_escape(proc, exit_code=exit_code)
         duration_ms = max(0, int((time.time() - float(proc.started_at or time.time())) * 1000.0))
         working_directory = proc.working_directory or self.launch.working_directory
         trace_id = f"track-{self.session_id}-{proc.pid}"
