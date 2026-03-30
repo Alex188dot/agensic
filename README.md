@@ -286,39 +286,6 @@ The table below lists every CLI command currently available in Agensic.
 | <code>agensic provenance</code> | Open the command provenance history view. Supports filters such as <code>--limit</code>, <code>--label</code>, and <code>--contains</code> |
 | <code>agensic sessions</code> | Open the tracked sessions browser. Use <code>--text</code> for plain text output |
 
-## Releasing
-
-To prepare a new CLI release, bump the package version, create the release commit, and tag it in one step:
-
-```bash
-./scripts/release.sh 0.1.1
-```
-
-Optional flags:
-
-```bash
-./scripts/release.sh 0.1.1 --push
-./scripts/release.sh 0.1.1 --publish --push
-```
-
-The script updates [`pyproject.toml`](./pyproject.toml) and [`agensic/version.py`](./agensic/version.py), creates a commit named `Release vX.Y.Z`, and creates an annotated tag `vX.Y.Z`. `--publish` uses GitHub CLI to create the GitHub Release that powers Agensic's update checks.
-| <code>agensic --explain "your command here"</code> | Explain a shell command in plain language and exit |
-| <code>agensic --add_agent "executable"</code> | Add a custom tracked agent executable and exit |
-| <code>agensic doctor</code> | Run diagnostics for the suggestion pipeline and local state |
-| <code>agensic fix</code> | Repair Agensic storage state. Supports <code>--safe</code>, <code>--recover</code>, and <code>--factory-reset</code> |
-| <code>agensic shortcuts</code> | Show the keyboard shortcuts for autocomplete |
-| <code>agensic auth rotate</code> | Rotate the local daemon auth token |
-| <code>agensic auth status</code> | Show metadata about the local daemon auth token |
-| <code>agensic run &lt;agent&gt; [agent args...]</code> | Launch a supported agent under Agensic session tracking |
-| <code>agensic run inspect [session_id]</code> | Inspect a tracked session. Supports <code>--text</code>, <code>--replay</code>, and <code>--tail N</code> |
-| <code>agensic run status</code> | Print the status of currently tracked agent sessions |
-| <code>agensic run stop [session_id]</code> | Stop a tracked session by id |
-| <code>agensic run stop --all</code> | Stop all currently tracked sessions |
-| <code>agensic uninstall</code> | Remove Agensic startup wiring and local install state |
-
-
-
----
 
 ## 🔒 <a id="-safety--privacy"></a>Safety & Privacy
 
