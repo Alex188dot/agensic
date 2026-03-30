@@ -3,8 +3,9 @@
 <head>
     <meta charset="utf-8"/>
     <meta content="width=device-width, initial-scale=1.0" name="viewport"/>
-    <title>Agensic | Forensic Observability for AI Agents</title>
+    <title>Agensic</title>
     <script src="https://cdn.tailwindcss.com?plugins=forms,container-queries"></script>
+    <link rel="icon" type="image/x-icon" href="assets/favicon.ico">
     <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;700;800;900&amp;family=Space+Grotesk:wght@300;400;500;600;700&amp;display=swap" rel="stylesheet"/>
     <link href="https://fonts.googleapis.com/css2?family=Material+Symbols+Outlined:wght,FILL@100..700,0..1&amp;display=swap" rel="stylesheet"/>
     <script id="tailwind-config">
@@ -27,7 +28,7 @@
                     },
                     fontFamily: {
                         "headline": ["Inter"],
-                        "body": ["Space Grotesk"],
+                        "body":["Space Grotesk"],
                         "label": ["Space Grotesk"]
                     },
                 },
@@ -41,6 +42,13 @@
         .text-glow { text-shadow: 0 0 10px rgba(0, 255, 136, 0.5); }
         body { background-color: #000000; color: #e2e2e2; }
         .glass-panel { background: rgba(31, 31, 31, 0.6); backdrop-filter: blur(20px); }
+        .hide-scrollbar {
+            -ms-overflow-style: none;
+            scrollbar-width: none;
+        }
+        .hide-scrollbar::-webkit-scrollbar {
+            display: none;
+        }
     </style>
 </head>
 <body class="font-body selection:bg-primary-container selection:text-[#007139] scroll-smooth">
@@ -68,9 +76,10 @@
 <section class="relative pt-32 pb-20 px-6 overflow-hidden min-h-[90vh] flex flex-col justify-center">
     <div class="max-w-7xl mx-auto flex flex-col items-center text-center relative z-10 w-full">
         <h1 class="font-headline font-black text-6xl md:text-8xl tracking-tight mb-6 max-w-5xl leading-none">
-            Know what your <span class="text-primary-container text-glow">AI agents</span> actually did.
+            Know what your <br/>
+            <span class="text-primary-container text-glow">AI agents</span> actually did
         </h1>
-        <p class="font-mono text-gray-400 text-lg md:text-xl mb-10 max-w-2xl uppercase tracking-tight">
+        <p class="font-mono text-gray-400 text-lg md:text-xl mb-10 max-w-2xl tracking-tight">
             The missing forensic observability layer for AI-powered terminal workflows. Audit your AI before it audits you.
         </p>
         
@@ -89,7 +98,7 @@
                     <div class="w-3 h-3 rounded-full bg-secondary-container"></div>
                     <div class="w-3 h-3 rounded-full bg-primary-container/50"></div>
                 </div>
-                <span class="text-[10px] font-mono uppercase tracking-widest text-gray-500">agensic_copilot</span>
+                <span class="text-[10px] font-mono uppercase tracking-widest text-gray-500">agensic</span>
                 <div class="w-12"></div>
             </div>
             <div class="p-6 text-left font-mono text-sm leading-relaxed overflow-x-auto min-h-[120px] flex flex-col justify-center">
@@ -154,7 +163,7 @@
             <ul class="space-y-4 font-mono text-sm tracking-widest text-on-surface uppercase">
                 <li class="flex items-center gap-4"><span class="text-primary-container">&gt;</span> Cryptographic Ed25519 Origin Signing</li>
                 <li class="flex items-center gap-4"><span class="text-primary-container">&gt;</span> Structured Attribution Labels</li>
-                <li class="flex items-center gap-4"><span class="text-primary-container">&gt;</span> Full-Screen JSON/CSV Exportable Explorer</li>
+                <li class="flex items-center gap-4"><span class="text-primary-container">&gt;</span> JSON/CSV Exportable Explorer</li>
             </ul>
         </div>
         <div class="relative">
@@ -257,48 +266,61 @@
     </div>
 </section>
 
-<!-- How It Works -->
+<!-- How It Works / Quickstart Section -->
 <section class="py-24 px-6">
     <div class="max-w-4xl mx-auto">
         <div class="text-center mb-16">
-            <span class="font-mono text-xs uppercase tracking-[0.3em] text-primary-container mb-4 block">Initialization Protocol</span>
-            <h2 class="font-headline font-black text-4xl uppercase tracking-tighter">Zero-Config Deployment</h2>
+            <span class="font-mono text-s uppercase tracking-[0.3em] text-primary-container mb-4 block">Quickstart</span>
+            <h2 class="font-headline font-black text-2xl md:text-4xl uppercase tracking-tighter">Get Started in Seconds</h2>
         </div>
         
         <div class="space-y-12 relative">
-            <div class="absolute left-[23px] top-0 bottom-0 w-[1px] bg-outline-variant/30 -z-10"></div>
+            <!-- Connector line (hidden on mobile for cleaner look) -->
+            <div class="absolute left-[23px] top-0 bottom-0 w-[1px] bg-outline-variant/30 -z-10 hidden md:block"></div>
             
-            <!-- Step 1 -->
-            <div class="flex gap-8 items-start">
+            <!-- Step 1: Install -->
+            <div class="flex gap-4 md:gap-8 items-start w-full">
                 <div class="w-12 h-12 flex-shrink-0 bg-surface border border-primary-container/40 flex items-center justify-center font-mono font-bold text-primary-container text-xl glow-sm">01</div>
-                <div>
-                    <h3 class="font-mono font-bold text-lg mb-2 uppercase tracking-tight">Install Agensic</h3>
-                    <p class="text-gray-500 text-sm font-mono mb-4">Run the one-line managed installer to configure your shell.</p>
-                    <div class="bg-surface-container-lowest p-4 border border-outline-variant/20 font-mono text-sm text-on-surface overflow-x-auto whitespace-nowrap">
-                        <span class="text-primary-container">$</span> curl -fsSL https://raw.githubusercontent.com/Alex188dot/agensic/main/bootstrap.sh | bash
+                <div class="min-w-0 flex-1">
+                    <h3 class="font-mono font-bold text-lg mb-2 uppercase tracking-tight">One-Line Install</h3>
+                    <p class="text-gray-500 text-sm font-mono mb-4">Run the managed installer to auto-configure your shell environment</p>
+                    
+                    <div class="relative w-full max-w-full rounded border border-outline-variant/20 overflow-hidden bg-surface-container-lowest">
+                        <!-- Horizontal scrolling container with hidden scrollbar -->
+                        <div class="p-4 pr-16 font-mono text-sm text-on-surface overflow-x-auto whitespace-nowrap hide-scrollbar">
+                            <span class="text-primary-container">$</span> curl -fsSL https://raw.githubusercontent.com/Alex188dot/agensic/main/bootstrap.sh | bash
+                        </div>
+                        
+                        <!-- Visual fade to prevent text overlap -->
+                        <div class="absolute right-0 top-0 bottom-0 w-20 bg-gradient-to-l from-surface-container-lowest via-surface-container-lowest to-transparent pointer-events-none"></div>
+                        
+                        <!-- Polished Copy Button -->
+                        <button onclick="copyInstallCmd()" class="absolute right-2 top-1/2 -translate-y-1/2 bg-surface-container-high hover:bg-surface-bright border border-outline-variant/50 text-gray-400 hover:text-primary-container transition-all w-8 h-8 rounded flex items-center justify-center shadow-md z-10" aria-label="Copy to clipboard" title="Copy command">
+                            <span class="material-symbols-outlined text-[18px]" id="copy-icon">content_copy</span>
+                        </button>
                     </div>
                 </div>
             </div>
             
-            <!-- Step 2 -->
-            <div class="flex gap-8 items-start">
+            <!-- Step 2: Run -->
+            <div class="flex gap-4 md:gap-8 items-start w-full">
                 <div class="w-12 h-12 flex-shrink-0 bg-surface border border-primary-container/40 flex items-center justify-center font-mono font-bold text-primary-container text-xl glow-sm">02</div>
-                <div>
-                    <h3 class="font-mono font-bold text-lg mb-2 uppercase tracking-tight">Run your Agent</h3>
-                    <p class="text-gray-500 text-sm font-mono mb-4">Start working as you normally would. Use your favorite AI coding assistant; Agensic tracks it automatically.</p>
-                    <div class="bg-surface-container-lowest p-4 border border-outline-variant/20 font-mono text-sm text-on-surface">
+                <div class="min-w-0 flex-1">
+                    <h3 class="font-mono font-bold text-lg mb-2 uppercase tracking-tight">Auto-Track Your Agent</h3>
+                    <p class="text-gray-500 text-sm font-mono mb-4">Work as you normally would. Agensic automatically intercepts and signs commands from CLI Agents</p>
+                    <div class="bg-surface-container-lowest p-4 border border-outline-variant/20 rounded font-mono text-sm text-on-surface overflow-x-auto whitespace-nowrap hide-scrollbar">
                         <span class="text-primary-container">$</span> claude
                     </div>
                 </div>
             </div>
             
-            <!-- Step 3 -->
-            <div class="flex gap-8 items-start">
+            <!-- Step 3: Inspect -->
+            <div class="flex gap-4 md:gap-8 items-start w-full">
                 <div class="w-12 h-12 flex-shrink-0 bg-surface border border-primary-container/40 flex items-center justify-center font-mono font-bold text-primary-container text-xl glow-sm">03</div>
-                <div>
-                    <h3 class="font-mono font-bold text-lg mb-2 uppercase tracking-tight">Inspect & Verify</h3>
-                    <p class="text-gray-500 text-sm font-mono mb-4">Open the TUI to replay sessions or review forensic provenance.</p>
-                    <div class="bg-surface-container-lowest p-4 border border-outline-variant/20 font-mono text-sm text-on-surface">
+                <div class="min-w-0 flex-1">
+                    <h3 class="font-mono font-bold text-lg mb-2 uppercase tracking-tight">Inspect & Replay</h3>
+                    <p class="text-gray-500 text-sm font-mono mb-4">Use the TUI to browse and replay terminal sessions or travel back in time</p>
+                    <div class="bg-surface-container-lowest p-4 border border-outline-variant/20 rounded font-mono text-sm text-on-surface overflow-x-auto whitespace-nowrap hide-scrollbar">
                         <span class="text-primary-container">$</span> agensic sessions
                     </div>
                 </div>
@@ -311,11 +333,11 @@
 <section class="py-32 px-6 relative overflow-hidden bg-surface-container-lowest border-t border-outline-variant/10">
     <div class="max-w-4xl mx-auto text-center relative z-10">
         <h2 class="font-headline font-black text-5xl md:text-7xl mb-10 tracking-tighter uppercase leading-none">
-            Bring observability to your terminal.
+            Bring observability to your terminal
         </h2>
         <div class="flex flex-wrap justify-center gap-6">
             <a href="https://github.com/Alex188dot/agensic" target="_blank" class="bg-primary-container text-[#003919] px-10 py-5 font-black uppercase text-lg hover:glow-md transition-all flex items-center gap-3">
-                Star on GitHub <span class="material-symbols-outlined">star</span>
+                <span class="material-symbols-outlined">star</span> Star on GitHub 
             </a>
         </div>
     </div>
@@ -333,7 +355,7 @@
         </div>
         <div class="md:text-right">
             <p class="font-mono text-[10px] text-gray-600 uppercase tracking-[0.3em]">
-                © 2026 Agensic. Licensed under Apache-2.0.
+                © 2026 Agensic. Licensed under Apache-2.0
             </p>
         </div>
     </div>
@@ -390,6 +412,22 @@
     
     // Start animation loop
     setTimeout(typeRoutine, 1000);
+
+    // Copy Install Command functionality
+    function copyInstallCmd() {
+        const cmd = "curl -fsSL https://raw.githubusercontent.com/Alex188dot/agensic/main/bootstrap.sh | bash";
+        navigator.clipboard.writeText(cmd).then(() => {
+            const icon = document.getElementById("copy-icon");
+            icon.textContent = "check";
+            icon.classList.add("text-primary-container");
+            setTimeout(() => {
+                icon.textContent = "content_copy";
+                icon.classList.remove("text-primary-container");
+            }, 2000);
+        }).catch(err => {
+            console.error("Failed to copy command: ", err);
+        });
+    }
 </script>
 
 </body>
