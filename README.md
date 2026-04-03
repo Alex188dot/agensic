@@ -55,7 +55,7 @@ Agensic is designed to integrate deeply with your shell environment.
 
 - Linux (Bash) — fully supported ✅
 
-- Windows (PowerShell) — coming soon 🕐 (estimated end of April 2026)
+- Windows (PowerShell) — coming soon 🕐 
 
 ---
 
