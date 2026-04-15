@@ -1126,14 +1126,14 @@ class SuggestionEngine:
             raise PrivacyGuardError(f"Sanitization failed for {request_type}") from exc
 
         try:
-            response = await acompletion(**safe_kwargs)
+            response = await acompletion(request_timeout=30, **safe_kwargs)
             return (response, {"redactions": redactions, "flags": flags})
         except Exception as first_error:
             if "response_format" not in str(first_error).lower() or "response_format" not in safe_kwargs:
                 raise
             retry_kwargs = dict(safe_kwargs)
             retry_kwargs.pop("response_format", None)
-            response = await acompletion(**retry_kwargs)
+            response = await acompletion(request_timeout=30, **retry_kwargs)
             return (response, {"redactions": redactions, "flags": flags})
 
     async def get_suggestions(
