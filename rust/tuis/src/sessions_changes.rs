@@ -361,14 +361,14 @@ fn build_git_range_change_view_cached(
     {
         return GitRangeChangeView::default();
     }
-    if let Some(cached) = detail.git_change_view_cache.borrow().get(&key).cloned() {
+    if let Some(cached) = detail.git_change_view_cache.borrow_mut().get(&key).cloned() {
         return cached;
     }
     let view = build_git_range_change_view(&key.repo_root, &key.start_head, &key.end_head);
     detail
         .git_change_view_cache
         .borrow_mut()
-        .insert(key, view.clone());
+        .put(key, view.clone());
     view
 }
 
@@ -421,7 +421,7 @@ fn git_path_exists_at_head_cached(detail: &DetailState, head: &str, path: &str) 
     if key.repo_root.is_empty() || key.head.is_empty() || key.path.is_empty() {
         return false;
     }
-    if let Some(cached) = detail.git_path_exists_cache.borrow().get(&key).copied() {
+    if let Some(cached) = detail.git_path_exists_cache.borrow_mut().get(&key).copied() {
         return cached;
     }
     let spec = format!("{}:{}", key.head, key.path);
@@ -432,10 +432,7 @@ fn git_path_exists_at_head_cached(detail: &DetailState, head: &str, path: &str) 
         .output()
         .map(|output| output.status.success())
         .unwrap_or(false);
-    detail
-        .git_path_exists_cache
-        .borrow_mut()
-        .insert(key, exists);
+    detail.git_path_exists_cache.borrow_mut().put(key, exists);
     exists
 }
 

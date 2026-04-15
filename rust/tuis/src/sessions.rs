@@ -3,6 +3,7 @@ pub(crate) use crate::sessions_render::copy_button_style;
 #[path = "sessions_changes.rs"]
 mod changes;
 
+use self::changes::{build_changes, changes_max_scroll};
 use crate::checkpoints::{
     checkpoint_path_for_transcript, decode_checkpoint_state, enrich_git_checkpoint_records,
     git_checkpoint_path_for_transcript, load_checkpoint_records, load_git_checkpoint_records,
@@ -16,7 +17,6 @@ use crate::sessions_render::{
     terminal_replay_max_scroll_x as render_terminal_replay_max_scroll_x,
     terminal_replay_scroll as render_terminal_replay_scroll,
 };
-use self::changes::{build_changes, changes_max_scroll};
 use base64::engine::general_purpose::STANDARD as BASE64_STANDARD;
 use base64::Engine;
 use chrono::TimeZone;
@@ -31,6 +31,7 @@ use crossterm::terminal::{
     LeaveAlternateScreen,
 };
 use flate2::read::GzDecoder;
+use lru::LruCache;
 use ratatui::backend::CrosstermBackend;
 use ratatui::layout::{Constraint, Direction, Layout, Rect};
 use ratatui::style::{Color, Modifier, Style};
@@ -43,9 +44,10 @@ use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 use std::cell::RefCell;
 use std::cmp::{max, min};
-use std::collections::{BTreeMap, BTreeSet, HashMap};
+use std::collections::{BTreeMap, BTreeSet};
 use std::fs::{self, File};
 use std::io::{self, Read, Write};
+use std::num::NonZeroUsize;
 use std::path::Path;
 use std::process::Command;
 use std::sync::mpsc::{self, Receiver, TryRecvError};
@@ -404,10 +406,10 @@ struct DetailState {
     transcript_chunks: Vec<TranscriptChunk>,
     checkpoint_records: Vec<CheckpointRecord>,
     terminal_replay_frames: Arc<Vec<TerminalReplayFrame>>,
-    terminal_replay_cache: HashMap<TerminalReplayCacheKey, Arc<Vec<TerminalReplayFrame>>>,
+    terminal_replay_cache: LruCache<TerminalReplayCacheKey, Arc<Vec<TerminalReplayFrame>>>,
     git_change_view_cache:
-        RefCell<HashMap<changes::GitRangeChangeViewCacheKey, changes::GitRangeChangeView>>,
-    git_path_exists_cache: RefCell<HashMap<changes::GitPathExistenceCacheKey, bool>>,
+        RefCell<LruCache<changes::GitRangeChangeViewCacheKey, changes::GitRangeChangeView>>,
+    git_path_exists_cache: RefCell<LruCache<changes::GitPathExistenceCacheKey, bool>>,
     terminal_cache_key: Option<TerminalReplayCacheKey>,
     pending_replay_cache_key: Option<TerminalReplayCacheKey>,
     replay_cache_rx: Option<Receiver<(TerminalReplayCacheKey, Arc<Vec<TerminalReplayFrame>>)>>,
@@ -483,9 +485,9 @@ impl DetailState {
             transcript_chunks,
             checkpoint_records,
             terminal_replay_frames: Arc::new(Vec::new()),
-            terminal_replay_cache: HashMap::new(),
-            git_change_view_cache: RefCell::new(HashMap::new()),
-            git_path_exists_cache: RefCell::new(HashMap::new()),
+            terminal_replay_cache: LruCache::new(NonZeroUsize::new(100).unwrap()),
+            git_change_view_cache: RefCell::new(LruCache::new(NonZeroUsize::new(100).unwrap())),
+            git_path_exists_cache: RefCell::new(LruCache::new(NonZeroUsize::new(50).unwrap())),
             terminal_cache_key: None,
             pending_replay_cache_key: None,
             replay_cache_rx: None,
@@ -570,7 +572,7 @@ impl DetailState {
         };
         match rx.try_recv() {
             Ok((cache_key, frames)) => {
-                self.terminal_replay_cache.insert(cache_key, frames);
+                self.terminal_replay_cache.put(cache_key, frames);
                 self.pending_replay_cache_key = None;
                 self.replay_cache_rx = None;
                 self.replay_loading = false;
@@ -2232,7 +2234,10 @@ fn draw_browser(frame: &mut ratatui::Frame<'_>, app: &App) {
             crate::tui_hint_key("Esc:", Color::Yellow),
             crate::tui_hint_desc(" quit", Color::Yellow),
             Span::raw("    "),
-            Span::styled(app.status_text().to_string(), Style::default().fg(Color::White)),
+            Span::styled(
+                app.status_text().to_string(),
+                Style::default().fg(Color::White),
+            ),
         ])),
         chunks[1],
     );
@@ -2798,10 +2803,7 @@ fn draw_delete_modal(frame: &mut ratatui::Frame<'_>, modal: &DeleteModalState) {
         Line::from(""),
         Line::from("This permanently removes the tracked session and its artifacts."),
         Line::from(""),
-        crate::tui_hint_line(
-            &[("Enter:", "delete"), ("Esc:", "cancel")],
-            Color::Yellow,
-        ),
+        crate::tui_hint_line(&[("Enter:", "delete"), ("Esc:", "cancel")], Color::Yellow),
     ];
     frame.render_widget(
         Paragraph::new(content)
@@ -5325,9 +5327,9 @@ mod tests {
                 rows: 1,
                 cols: 4,
             }]),
-            terminal_replay_cache: HashMap::new(),
-            git_change_view_cache: RefCell::new(HashMap::new()),
-            git_path_exists_cache: RefCell::new(HashMap::new()),
+            terminal_replay_cache: LruCache::new(NonZeroUsize::new(100).unwrap()),
+            git_change_view_cache: RefCell::new(LruCache::new(NonZeroUsize::new(100).unwrap())),
+            git_path_exists_cache: RefCell::new(LruCache::new(NonZeroUsize::new(50).unwrap())),
             terminal_cache_key: None,
             pending_replay_cache_key: None,
             replay_cache_rx: None,
@@ -7022,9 +7024,9 @@ mod tests {
                 rows: 1,
                 cols: 4,
             }]),
-            terminal_replay_cache: HashMap::new(),
-            git_change_view_cache: RefCell::new(HashMap::new()),
-            git_path_exists_cache: RefCell::new(HashMap::new()),
+            terminal_replay_cache: LruCache::new(NonZeroUsize::new(100).unwrap()),
+            git_change_view_cache: RefCell::new(LruCache::new(NonZeroUsize::new(100).unwrap())),
+            git_path_exists_cache: RefCell::new(LruCache::new(NonZeroUsize::new(50).unwrap())),
             terminal_cache_key: None,
             pending_replay_cache_key: None,
             replay_cache_rx: None,
