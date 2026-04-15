@@ -164,6 +164,16 @@ def release_request_slot() -> None:
     shutdown_coordinator.release_request_slot()
 
 
+class request_slot:
+    def __enter__(self):
+        enter_request_or_503()
+        return self
+
+    def __exit__(self, exc_type, exc_val, exc_tb):
+        release_request_slot()
+        return False
+
+
 def run_background_task(task: Callable[..., Any], *args: Any, **kwargs: Any) -> None:
     shutdown_coordinator.acquire_background_job_slot()
     try:
