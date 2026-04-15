@@ -4679,10 +4679,10 @@ mod tests {
         repo_display_name, sanitize_inline_text, sanitize_terminal_output,
         session_detail_layout_in_area, terminal_replay_end_padding, terminal_replay_max_scroll_x,
         terminal_replay_scroll, timeline_category_color, timeline_kind_style, App,
-        DeleteModalState, DetailState, FocusPane, GitCheckpointRecord, ReplayMode, SessionEvent,
-        SessionFilters, SessionSummary, SessionsArgs, TerminalReplayFrame, TimeTravelModalState,
-        TimeTravelPreviewResponse, TimelineCategory, TimelineEntry, TranscriptChunk,
-        TEXT_REPLAY_TICK_MS,
+        DeleteModalState, DetailState, FocusPane, GitCheckpointRecord, LruCache, NonZeroUsize,
+        ReplayMode, SessionEvent, SessionFilters, SessionSummary, SessionsArgs,
+        TerminalReplayFrame, TimeTravelModalState, TimeTravelPreviewResponse, TimelineCategory,
+        TimelineEntry, TranscriptChunk, TEXT_REPLAY_TICK_MS,
     };
     use crate::sessions_render::{
         diff_stat_line, rendered_text_height, replay_max_scroll, strip_inline_progress_noise,
@@ -4700,7 +4700,7 @@ mod tests {
     use serde_json::json;
     use std::{
         cell::RefCell,
-        collections::{BTreeMap, HashMap},
+        collections::BTreeMap,
         env, fs,
         io::{Read, Write},
         net::TcpListener,
