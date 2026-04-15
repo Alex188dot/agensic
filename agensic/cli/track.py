@@ -3621,7 +3621,7 @@ def _drain_master_output(
     stdout_fd: int | None,
     checkpoint_recorder: subprocess.Popen[str] | None = None,
     *,
-    timeout_seconds: float = 0.2,
+    timeout_seconds: float = 0.05,
 ) -> subprocess.Popen[str] | None:
     deadline = time.monotonic() + max(0.0, float(timeout_seconds or 0.0))
     while time.monotonic() < deadline:
@@ -3881,7 +3881,7 @@ def run_tracked_command(
 
                 if master_fd in ready:
                     try:
-                        data = os.read(master_fd, 4096)
+                        data = os.read(master_fd, 8192)
                     except OSError as exc:
                         if exc.errno == errno.EIO:
                             data = b""
