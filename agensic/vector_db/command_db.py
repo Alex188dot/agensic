@@ -9,7 +9,7 @@ import shutil
 import subprocess
 import threading
 import time
-from collections import defaultdict
+from collections import defaultdict, OrderedDict
 from pathlib import Path
 from typing import Dict, List, Optional, Tuple
 import transformers
@@ -56,6 +56,30 @@ def _update_runtime_init_status(**kwargs):
 def get_runtime_init_status() -> Dict[str, object]:
     with _RUNTIME_INIT_STATUS_LOCK:
         return dict(_RUNTIME_INIT_STATUS)
+
+
+class _LRUCache:
+    def __init__(self, max_size: int = 1000, ttl_seconds: float = 30.0):
+        self._data: OrderedDict = OrderedDict()
+        self._max_size = max_size
+        self._ttl = ttl_seconds
+
+    def get(self, key: str) -> Optional[Tuple[float, str]]:
+        if key not in self._data:
+            return None
+        self._data.move_to_end(key)
+        return self._data[key]
+
+    def set(self, key: str, value: Tuple[float, str]) -> None:
+        if key in self._data:
+            self._data.move_to_end(key)
+        else:
+            self._data[key] = value
+            if len(self._data) > self._max_size:
+                self._data.popitem(last=False)
+
+    def clear(self) -> None:
+        self._data.clear()
 
 
 class CommandVectorDB:
@@ -160,7 +184,7 @@ class CommandVectorDB:
         self._io_lock = threading.RLock()
         self._is_closed = False
         self._status_lock = threading.Lock()
-        self._repo_identity_cache: Dict[str, Tuple[float, str]] = {}
+        self._repo_identity_cache = _LRUCache(max_size=500)
         self._init_phase = "starting"
         self._model_download_in_progress = False
         self._model_download_needed = False
