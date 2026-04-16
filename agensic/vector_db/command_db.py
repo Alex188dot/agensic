@@ -10,15 +10,22 @@ import subprocess
 import threading
 import time
 from collections import defaultdict, OrderedDict
+from functools import partial
 from pathlib import Path
 from typing import Dict, List, Optional, Tuple
+import torch
 import transformers
 import zvec
+from cachetools import LRUCache
 from rapidfuzz import fuzz
 from rapidfuzz.distance import Levenshtein
 from sentence_transformers import SentenceTransformer
 from agensic.paths import APP_PATHS, ensure_app_layout, migrate_legacy_layout
-from agensic.utils import atomic_write_json_private, ensure_private_dir, harden_private_tree
+from agensic.utils import (
+    atomic_write_json_private,
+    ensure_private_dir,
+    harden_private_tree,
+)
 from agensic.utils.shell import (
     extract_git_subcommand,
     history_clears_state,
@@ -195,13 +202,17 @@ class CommandVectorDB:
         self.collection = self._init_command_collection(self.db_path)
         self.feedback_collection = None
         if self.state_store is None:
-            self.feedback_collection = self._init_feedback_collection(self.feedback_db_path)
+            self.feedback_collection = self._init_feedback_collection(
+                self.feedback_db_path
+            )
         self.command_cache: set[str] = set()
         self.command_cache_by_exec: Dict[str, set[str]] = defaultdict(set)
         self.token_candidates_by_context: Dict[str, set[str]] = defaultdict(set)
         self.global_token_candidates: set[str] = set()
         self.removed_commands: set[str] = self._load_removed_commands()
-        self.inserted_commands = self._load_existing_commands(limit=1024)
+        self.inserted_commands: LRUCache[str, bool] = LRUCache(maxsize=10000)
+        for cmd in self._load_existing_commands(limit=1024):
+            self.inserted_commands[cmd] = True
         self._register_commands(self.inserted_commands)
         self._harden_storage_permissions()
 
@@ -263,7 +274,9 @@ class CommandVectorDB:
             return
         try:
             ensure_private_dir(os.path.dirname(self.removed_commands_path))
-            atomic_write_json_private(self.removed_commands_path, sorted(self.removed_commands), indent=2)
+            atomic_write_json_private(
+                self.removed_commands_path, sorted(self.removed_commands), indent=2
+            )
             self._harden_storage_permissions()
         except Exception as exc:
             logger.warning(f"Could not save removed commands file: {exc}")
@@ -614,7 +627,11 @@ class CommandVectorDB:
                     prior_tokens = prior_tokens[-6:]
                 continue
 
-            candidate_pool = contextual_candidates if contextual_candidates else self.global_token_candidates
+            candidate_pool = (
+                contextual_candidates
+                if contextual_candidates
+                else self.global_token_candidates
+            )
             best_match = self._best_word_typo_match(token, candidate_pool)
             if best_match:
                 corrected_tokens.append(best_match)
@@ -681,7 +698,9 @@ class CommandVectorDB:
         candidate_last = cls._normalize_word_token(candidate_tokens[-1])
         if not typed_last or not candidate_last:
             return False
-        if cls._should_skip_word_typo_token(typed_last) or cls._should_skip_word_typo_token(candidate_last):
+        if cls._should_skip_word_typo_token(
+            typed_last
+        ) or cls._should_skip_word_typo_token(candidate_last):
             return False
 
         typed_compact = cls._normalize_for_fuzzy(typed_last).replace(" ", "")
@@ -887,7 +906,11 @@ class CommandVectorDB:
         subcmd = ""
         if i + 1 < len(tokens):
             candidate = tokens[i + 1].strip().lower()
-            if candidate and not candidate.startswith("-") and not ("=" in candidate and not candidate.startswith("=")):
+            if (
+                candidate
+                and not candidate.startswith("-")
+                and not ("=" in candidate and not candidate.startswith("="))
+            ):
                 subcmd = candidate
         if subcmd:
             return f"{executable} {subcmd}"
@@ -901,7 +924,9 @@ class CommandVectorDB:
         total_repo_execute_signal: int = 0,
     ) -> str:
         # Execute-derived signal contributes modestly to tier gating.
-        effective_signal = int(total_repo_accepts or 0) + min(int(total_repo_execute_signal or 0), 2)
+        effective_signal = int(total_repo_accepts or 0) + min(
+            int(total_repo_execute_signal or 0), 2
+        )
         if effective_signal >= cls.REPO_CONF_HIGH_MIN_ACCEPTS:
             return "HIGH"
         if (
@@ -1033,18 +1058,24 @@ class CommandVectorDB:
         _ = execute_count
         safe_rank = max(int(rank), 0)
         base = float(base_weight) / float(safe_rank + 1)
-        capped_history = min(max(int(history_count or 0), 0), max(int(history_cap or 0), 0))
-        score = base + (alpha * math.log1p(max(repo_task_count, 0))) + (
-            beta * math.log1p(max(context_count, 0))
-        ) + (manual_weight * math.log1p(max(manual_count, 0))) + (
-            assist_weight * math.log1p(max(assist_count, 0))
-        ) + (eta * math.log1p(max(accept_count, 0))) + (
-            delta * math.log1p(capped_history)
+        capped_history = min(
+            max(int(history_count or 0), 0), max(int(history_cap or 0), 0)
+        )
+        score = (
+            base
+            + (alpha * math.log1p(max(repo_task_count, 0)))
+            + (beta * math.log1p(max(context_count, 0)))
+            + (manual_weight * math.log1p(max(manual_count, 0)))
+            + (assist_weight * math.log1p(max(assist_count, 0)))
+            + (eta * math.log1p(max(accept_count, 0)))
+            + (delta * math.log1p(capped_history))
         )
         if hours_since_last_manual is not None:
             safe_hours = max(float(hours_since_last_manual), 0.0)
             decay_hours = max(float(manual_recency_decay_hours), 1.0)
-            score += float(manual_recency_weight) * math.exp(-(safe_hours / decay_hours))
+            score += float(manual_recency_weight) * math.exp(
+                -(safe_hours / decay_hours)
+            )
         return score
 
     @staticmethod
@@ -1113,7 +1144,9 @@ class CommandVectorDB:
             return ([], False, False, "none")
 
         repo_entries = [item for item in sorted_entries if item[1] in repo_hit_suffixes]
-        non_repo_entries = [item for item in sorted_entries if item[1] not in repo_hit_suffixes]
+        non_repo_entries = [
+            item for item in sorted_entries if item[1] not in repo_hit_suffixes
+        ]
         if not repo_entries:
             return ([suffix for _, suffix, _ in sorted_entries], False, False, "none")
 
@@ -1131,11 +1164,18 @@ class CommandVectorDB:
             strategy = "top3_repo_first"
         elif tier == "MEDIUM":
             best_repo = repo_entries[0]
-            ordered_entries = [best_repo] + [item for item in sorted_entries if item is not best_repo]
+            ordered_entries = [best_repo] + [
+                item for item in sorted_entries if item is not best_repo
+            ]
             enforced_top1 = True
             strategy = "top1_repo_anchor"
 
-        return ([suffix for _, suffix, _ in ordered_entries], enforced_top1, enforced_top3, strategy)
+        return (
+            [suffix for _, suffix, _ in ordered_entries],
+            enforced_top1,
+            enforced_top3,
+            strategy,
+        )
 
     def _load_model(self) -> SentenceTransformer:
         logger.info(f"Loading embedding model: {self.model_name}")
@@ -1223,9 +1263,13 @@ class CommandVectorDB:
                 zvec.FieldSchema("accept_count", zvec.DataType.INT64, nullable=True),
                 zvec.FieldSchema("history_count", zvec.DataType.INT64, nullable=True),
                 zvec.FieldSchema("execute_count", zvec.DataType.INT64, nullable=True),
-                zvec.FieldSchema("last_accepted_at", zvec.DataType.INT64, nullable=True),
+                zvec.FieldSchema(
+                    "last_accepted_at", zvec.DataType.INT64, nullable=True
+                ),
             ],
-            vectors=zvec.VectorSchema("embedding", zvec.DataType.VECTOR_FP32, self.dimensions),
+            vectors=zvec.VectorSchema(
+                "embedding", zvec.DataType.VECTOR_FP32, self.dimensions
+            ),
         )
         return zvec.create_and_open(path=path, schema=schema)
 
@@ -1255,7 +1299,9 @@ class CommandVectorDB:
             if "exist" in msg or "already" in msg:
                 logger.debug("HNSW index already exists")
             else:
-                logger.warning(f"Could not ensure vector index on '{field_name}': {exc}")
+                logger.warning(
+                    f"Could not ensure vector index on '{field_name}': {exc}"
+                )
 
     def _validate_collection_health(
         self, collection: zvec.Collection, vector_field: str, dimensions: int
@@ -1270,7 +1316,9 @@ class CommandVectorDB:
             return True
         except Exception as exc:
             if self._is_corruption_error(exc):
-                logger.error(f"Detected corrupted vector index during health check: {exc}")
+                logger.error(
+                    f"Detected corrupted vector index during health check: {exc}"
+                )
                 return False
             logger.warning(f"Vector DB health check failed with non-fatal error: {exc}")
             return True
@@ -1304,12 +1352,16 @@ class CommandVectorDB:
             collection = self._create_command_collection(path)
 
         if not self._command_schema_is_v3_collection(collection):
-            logger.warning("Command database is not v3 schema; recreating fresh database")
+            logger.warning(
+                "Command database is not v3 schema; recreating fresh database"
+            )
             self._quarantine_corrupted_path(path)
             collection = self._create_command_collection(path)
 
         self._ensure_vector_index(collection, field_name="embedding")
-        if not self._validate_collection_health(collection, "embedding", self.dimensions):
+        if not self._validate_collection_health(
+            collection, "embedding", self.dimensions
+        ):
             self._quarantine_corrupted_path(path)
             collection = self._create_command_collection(path)
             self._ensure_vector_index(collection, field_name="embedding")
@@ -1344,7 +1396,9 @@ class CommandVectorDB:
             query_limit = int(limit or 0)
             if query_limit <= 0:
                 with self._io_lock:
-                    query_limit = int(getattr(self.collection.stats, "doc_count", 0) or 0)
+                    query_limit = int(
+                        getattr(self.collection.stats, "doc_count", 0) or 0
+                    )
             if query_limit <= 0:
                 return commands
             with self._io_lock:
@@ -1357,7 +1411,9 @@ class CommandVectorDB:
                         output_fields=["command"],
                     )
                 except Exception:
-                    query = zvec.VectorQuery("embedding", vector=[0.0] * self.dimensions)
+                    query = zvec.VectorQuery(
+                        "embedding", vector=[0.0] * self.dimensions
+                    )
                     results = self.collection.query(query, topk=query_limit)
             for res in results:
                 cmd = res.fields.get("command", "")
@@ -1385,7 +1441,9 @@ class CommandVectorDB:
     def _history_seed_completed(self) -> bool:
         if self.state_store is not None:
             try:
-                value = self.state_store.get_meta(self.HISTORY_SEED_COMPLETED_META_KEY, "")
+                value = self.state_store.get_meta(
+                    self.HISTORY_SEED_COMPLETED_META_KEY, ""
+                )
             except Exception as exc:
                 logger.warning(f"Could not read history seed state from SQLite: {exc}")
                 return False
@@ -1440,11 +1498,15 @@ class CommandVectorDB:
         if self.state_store is None or self.inserted_commands:
             return
         try:
-            self.insert_commands(self.state_store.list_all_commands(include_removed=False))
+            self.insert_commands(
+                self.state_store.list_all_commands(include_removed=False)
+            )
         except Exception as exc:
             logger.warning(f"Could not warm vector cache from SQLite: {exc}")
 
-    def _history_sync_delta_counts(self, command_counts: Dict[str, int]) -> Dict[str, int]:
+    def _history_sync_delta_counts(
+        self, command_counts: Dict[str, int]
+    ) -> Dict[str, int]:
         if not command_counts:
             return {}
         if self.state_store is None:
@@ -1453,7 +1515,9 @@ class CommandVectorDB:
         try:
             stats = self.state_store.get_command_stats(list(command_counts.keys()))
         except Exception as exc:
-            logger.warning(f"Could not read history counts from SQLite for resync: {exc}")
+            logger.warning(
+                f"Could not read history counts from SQLite for resync: {exc}"
+            )
             return dict(command_counts)
 
         deltas: Dict[str, int] = {}
@@ -1542,12 +1606,16 @@ class CommandVectorDB:
                 self._set_init_phase("ready")
                 return {
                     "status": "skipped",
-                    "reason": "seed_already_completed" if seed_completed else "store_not_empty",
+                    "reason": "seed_already_completed"
+                    if seed_completed
+                    else "store_not_empty",
                     "history_file": history_key,
                     "active_commands": active_commands,
                 }
 
-            command_counts, end_offset = self._read_history_commands_from_offset(history_path, 0)
+            command_counts, end_offset = self._read_history_commands_from_offset(
+                history_path, 0
+            )
             total_occurrences = sum(command_counts.values())
             if total_occurrences > 0:
                 logger.info(
@@ -1557,7 +1625,9 @@ class CommandVectorDB:
                 logger.info("History file is empty; marking initial seed as completed")
 
             if self.state_store is not None:
-                inserted = int(self.state_store.apply_history_counts(command_counts) or 0)
+                inserted = int(
+                    self.state_store.apply_history_counts(command_counts) or 0
+                )
                 self.insert_commands(list(command_counts.keys()))
             else:
                 inserted = self.upsert_history_commands(command_counts)
@@ -1601,7 +1671,9 @@ class CommandVectorDB:
         try:
             stat = history_path.stat()
             history_key = str(history_path)
-            command_counts, end_offset = self._read_history_commands_from_offset(history_path, 0)
+            command_counts, end_offset = self._read_history_commands_from_offset(
+                history_path, 0
+            )
             total_occurrences = sum(command_counts.values())
             delta_counts = self._history_sync_delta_counts(command_counts)
 
@@ -1763,7 +1835,9 @@ class CommandVectorDB:
 
         if self.state_store is not None:
             try:
-                inserted = int(self.state_store.apply_history_counts(normalized_counts) or 0)
+                inserted = int(
+                    self.state_store.apply_history_counts(normalized_counts) or 0
+                )
                 self.insert_commands(list(normalized_counts.keys()))
                 return inserted
             except Exception as exc:
@@ -1846,7 +1920,9 @@ class CommandVectorDB:
             return {}
         return counts
 
-    def _fetch_command_doc_fields(self, commands: List[str]) -> Dict[str, Dict[str, object]]:
+    def _fetch_command_doc_fields(
+        self, commands: List[str]
+    ) -> Dict[str, Dict[str, object]]:
         if not commands:
             return {}
 
@@ -1865,7 +1941,9 @@ class CommandVectorDB:
         return out
 
     @classmethod
-    def _exec_tokens_look_like_typo(cls, candidate_exec: str, dominant_exec: str) -> bool:
+    def _exec_tokens_look_like_typo(
+        cls, candidate_exec: str, dominant_exec: str
+    ) -> bool:
         candidate = cls._normalize_word_token(candidate_exec)
         dominant = cls._normalize_word_token(dominant_exec)
         if not candidate or not dominant:
@@ -1888,7 +1966,9 @@ class CommandVectorDB:
         return score >= 84.0
 
     @classmethod
-    def _full_command_variant_looks_like_typo(cls, candidate: str, dominant: str) -> bool:
+    def _full_command_variant_looks_like_typo(
+        cls, candidate: str, dominant: str
+    ) -> bool:
         candidate_tokens = cls.tokenize_command(candidate)
         dominant_tokens = cls.tokenize_command(dominant)
         if not candidate_tokens or not dominant_tokens:
@@ -1910,7 +1990,9 @@ class CommandVectorDB:
         right = cls._normalize_word_token(right_raw)
         if not left or not right:
             return False
-        if cls._should_skip_word_typo_token(left) or cls._should_skip_word_typo_token(right):
+        if cls._should_skip_word_typo_token(left) or cls._should_skip_word_typo_token(
+            right
+        ):
             return False
 
         left_fuzzy = cls._normalize_for_fuzzy(left).replace(" ", "")
@@ -1954,7 +2036,9 @@ class CommandVectorDB:
         suspicious: Dict[str, str] = {}
 
         # Executable-token typo detection: only very low-usage variants are flagged.
-        ranked_execs = sorted(exec_usage.items(), key=lambda item: item[1], reverse=True)
+        ranked_execs = sorted(
+            exec_usage.items(), key=lambda item: item[1], reverse=True
+        )
         for candidate_exec, candidate_usage in ranked_execs:
             if candidate_usage <= 0 or candidate_usage > 2:
                 continue
@@ -1975,7 +2059,11 @@ class CommandVectorDB:
 
         # Full-command typo detection under same executable.
         for exec_key, items in by_exec.items():
-            ordered = sorted(items, key=lambda item: int(item.get("usage_score", 0) or 0), reverse=True)
+            ordered = sorted(
+                items,
+                key=lambda item: int(item.get("usage_score", 0) or 0),
+                reverse=True,
+            )
             dominant_candidates = [
                 item for item in ordered if int(item.get("usage_score", 0) or 0) >= 5
             ]
@@ -1995,15 +2083,23 @@ class CommandVectorDB:
                         continue
                     if dominant_usage < usage * 4:
                         continue
-                    if not self._full_command_variant_looks_like_typo(command, dominant_command):
+                    if not self._full_command_variant_looks_like_typo(
+                        command, dominant_command
+                    ):
                         continue
-                    suspicious[command] = f"looks similar to high-usage '{dominant_command}'"
+                    suspicious[command] = (
+                        f"looks similar to high-usage '{dominant_command}'"
+                    )
                     break
 
         return suspicious
 
-    def list_command_store(self, history_file: str = "", include_all: bool = False) -> Dict[str, object]:
-        history_counts = self._collect_history_command_counts(history_file) if history_file else {}
+    def list_command_store(
+        self, history_file: str = "", include_all: bool = False
+    ) -> Dict[str, object]:
+        history_counts = (
+            self._collect_history_command_counts(history_file) if history_file else {}
+        )
         if self.state_store is not None:
             self.removed_commands = self._load_removed_commands()
 
@@ -2015,9 +2111,13 @@ class CommandVectorDB:
             commands.update(self._load_existing_commands(limit=0))
         if self.state_store is not None:
             try:
-                commands.update(self.state_store.list_all_commands(include_removed=True))
+                commands.update(
+                    self.state_store.list_all_commands(include_removed=True)
+                )
             except Exception as exc:
-                logger.warning(f"Could not read commands from SQLite for listing: {exc}")
+                logger.warning(
+                    f"Could not read commands from SQLite for listing: {exc}"
+                )
 
         filtered = sorted(
             command
@@ -2026,13 +2126,17 @@ class CommandVectorDB:
             and not self.is_blocked_command(command)
             and not self.is_removed_command(command)
         )
-        fields = self._fetch_command_doc_fields(filtered) if self.state_store is None else {}
+        fields = (
+            self._fetch_command_doc_fields(filtered) if self.state_store is None else {}
+        )
         sqlite_fields = {}
         if self.state_store is not None:
             try:
                 sqlite_fields = self.state_store.get_command_stats(filtered)
             except Exception as exc:
-                logger.warning(f"Could not read command stats from SQLite for listing: {exc}")
+                logger.warning(
+                    f"Could not read command stats from SQLite for listing: {exc}"
+                )
                 sqlite_fields = {}
 
         entries: List[Dict[str, object]] = []
@@ -2096,7 +2200,9 @@ class CommandVectorDB:
             normalized_unique.append(normalized)
 
         unblocked_removed = self.unmark_removed_commands(normalized_unique)
-        eligible = [cmd for cmd in normalized_unique if not self.is_blocked_command(cmd)]
+        eligible = [
+            cmd for cmd in normalized_unique if not self.is_blocked_command(cmd)
+        ]
         if not eligible:
             return {
                 "requested": len(commands),
@@ -2137,7 +2243,9 @@ class CommandVectorDB:
             normalized_unique.append(normalized)
 
         guarded = self.mark_removed_commands(normalized_unique)
-        removable = [cmd for cmd in normalized_unique if not self.is_blocked_command(cmd)]
+        removable = [
+            cmd for cmd in normalized_unique if not self.is_blocked_command(cmd)
+        ]
         if not removable:
             return {
                 "requested": len(commands),
@@ -2166,7 +2274,9 @@ class CommandVectorDB:
             "guarded": guarded,
         }
 
-    def export_repair_snapshot(self, include_feedback: bool = True) -> Dict[str, object]:
+    def export_repair_snapshot(
+        self, include_feedback: bool = True
+    ) -> Dict[str, object]:
         if self.state_store is not None:
             return self.state_store.export_payload()
         commands = sorted(self._load_existing_commands(limit=0))
@@ -2196,7 +2306,9 @@ class CommandVectorDB:
         if include_feedback and self.feedback_collection is not None:
             try:
                 with self._io_lock:
-                    doc_count = int(getattr(self.feedback_collection.stats, "doc_count", 0) or 0)
+                    doc_count = int(
+                        getattr(self.feedback_collection.stats, "doc_count", 0) or 0
+                    )
                     if doc_count > 0:
                         try:
                             results = self.feedback_collection.query(
@@ -2211,7 +2323,9 @@ class CommandVectorDB:
                             )
                         except Exception:
                             query = zvec.VectorQuery("embedding_dummy", vector=[0.0])
-                            results = self.feedback_collection.query(query, topk=doc_count)
+                            results = self.feedback_collection.query(
+                                query, topk=doc_count
+                            )
                     else:
                         results = []
                 for item in results:
@@ -2225,7 +2339,9 @@ class CommandVectorDB:
                             "context_key": context_key,
                             "suggestion_suffix": suggestion_suffix,
                             "accept_count": int(fields.get("accept_count", 0) or 0),
-                            "last_accepted_at": int(fields.get("last_accepted_at", 0) or 0),
+                            "last_accepted_at": int(
+                                fields.get("last_accepted_at", 0) or 0
+                            ),
                         }
                     )
             except Exception as exc:
@@ -2244,7 +2360,11 @@ class CommandVectorDB:
 
     def import_repair_snapshot(self, payload: Dict[str, object]) -> Dict[str, int]:
         if not isinstance(payload, dict):
-            return {"commands_imported": 0, "feedback_imported": 0, "removed_imported": 0}
+            return {
+                "commands_imported": 0,
+                "feedback_imported": 0,
+                "removed_imported": 0,
+            }
 
         if self.state_store is not None:
             result = self.state_store.import_payload(payload)
@@ -2252,7 +2372,9 @@ class CommandVectorDB:
                 commands = self.state_store.list_all_commands(include_removed=False)
                 self.insert_commands(commands)
             except Exception as exc:
-                logger.warning(f"Could not seed zvec cache from SQLite after import: {exc}")
+                logger.warning(
+                    f"Could not seed zvec cache from SQLite after import: {exc}"
+                )
             self.removed_commands = self._load_removed_commands()
             self._rebuild_token_indexes()
             return {
@@ -2305,11 +2427,18 @@ class CommandVectorDB:
                     new_commands.append(command)
                     continue
                 fields = dict(existing_doc.fields or {})
-                accept = max(int(fields.get("accept_count", 0) or 0), int(row["accept_count"]))
-                execute = max(int(fields.get("execute_count", 0) or 0), int(row["execute_count"]))
-                history = max(int(fields.get("history_count", 0) or 0), int(row["history_count"]))
+                accept = max(
+                    int(fields.get("accept_count", 0) or 0), int(row["accept_count"])
+                )
+                execute = max(
+                    int(fields.get("execute_count", 0) or 0), int(row["execute_count"])
+                )
+                history = max(
+                    int(fields.get("history_count", 0) or 0), int(row["history_count"])
+                )
                 last_accepted_at = max(
-                    int(fields.get("last_accepted_at", 0) or 0), int(row["last_accepted_at"])
+                    int(fields.get("last_accepted_at", 0) or 0),
+                    int(row["last_accepted_at"]),
                 )
                 self.collection.update(
                     zvec.Doc(
@@ -2364,7 +2493,9 @@ class CommandVectorDB:
                 incoming_accept = int(row.get("accept_count", 0) or 0)
                 incoming_last = int(row.get("last_accepted_at", 0) or 0)
                 with self._io_lock:
-                    existing_doc = self.feedback_collection.fetch([stat_id]).get(stat_id)
+                    existing_doc = self.feedback_collection.fetch([stat_id]).get(
+                        stat_id
+                    )
                     if existing_doc is None:
                         self.feedback_collection.insert(
                             zvec.Doc(
@@ -2397,7 +2528,9 @@ class CommandVectorDB:
                         )
                 imported_feedback += 1
 
-        removed_imported = self.mark_removed_commands([str(x or "") for x in removed_rows])
+        removed_imported = self.mark_removed_commands(
+            [str(x or "") for x in removed_rows]
+        )
         return {
             "commands_imported": imported_commands,
             "feedback_imported": imported_feedback,
@@ -2485,7 +2618,9 @@ class CommandVectorDB:
                 return out
 
         # Fallback for cases where vector recall is empty but lexical prefix still helps.
-        for command in self._get_lexical_prefix_matches(normalized_query, topk=row_limit):
+        for command in self._get_lexical_prefix_matches(
+            normalized_query, topk=row_limit
+        ):
             normalized = self.normalize_command(command)
             if not normalized or normalized in seen:
                 continue
@@ -2499,7 +2634,9 @@ class CommandVectorDB:
                 break
         return out
 
-    def get_prefix_or_semantic_matches(self, prefix: str, topk: int = 100) -> List[Dict[str, str]]:
+    def get_prefix_or_semantic_matches(
+        self, prefix: str, topk: int = 100
+    ) -> List[Dict[str, str]]:
         if not prefix:
             return []
 
@@ -2545,7 +2682,9 @@ class CommandVectorDB:
             command_score = self._fuzzy_command_score(normalized_prefix, command)
             if command_score < self.SEMANTIC_MIN_SCORE:
                 continue
-            recall_rank_score = ((self.SEMANTIC_VECTOR_TOPN - idx) / self.SEMANTIC_VECTOR_TOPN) * 100.0
+            recall_rank_score = (
+                (self.SEMANTIC_VECTOR_TOPN - idx) / self.SEMANTIC_VECTOR_TOPN
+            ) * 100.0
             whole_word_miss = self._is_whole_word_semantic_miss(
                 normalized_prefix,
                 command,
@@ -2612,7 +2751,9 @@ class CommandVectorDB:
             return []
 
         candidates = [suffix for suffix, _ in filtered_pairs]
-        full_command_by_suffix = {suffix: full_command for suffix, full_command in filtered_pairs}
+        full_command_by_suffix = {
+            suffix: full_command for suffix, full_command in filtered_pairs
+        }
         context_keys = self.extract_context_keys(buffer_context)
         full_commands = [full_command for _, full_command in filtered_pairs]
         command_ids = [self.command_doc_id(command) for command in full_commands]
@@ -2669,22 +2810,34 @@ class CommandVectorDB:
                     global_counts[suffix] = int(row.get("accept_count", 0) or 0)
                     execute_counts[suffix] = int(row.get("execute_count", 0) or 0)
                     history_counts[suffix] = int(row.get("history_count", 0) or 0)
-                    manual_30d_counts[suffix] = int(manual_counts_by_command.get(full_command, 0) or 0)
-                    assist_30d_counts[suffix] = int(assist_counts_by_command.get(full_command, 0) or 0)
-                    last_manual_ts = int(last_manual_ts_by_command.get(full_command, 0) or 0)
+                    manual_30d_counts[suffix] = int(
+                        manual_counts_by_command.get(full_command, 0) or 0
+                    )
+                    assist_30d_counts[suffix] = int(
+                        assist_counts_by_command.get(full_command, 0) or 0
+                    )
+                    last_manual_ts = int(
+                        last_manual_ts_by_command.get(full_command, 0) or 0
+                    )
                     if last_manual_ts > 0:
                         hours_since_last_manual[suffix] = max(
                             0.0,
                             float(now_ts - last_manual_ts) / 3600.0,
                         )
-                context_counts = self.state_store.get_feedback_counts(context_keys, candidates)
+                context_counts = self.state_store.get_feedback_counts(
+                    context_keys, candidates
+                )
                 for suffix in candidates:
                     context_counts[suffix] = int(context_counts.get(suffix, 0) or 0)
                     repo_accept_counts[suffix] = 0
                     repo_execute_counts[suffix] = 0
                     repo_task_counts[suffix] = 0
-                    manual_30d_counts[suffix] = int(manual_30d_counts.get(suffix, 0) or 0)
-                    assist_30d_counts[suffix] = int(assist_30d_counts.get(suffix, 0) or 0)
+                    manual_30d_counts[suffix] = int(
+                        manual_30d_counts.get(suffix, 0) or 0
+                    )
+                    assist_30d_counts[suffix] = int(
+                        assist_30d_counts.get(suffix, 0) or 0
+                    )
                 if repo_key:
                     suffixes_by_task: Dict[str, List[str]] = defaultdict(list)
                     commands_by_task: Dict[str, List[str]] = defaultdict(list)
@@ -2700,18 +2853,24 @@ class CommandVectorDB:
                             task_key=task_key,
                             suffixes=task_suffixes,
                         )
-                        execute_counts_for_commands = self.state_store.get_repo_execute_feedback_counts(
-                            repo_key=repo_key,
-                            task_key=task_key,
-                            commands=commands_by_task.get(task_key, []),
+                        execute_counts_for_commands = (
+                            self.state_store.get_repo_execute_feedback_counts(
+                                repo_key=repo_key,
+                                task_key=task_key,
+                                commands=commands_by_task.get(task_key, []),
+                            )
                         )
                         for suffix in task_suffixes:
                             accept_v = int(accept_counts.get(suffix, 0) or 0)
                             full_command = full_command_by_suffix.get(suffix, "")
-                            execute_v = int(execute_counts_for_commands.get(full_command, 0) or 0)
+                            execute_v = int(
+                                execute_counts_for_commands.get(full_command, 0) or 0
+                            )
                             repo_accept_counts[suffix] = accept_v
                             repo_execute_counts[suffix] = execute_v
-                            repo_task_counts[suffix] = accept_v + min(execute_v, self.REPO_EXECUTE_CAP)
+                            repo_task_counts[suffix] = accept_v + min(
+                                execute_v, self.REPO_EXECUTE_CAP
+                            )
             else:
                 with self._io_lock:
                     command_docs = self.collection.fetch(command_ids)
@@ -2722,9 +2881,15 @@ class CommandVectorDB:
                             execute_counts[suffix] = 0
                             history_counts[suffix] = 0
                         else:
-                            global_counts[suffix] = int(doc.fields.get("accept_count", 0) or 0)
-                            execute_counts[suffix] = int(doc.fields.get("execute_count", 0) or 0)
-                            history_counts[suffix] = int(doc.fields.get("history_count", 0) or 0)
+                            global_counts[suffix] = int(
+                                doc.fields.get("accept_count", 0) or 0
+                            )
+                            execute_counts[suffix] = int(
+                                doc.fields.get("execute_count", 0) or 0
+                            )
+                            history_counts[suffix] = int(
+                                doc.fields.get("history_count", 0) or 0
+                            )
                         manual_30d_counts[suffix] = 0
                         assist_30d_counts[suffix] = 0
 
@@ -2735,12 +2900,17 @@ class CommandVectorDB:
                         repo_task_counts[suffix] = 0
 
                     for context_key in context_keys:
-                        stat_ids = [self.context_stat_doc_id(context_key, suffix) for suffix in candidates]
+                        stat_ids = [
+                            self.context_stat_doc_id(context_key, suffix)
+                            for suffix in candidates
+                        ]
                         stat_docs = self.feedback_collection.fetch(stat_ids)
                         for suffix, stat_id in zip(candidates, stat_ids):
                             doc = stat_docs.get(stat_id)
                             if doc is not None:
-                                context_counts[suffix] += int(doc.fields.get("accept_count", 0) or 0)
+                                context_counts[suffix] += int(
+                                    doc.fields.get("accept_count", 0) or 0
+                                )
 
             help_intent = self._has_help_intent(buffer_context)
             ranked_entries: List[Tuple[int, str, float]] = []
@@ -2772,24 +2942,36 @@ class CommandVectorDB:
                 ranked_entries.append((rank, suffix, score))
             ranked_entries.sort(key=lambda item: (item[2], -item[0]), reverse=True)
 
-            total_repo_accepts = sum(int(repo_accept_counts.get(suffix, 0) or 0) for suffix in candidates)
+            total_repo_accepts = sum(
+                int(repo_accept_counts.get(suffix, 0) or 0) for suffix in candidates
+            )
             total_repo_execute_signal = sum(
                 min(int(repo_execute_counts.get(suffix, 0) or 0), self.REPO_EXECUTE_CAP)
                 for suffix in candidates
             )
-            distinct_repo_suffixes = sum(1 for suffix in candidates if int(repo_task_counts.get(suffix, 0) or 0) > 0)
+            distinct_repo_suffixes = sum(
+                1
+                for suffix in candidates
+                if int(repo_task_counts.get(suffix, 0) or 0) > 0
+            )
             tier = self.repo_confidence_tier(
                 total_repo_accepts,
                 distinct_repo_suffixes,
                 total_repo_execute_signal,
             )
-            repo_hit_suffixes = {suffix for suffix in candidates if int(repo_task_counts.get(suffix, 0) or 0) > 0}
+            repo_hit_suffixes = {
+                suffix
+                for suffix in candidates
+                if int(repo_task_counts.get(suffix, 0) or 0) > 0
+            }
             if not self.ENABLE_REPO_CONFIDENCE_TIERS:
                 tier = "LOW"
-            reranked, enforced_top1, enforced_top3, tier_strategy = self._apply_repo_tier_order(
-                ranked_entries,
-                repo_hit_suffixes,
-                tier,
+            reranked, enforced_top1, enforced_top3, tier_strategy = (
+                self._apply_repo_tier_order(
+                    ranked_entries,
+                    repo_hit_suffixes,
+                    tier,
+                )
             )
             if (
                 any(repo_task_counts.values())
@@ -2865,7 +3047,7 @@ class CommandVectorDB:
                 vectors={"embedding": embedding},
             )
         )
-        self.inserted_commands.add(full_command)
+        self.inserted_commands[full_command] = True
         self._register_commands([full_command])
 
     def _increment_execute_count(self, full_command: str):
@@ -2901,10 +3083,12 @@ class CommandVectorDB:
                     vectors={"embedding": embedding},
                 )
             )
-            self.inserted_commands.add(full_command)
+            self.inserted_commands[full_command] = True
             self._register_commands([full_command])
         except Exception as exc:
-            logger.error(f"Failed to increment execute_count for '{full_command}': {exc}")
+            logger.error(
+                f"Failed to increment execute_count for '{full_command}': {exc}"
+            )
 
     def _increment_context_feedback(
         self, context_key: str, suggestion_suffix: str, accepted_at: int
@@ -2974,12 +3158,18 @@ class CommandVectorDB:
         # Store both 1-token and 2-token contexts derived from the finalized command.
         context_keys = self.extract_context_keys(full_command)
         task_key = self.extract_task_key(full_command)
-        repo_key = self.resolve_repo_key(working_directory or "") if working_directory else ""
+        repo_key = (
+            self.resolve_repo_key(working_directory or "") if working_directory else ""
+        )
         now_ts = int(time.time())
 
         if self.state_store is not None:
             try:
-                pairs = [(context_key, context_payload) for context_key in context_keys if context_key]
+                pairs = [
+                    (context_key, context_payload)
+                    for context_key in context_keys
+                    if context_key
+                ]
                 repo_task_pairs: List[Tuple[str, str, str]] = []
                 if repo_key and task_key and context_payload:
                     repo_task_pairs.append((repo_key, task_key, context_payload))
@@ -2999,7 +3189,9 @@ class CommandVectorDB:
             with self._io_lock:
                 self._increment_command_feedback(full_command, now_ts)
                 for context_key in context_keys:
-                    self._increment_context_feedback(context_key, context_payload, now_ts)
+                    self._increment_context_feedback(
+                        context_key, context_payload, now_ts
+                    )
         except Exception as exc:
             logger.warning(f"Failed to record feedback in zvec: {exc}")
 
