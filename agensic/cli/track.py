@@ -74,7 +74,9 @@ TRACK_ESCAPE_PRIMITIVE_TOKENS = (
     "setsid ",
     "launchctl ",
 )
-TRACK_TTY_RESET_SEQ = "\x1b[?1000l\x1b[?1002l\x1b[?1003l\x1b[?1004l\x1b[?1006l\x1b[?1015l"
+TRACK_TTY_RESET_SEQ = (
+    "\x1b[?1000l\x1b[?1002l\x1b[?1003l\x1b[?1004l\x1b[?1006l\x1b[?1015l"
+)
 TRACK_TIME_TRAVEL_BANNER_COLOR_SEQ = "\x1b[38;5;214m"
 TRACK_ANSI_RESET_SEQ = "\x1b[0m"
 TRACK_CHECKPOINT_INTERVAL_MS = 120
@@ -130,12 +132,16 @@ def _daemon_auth_headers() -> dict[str, str]:
 
 
 def _daemon_request(method: str, path: str, timeout: float, **kwargs):
-    url = path if path.startswith(("http://", "https://")) else f"{DAEMON_BASE_URL}{path}"
+    url = (
+        path if path.startswith(("http://", "https://")) else f"{DAEMON_BASE_URL}{path}"
+    )
     supplied_headers = kwargs.pop("headers", None)
     merged_headers = _daemon_auth_headers()
     if isinstance(supplied_headers, dict):
         merged_headers.update({str(k): str(v) for k, v in supplied_headers.items()})
-    return requests.request(method.upper(), url, headers=merged_headers, timeout=timeout, **kwargs)
+    return requests.request(
+        method.upper(), url, headers=merged_headers, timeout=timeout, **kwargs
+    )
 
 
 def _load_local_agent_registry_override() -> dict[str, Any]:
@@ -152,12 +158,16 @@ def _load_local_agent_registry_override() -> dict[str, Any]:
 def _write_local_agent_registry_override(payload: dict[str, Any]) -> None:
     migrate_legacy_layout()
     ensure_app_layout()
-    atomic_write_json_private(APP_PATHS.agent_registry_local_override_path, payload, indent=2, sort_keys=True)
+    atomic_write_json_private(
+        APP_PATHS.agent_registry_local_override_path, payload, indent=2, sort_keys=True
+    )
 
 
 def _builtin_agent_tokens() -> set[str]:
     registry = get_agent_registry(force_reload=True)
-    builtin_path = Path(str(registry.summary().get("builtin_path", "") or "")).expanduser()
+    builtin_path = Path(
+        str(registry.summary().get("builtin_path", "") or "")
+    ).expanduser()
     if not builtin_path.is_file():
         return set()
     try:
@@ -188,7 +198,9 @@ def _builtin_agent_tokens() -> set[str]:
 
 def _builtin_agent_ids() -> set[str]:
     registry = get_agent_registry(force_reload=True)
-    builtin_path = Path(str(registry.summary().get("builtin_path", "") or "")).expanduser()
+    builtin_path = Path(
+        str(registry.summary().get("builtin_path", "") or "")
+    ).expanduser()
     if not builtin_path.is_file():
         return set()
     try:
@@ -224,7 +236,9 @@ def list_custom_agents() -> list[dict[str, str]]:
         out.append(
             {
                 "agent_id": agent_id,
-                "display_name": str(row.get("display_name", "") or _display_name_for_agent(agent_id)).strip()
+                "display_name": str(
+                    row.get("display_name", "") or _display_name_for_agent(agent_id)
+                ).strip()
                 or _display_name_for_agent(agent_id),
             }
         )
@@ -245,15 +259,22 @@ def list_known_agents() -> list[dict[str, Any]]:
         out.append(
             {
                 "agent_id": agent_id,
-                "display_name": str(row.get("display_name", "") or _display_name_for_agent(agent_id)).strip()
+                "display_name": str(
+                    row.get("display_name", "") or _display_name_for_agent(agent_id)
+                ).strip()
                 or _display_name_for_agent(agent_id),
                 "source": ("builtin" if agent_id in builtin_ids else "custom"),
-                "status": str(row.get("status", "") or "").strip().lower() or "community",
-                "executables": [str(item) for item in row.get("executables", []) if str(item)],
+                "status": str(row.get("status", "") or "").strip().lower()
+                or "community",
+                "executables": [
+                    str(item) for item in row.get("executables", []) if str(item)
+                ],
                 "aliases": [str(item) for item in row.get("aliases", []) if str(item)],
             }
         )
-    out.sort(key=lambda item: (0 if item["source"] == "builtin" else 1, item["agent_id"]))
+    out.sort(
+        key=lambda item: (0 if item["source"] == "builtin" else 1, item["agent_id"])
+    )
     return out
 
 
@@ -270,7 +291,9 @@ def _normalize_custom_agent_token(value: str) -> str:
     if any(ch.isspace() for ch in clean):
         raise ValueError("Agent token must not contain spaces.")
     if not re.fullmatch(r"[a-z0-9][a-z0-9._-]*", clean):
-        raise ValueError("Agent token may only contain lowercase letters, numbers, '.', '_' or '-'.")
+        raise ValueError(
+            "Agent token may only contain lowercase letters, numbers, '.', '_' or '-'."
+        )
     return clean
 
 
@@ -307,7 +330,9 @@ def add_custom_agent(agent_token: str) -> dict[str, str]:
         }
     )
     out = {
-        "version": str(local_payload.get("version", "") or DEFAULT_LOCAL_REGISTRY_VERSION).strip()
+        "version": str(
+            local_payload.get("version", "") or DEFAULT_LOCAL_REGISTRY_VERSION
+        ).strip()
         or DEFAULT_LOCAL_REGISTRY_VERSION,
         "agents": agents,
     }
@@ -335,7 +360,9 @@ def remove_custom_agent(agent_token: str) -> dict[str, str]:
         if agent_id == clean_agent and removed is None:
             removed = {
                 "agent_id": clean_agent,
-                "display_name": str(row.get("display_name", "") or _display_name_for_agent(clean_agent)).strip()
+                "display_name": str(
+                    row.get("display_name", "") or _display_name_for_agent(clean_agent)
+                ).strip()
                 or _display_name_for_agent(clean_agent),
             }
             continue
@@ -343,7 +370,9 @@ def remove_custom_agent(agent_token: str) -> dict[str, str]:
     if removed is None:
         raise ValueError(f"Custom agent '{clean_agent}' was not found.")
     out = {
-        "version": str(payload.get("version", "") or DEFAULT_LOCAL_REGISTRY_VERSION).strip()
+        "version": str(
+            payload.get("version", "") or DEFAULT_LOCAL_REGISTRY_VERSION
+        ).strip()
         or DEFAULT_LOCAL_REGISTRY_VERSION,
         "agents": kept,
     }
@@ -352,18 +381,24 @@ def remove_custom_agent(agent_token: str) -> dict[str, str]:
     return removed
 
 
-def rename_track_session(session_id: str, session_name: str) -> dict[str, object] | None:
+def rename_track_session(
+    session_id: str, session_name: str
+) -> dict[str, object] | None:
     clean_session_id = str(session_id or "").strip()
     if not clean_session_id:
         return None
     store = _state_store()
-    changed = store.rename_tracked_session(clean_session_id, str(session_name or "").strip())
+    changed = store.rename_tracked_session(
+        clean_session_id, str(session_name or "").strip()
+    )
     if not changed:
         return None
     return store.get_session_summary(clean_session_id)
 
 
-def delete_track_session_artifacts(session_id: str, *, state: dict[str, object] | None = None) -> bool:
+def delete_track_session_artifacts(
+    session_id: str, *, state: dict[str, object] | None = None
+) -> bool:
     clean_session_id = str(session_id or "").strip()
     if not clean_session_id:
         return False
@@ -380,11 +415,20 @@ def delete_track_session_artifacts(session_id: str, *, state: dict[str, object] 
     }
     transcript_path = str(session.get("transcript_path", "") or "").strip()
     if transcript_path.endswith(".transcript.jsonl"):
-        candidate_paths.add(transcript_path[: -len(".transcript.jsonl")] + ".checkpoints.jsonl")
-        candidate_paths.add(transcript_path[: -len(".transcript.jsonl")] + ".git-checkpoints.jsonl")
+        candidate_paths.add(
+            transcript_path[: -len(".transcript.jsonl")] + ".checkpoints.jsonl"
+        )
+        candidate_paths.add(
+            transcript_path[: -len(".transcript.jsonl")] + ".git-checkpoints.jsonl"
+        )
     elif transcript_path.endswith(".transcript.jsonl.gz"):
-        candidate_paths.add(transcript_path[: -len(".transcript.jsonl.gz")] + ".checkpoints.jsonl.gz")
-        candidate_paths.add(transcript_path[: -len(".transcript.jsonl.gz")] + ".git-checkpoints.jsonl.gz")
+        candidate_paths.add(
+            transcript_path[: -len(".transcript.jsonl.gz")] + ".checkpoints.jsonl.gz"
+        )
+        candidate_paths.add(
+            transcript_path[: -len(".transcript.jsonl.gz")]
+            + ".git-checkpoints.jsonl.gz"
+        )
 
     deleted = store.delete_tracked_session(clean_session_id)
     if not deleted:
@@ -401,7 +445,9 @@ def delete_track_session_artifacts(session_id: str, *, state: dict[str, object] 
 
 def list_recent_session_summaries(limit: int = 200) -> list[dict[str, object]]:
     reconcile_tracked_sessions()
-    return _state_store().list_session_summaries(limit=max(1, min(200, int(limit or 200))))
+    return _state_store().list_session_summaries(
+        limit=max(1, min(200, int(limit or 200)))
+    )
 
 
 def _track_private_key_path() -> str:
@@ -414,7 +460,9 @@ def _track_public_key_path() -> str:
 
 def ensure_track_supported() -> None:
     if sys.platform.startswith("win"):
-        raise RuntimeError("agensic run currently requires POSIX shells with PTY support.")
+        raise RuntimeError(
+            "agensic run currently requires POSIX shells with PTY support."
+        )
     if os.name != "posix":
         raise RuntimeError("agensic run currently requires a POSIX environment.")
     if not hasattr(os, "openpty"):
@@ -429,7 +477,9 @@ def _ensure_track_layout() -> None:
 
 def _track_transcript_path(session_id: str) -> str:
     clean_session_id = str(session_id or "").strip() or uuid.uuid4().hex[:16]
-    return os.path.join(_track_transcripts_dir(), f"{clean_session_id}.transcript.jsonl")
+    return os.path.join(
+        _track_transcripts_dir(), f"{clean_session_id}.transcript.jsonl"
+    )
 
 
 def _track_event_stream_path(session_id: str) -> str:
@@ -439,15 +489,21 @@ def _track_event_stream_path(session_id: str) -> str:
 
 def _track_checkpoint_path(session_id: str) -> str:
     clean_session_id = str(session_id or "").strip() or uuid.uuid4().hex[:16]
-    return os.path.join(_track_transcripts_dir(), f"{clean_session_id}.checkpoints.jsonl")
+    return os.path.join(
+        _track_transcripts_dir(), f"{clean_session_id}.checkpoints.jsonl"
+    )
 
 
 def _track_git_checkpoint_path(session_id: str) -> str:
     clean_session_id = str(session_id or "").strip() or uuid.uuid4().hex[:16]
-    return os.path.join(_track_transcripts_dir(), f"{clean_session_id}.git-checkpoints.jsonl")
+    return os.path.join(
+        _track_transcripts_dir(), f"{clean_session_id}.git-checkpoints.jsonl"
+    )
 
 
-def _derive_sibling_track_artifact_path(path: str, source_suffix: str, target_suffix: str) -> str:
+def _derive_sibling_track_artifact_path(
+    path: str, source_suffix: str, target_suffix: str
+) -> str:
     clean_path = str(path or "").strip()
     if not clean_path:
         return ""
@@ -546,7 +602,10 @@ def _compress_track_artifact(path: str) -> str:
     target = Path(str(source) + TRACK_ARTIFACT_COMPRESSION_SUFFIX)
     tmp_target = Path(str(target) + ".tmp")
     try:
-        with source.open("rb") as src, gzip.open(tmp_target, "wb", compresslevel=6) as dst:
+        with (
+            source.open("rb") as src,
+            gzip.open(tmp_target, "wb", compresslevel=6) as dst,
+        ):
             shutil.copyfileobj(src, dst)
         tmp_target.replace(target)
         source.unlink(missing_ok=True)
@@ -682,7 +741,9 @@ def _clear_track_state() -> None:
         return
 
 
-def _prune_tracked_transcripts(*, exclude_paths: set[str] | None = None) -> dict[str, int]:
+def _prune_tracked_transcripts(
+    *, exclude_paths: set[str] | None = None
+) -> dict[str, int]:
     transcript_dir = Path(_track_transcripts_dir())
     if not transcript_dir.exists() or not transcript_dir.is_dir():
         return {"removed_files": 0, "removed_bytes": 0}
@@ -786,7 +847,13 @@ def _session_cache_payload(row: dict[str, Any]) -> dict[str, Any]:
     }
 
 
-def _session_status_payload(payload: dict[str, Any], *, status: str, violation_code: str = "", exit_code: int | None = None) -> dict[str, Any]:
+def _session_status_payload(
+    payload: dict[str, Any],
+    *,
+    status: str,
+    violation_code: str = "",
+    exit_code: int | None = None,
+) -> dict[str, Any]:
     out = dict(payload)
     out["status"] = str(status or "").strip().lower()
     out["updated_at"] = int(time.time())
@@ -840,14 +907,21 @@ def _tracked_state_looks_live(state: dict[str, Any]) -> bool:
 def reconcile_tracked_sessions(*, force: bool = False) -> bool:
     global _RECONCILE_TRACKED_SESSIONS_LAST_TS
     now = time.monotonic()
-    if not force and (now - _RECONCILE_TRACKED_SESSIONS_LAST_TS) < TRACK_RECONCILE_TTL_SECONDS:
+    if (
+        not force
+        and (now - _RECONCILE_TRACKED_SESSIONS_LAST_TS) < TRACK_RECONCILE_TTL_SECONDS
+    ):
         return False
     acquired = _RECONCILE_TRACKED_SESSIONS_LOCK.acquire(blocking=force)
     if not acquired:
         return False
     try:
         now = time.monotonic()
-        if not force and (now - _RECONCILE_TRACKED_SESSIONS_LAST_TS) < TRACK_RECONCILE_TTL_SECONDS:
+        if (
+            not force
+            and (now - _RECONCILE_TRACKED_SESSIONS_LAST_TS)
+            < TRACK_RECONCILE_TTL_SECONDS
+        ):
             return False
         for row in _state_store().list_tracked_sessions_by_statuses(
             ("active", "stopping", "launching"),
@@ -856,15 +930,23 @@ def reconcile_tracked_sessions(*, force: bool = False) -> bool:
             state = _session_cache_payload(row)
             if _tracked_state_looks_live(state):
                 continue
-            _mark_tracked_session_errored(state, str(state.get("violation_code", "") or "stale_session"))
+            _mark_tracked_session_errored(
+                state, str(state.get("violation_code", "") or "stale_session")
+            )
         _RECONCILE_TRACKED_SESSIONS_LAST_TS = time.monotonic()
         return True
     finally:
         _RECONCILE_TRACKED_SESSIONS_LOCK.release()
 
 
-def _refresh_track_state_cache(active_states: list[dict[str, Any]] | None = None) -> None:
-    states = active_states if active_states is not None else list_active_track_states(refresh_cache=False)
+def _refresh_track_state_cache(
+    active_states: list[dict[str, Any]] | None = None,
+) -> None:
+    states = (
+        active_states
+        if active_states is not None
+        else list_active_track_states(refresh_cache=False)
+    )
     if states:
         _write_track_state(states[0])
     else:
@@ -880,7 +962,9 @@ def list_active_track_states(*, refresh_cache: bool = True) -> list[dict[str, An
         if _tracked_state_looks_live(state):
             states.append(state)
             continue
-        _mark_tracked_session_errored(state, str(state.get("violation_code", "") or "stale_session"))
+        _mark_tracked_session_errored(
+            state, str(state.get("violation_code", "") or "stale_session")
+        )
 
     if refresh_cache:
         if states:
@@ -902,7 +986,11 @@ def get_latest_track_session(session_id: str = "") -> dict[str, Any]:
         row = _state_store().get_tracked_session(clean_session_id)
     else:
         active_states = list_active_track_states()
-        row = active_states[0] if active_states else _state_store().get_latest_tracked_session()
+        row = (
+            active_states[0]
+            if active_states
+            else _state_store().get_latest_tracked_session()
+        )
     return _session_cache_payload(dict(row or {})) if row else {}
 
 
@@ -915,7 +1003,11 @@ def _find_registry_descriptor(token: str) -> dict[str, Any] | None:
     if not clean:
         return None
     for agent in registry.list_agents():
-        executables = [str(item or "").strip().lower() for item in agent.get("executables", []) if str(item or "").strip()]
+        executables = [
+            str(item or "").strip().lower()
+            for item in agent.get("executables", [])
+            if str(item or "").strip()
+        ]
         if clean in executables:
             return agent
     return None
@@ -925,7 +1017,11 @@ def _find_command_descriptor(command: list[str]) -> dict[str, Any] | None:
     if not command:
         return None
     executable = os.path.basename(str(command[0] or "").strip()).lower()
-    if executable == "gh" and len(command) > 1 and str(command[1] or "").strip().lower() == "copilot":
+    if (
+        executable == "gh"
+        and len(command) > 1
+        and str(command[1] or "").strip().lower() == "copilot"
+    ):
         return _find_registry_descriptor("copilot")
     wrapped = _extract_open_app_context(command)
     if wrapped is not None:
@@ -946,9 +1042,16 @@ def _looks_like_codex_launch(*, command: list[str], agent: str = "") -> bool:
 def _looks_like_github_copilot_launch(*, command: list[str], agent: str = "") -> bool:
     clean_agent = str(agent or "").strip().lower()
     executable = os.path.basename(str((command or [""])[0] or "").strip()).lower()
-    if clean_agent in {"github_copilot", "github_copilot_cli"} or executable == "copilot":
+    if (
+        clean_agent in {"github_copilot", "github_copilot_cli"}
+        or executable == "copilot"
+    ):
         return True
-    return executable == "gh" and len(command) > 1 and str(command[1] or "").strip().lower() == "copilot"
+    return (
+        executable == "gh"
+        and len(command) > 1
+        and str(command[1] or "").strip().lower() == "copilot"
+    )
 
 
 def _extract_open_app_context(command: list[str]) -> dict[str, Any] | None:
@@ -965,7 +1068,11 @@ def _extract_open_app_context(command: list[str]) -> dict[str, Any] | None:
         token = str(command[index] or "").strip()
         lowered = token.lower()
         if lowered == "--args":
-            wrapped_args = [str(item or "").strip() for item in command[index + 1 :] if str(item or "").strip()]
+            wrapped_args = [
+                str(item or "").strip()
+                for item in command[index + 1 :]
+                if str(item or "").strip()
+            ]
             break
         if lowered == "-a" and index + 1 < len(command):
             app_target = str(command[index + 1] or "").strip()
@@ -1053,7 +1160,9 @@ def _load_json_text(raw_text: str) -> Any:
                     continue
                 if nxt == "*":
                     idx += 2
-                    while idx + 1 < len(source) and not (source[idx] == "*" and source[idx + 1] == "/"):
+                    while idx + 1 < len(source) and not (
+                        source[idx] == "*" and source[idx + 1] == "/"
+                    ):
                         idx += 1
                     idx += 2
                     continue
@@ -1145,7 +1254,9 @@ def _find_upward(start_dir: Path, *parts: str) -> Path | None:
 def _read_cli_option_value(command: list[str], *flags: str) -> str:
     if not command:
         return ""
-    normalized = {str(flag or "").strip().lower() for flag in flags if str(flag or "").strip()}
+    normalized = {
+        str(flag or "").strip().lower() for flag in flags if str(flag or "").strip()
+    }
     for index, token in enumerate(command):
         current = str(token or "").strip()
         lowered = current.lower()
@@ -1197,7 +1308,9 @@ def _load_model_from_path(path: Path, env: dict[str, str] | None = None) -> str:
     return _read_model_value(_load_json_file(path), env)
 
 
-def _merge_model_candidates(paths: list[Path], env: dict[str, str] | None = None) -> str:
+def _merge_model_candidates(
+    paths: list[Path], env: dict[str, str] | None = None
+) -> str:
     resolved = ""
     seen: set[str] = set()
     for path in paths:
@@ -1219,7 +1332,9 @@ def _resolve_gemini_system_settings_path(env: dict[str, str] | None = None) -> P
     if sys.platform == "darwin":
         return Path("/Library/Application Support/GeminiCli/settings.json")
     if sys.platform.startswith("win"):
-        program_data = str(source_env.get("PROGRAMDATA", r"C:\ProgramData") or r"C:\ProgramData").strip()
+        program_data = str(
+            source_env.get("PROGRAMDATA", r"C:\ProgramData") or r"C:\ProgramData"
+        ).strip()
         return Path(program_data) / "gemini-cli" / "settings.json"
     return Path("/etc/gemini-cli/settings.json")
 
@@ -1236,7 +1351,9 @@ def _infer_codex_model(env: dict[str, str] | None = None) -> str:
     return str(model or "").strip()
 
 
-def _infer_gemini_model(env: dict[str, str] | None = None, cwd: str | None = None) -> str:
+def _infer_gemini_model(
+    env: dict[str, str] | None = None, cwd: str | None = None
+) -> str:
     source_env = env or os.environ
     search_root = Path(cwd or os.getcwd())
     candidates: list[Path] = [_resolve_home(env) / ".gemini" / "settings.json"]
@@ -1261,7 +1378,9 @@ def _resolve_claude_managed_settings_path() -> Path:
     return Path("/etc/claude-code/managed-settings.json")
 
 
-def _infer_claude_code_model(env: dict[str, str] | None = None, cwd: str | None = None) -> str:
+def _infer_claude_code_model(
+    env: dict[str, str] | None = None, cwd: str | None = None
+) -> str:
     source_env = env or os.environ
     search_root = Path(cwd or os.getcwd())
     candidates: list[Path] = [_resolve_home(env) / ".claude" / "settings.json"]
@@ -1281,7 +1400,9 @@ def _infer_claude_code_model(env: dict[str, str] | None = None, cwd: str | None 
     return managed_model or env_model or merged
 
 
-def _infer_opencode_model(env: dict[str, str] | None = None, cwd: str | None = None) -> str:
+def _infer_opencode_model(
+    env: dict[str, str] | None = None, cwd: str | None = None
+) -> str:
     source_env = env or os.environ
     search_root = Path(cwd or os.getcwd())
     custom_dir = str(source_env.get("OPENCODE_CONFIG_DIR", "") or "").strip()
@@ -1304,13 +1425,17 @@ def _infer_opencode_model(env: dict[str, str] | None = None, cwd: str | None = N
         workspace_path = _find_upward(search_root, filename)
         if workspace_path is not None:
             candidates.append(workspace_path)
-    inline_payload = _load_json_text(str(source_env.get("OPENCODE_CONFIG_CONTENT", "") or "").strip())
+    inline_payload = _load_json_text(
+        str(source_env.get("OPENCODE_CONFIG_CONTENT", "") or "").strip()
+    )
     inline_model = _read_model_value(inline_payload, env)
     env_model = str(source_env.get("OPENCODE_MODEL", "") or "").strip()
     return env_model or inline_model or _merge_model_candidates(candidates, env)
 
 
-def _infer_kilo_code_model(env: dict[str, str] | None = None, cwd: str | None = None) -> str:
+def _infer_kilo_code_model(
+    env: dict[str, str] | None = None, cwd: str | None = None
+) -> str:
     search_root = Path(cwd or os.getcwd())
     candidates: list[Path] = [
         _resolve_config_home(env) / "kilo" / "config.json",
@@ -1330,7 +1455,9 @@ def _infer_kilo_code_model(env: dict[str, str] | None = None, cwd: str | None = 
     return _merge_model_candidates(candidates, env)
 
 
-def _resolve_github_copilot_home(command: list[str], env: dict[str, str] | None = None) -> Path:
+def _resolve_github_copilot_home(
+    command: list[str], env: dict[str, str] | None = None
+) -> Path:
     source_env = env or os.environ
     config_dir = _read_cli_option_value(command, "--config-dir")
     if config_dir:
@@ -1341,10 +1468,14 @@ def _resolve_github_copilot_home(command: list[str], env: dict[str, str] | None 
     return _resolve_home(env) / ".copilot"
 
 
-def _infer_github_copilot_model(command: list[str], env: dict[str, str] | None = None) -> str:
+def _infer_github_copilot_model(
+    command: list[str], env: dict[str, str] | None = None
+) -> str:
     source_env = env or os.environ
     env_model = str(source_env.get("COPILOT_MODEL", "") or "").strip()
-    config_model = _load_model_from_path(_resolve_github_copilot_home(command, env) / "config.json", env)
+    config_model = _load_model_from_path(
+        _resolve_github_copilot_home(command, env) / "config.json", env
+    )
     return env_model or config_model
 
 
@@ -1379,10 +1510,9 @@ def _infer_openclaw_model(env: dict[str, str] | None = None) -> str:
     config_path = state_dir / "openclaw.json"
     if config_path.is_file():
         payload = _load_json_file(config_path)
-        model = (
-            _read_string_path(payload, "agents", "defaults", "model", "primary")
-            or _read_string_path(payload, "agents", "defaults", "model")
-        )
+        model = _read_string_path(
+            payload, "agents", "defaults", "model", "primary"
+        ) or _read_string_path(payload, "agents", "defaults", "model")
         if model:
             return model
 
@@ -1445,7 +1575,11 @@ def _infer_inline_track_model(command: list[str]) -> str:
         "continue",
         "openclaw",
         "copilot",
-    } or (executable == "gh" and len(command) > 1 and str(command[1] or "").strip().lower() == "copilot"):
+    } or (
+        executable == "gh"
+        and len(command) > 1
+        and str(command[1] or "").strip().lower() == "copilot"
+    ):
         explicit_model = _read_cli_option_value(command, "--model", "-m")
     if explicit_model:
         return explicit_model
@@ -1464,7 +1598,9 @@ def _infer_inline_track_model(command: list[str]) -> str:
     return ""
 
 
-def _infer_track_model(*, command: list[str], agent: str, env: dict[str, str] | None = None) -> str:
+def _infer_track_model(
+    *, command: list[str], agent: str, env: dict[str, str] | None = None
+) -> str:
     inline_model = _infer_inline_track_model(command)
     if inline_model:
         return inline_model
@@ -1547,11 +1683,17 @@ def prepare_track_launch(
     working_directory = os.getcwd()
 
     if args[0] == "--":
-        raise ValueError("Raw command mode is no longer supported. Use `agensic run <agent>`.")
+        raise ValueError(
+            "Raw command mode is no longer supported. Use `agensic run <agent>`."
+        )
 
     descriptor = _find_registry_descriptor(args[0])
     if descriptor is not None:
-        executables = [str(item or "").strip() for item in descriptor.get("executables", []) if str(item or "").strip()]
+        executables = [
+            str(item or "").strip()
+            for item in descriptor.get("executables", [])
+            if str(item or "").strip()
+        ]
         executable = executables[0] if executables else str(args[0] or "").strip()
         command = [executable, *args[1:]]
         resolved_agent = str(descriptor.get("agent_id", "") or "").strip().lower()
@@ -1559,8 +1701,11 @@ def prepare_track_launch(
             command=command,
             launch_mode="registry_alias",
             agent=resolved_agent,
-            model=clean_model_override or _infer_track_model(command=command, agent=resolved_agent) or "unknown-model",
-            agent_name=clean_agent_name_override or str(descriptor.get("display_name", "") or "").strip(),
+            model=clean_model_override
+            or _infer_track_model(command=command, agent=resolved_agent)
+            or "unknown-model",
+            agent_name=clean_agent_name_override
+            or str(descriptor.get("display_name", "") or "").strip(),
             working_directory=working_directory,
             root_command=shlex.join(command),
         )
@@ -1579,7 +1724,9 @@ def _format_ts(ts_value: int) -> str:
 
 
 def _format_debug_preview(data: bytes, limit: int = 120) -> str:
-    text = data.decode("utf-8", errors="replace").replace("\r", "\\r").replace("\n", "\\n")
+    text = (
+        data.decode("utf-8", errors="replace").replace("\r", "\\r").replace("\n", "\\n")
+    )
     return text[:limit] + ("..." if len(text) > limit else "")
 
 
@@ -1604,7 +1751,9 @@ def _build_git_command_env() -> dict[str, str]:
     return env
 
 
-def _run_git_capture(working_directory: str, args: list[str], *, timeout_seconds: float = 1.5) -> tuple[int, str, str]:
+def _run_git_capture(
+    working_directory: str, args: list[str], *, timeout_seconds: float = 1.5
+) -> tuple[int, str, str]:
     cwd = str(working_directory or "").strip() or None
     try:
         run = subprocess.run(
@@ -1645,18 +1794,26 @@ def _run_git_capture_bytes(
 
 
 def _git_head_exists(repo_root: str) -> bool:
-    code, _, _ = _run_git_capture(repo_root, ["rev-parse", "--verify", "HEAD"], timeout_seconds=1.0)
+    code, _, _ = _run_git_capture(
+        repo_root, ["rev-parse", "--verify", "HEAD"], timeout_seconds=1.0
+    )
     return code == 0
 
 
 def _git_status_porcelain(repo_root: str) -> str:
-    code, stdout, _ = _run_git_capture(repo_root, ["status", "--porcelain", "--untracked-files=all"], timeout_seconds=2.0)
+    code, stdout, _ = _run_git_capture(
+        repo_root,
+        ["status", "--porcelain", "--untracked-files=all"],
+        timeout_seconds=2.0,
+    )
     return str(stdout or "") if code == 0 else ""
 
 
 def _git_status_fingerprint(repo_root: str) -> str:
     head = ""
-    code, stdout, _ = _run_git_capture(repo_root, ["rev-parse", "HEAD"], timeout_seconds=1.0)
+    code, stdout, _ = _run_git_capture(
+        repo_root, ["rev-parse", "HEAD"], timeout_seconds=1.0
+    )
     if code == 0:
         head = str(stdout or "").strip()
     payload = f"{head}\n{_git_status_porcelain(repo_root)}"
@@ -1664,11 +1821,15 @@ def _git_status_fingerprint(repo_root: str) -> str:
 
 
 def _git_binary_diff_against_head(repo_root: str) -> bytes:
-    args = ["diff", "--binary", "HEAD"] if _git_head_exists(repo_root) else [
-        "diff",
-        "--binary",
-        "4b825dc642cb6eb9a060e54bf8d69288fbee4904",
-    ]
+    args = (
+        ["diff", "--binary", "HEAD"]
+        if _git_head_exists(repo_root)
+        else [
+            "diff",
+            "--binary",
+            "4b825dc642cb6eb9a060e54bf8d69288fbee4904",
+        ]
+    )
     code, stdout, _ = _run_git_capture_bytes(repo_root, args, timeout_seconds=4.0)
     if code != 0 and stdout == b"":
         return b""
@@ -1773,11 +1934,18 @@ def _default_time_travel_branch_name(session_id: str, checkpoint_seq: int) -> st
 
 
 def _next_available_branch_name(repo_root: str, preferred: str) -> str:
-    base = re.sub(r"[^A-Za-z0-9._/-]+", "-", str(preferred or "").strip()).strip("-/") or "agensic/time-travel"
+    base = (
+        re.sub(r"[^A-Za-z0-9._/-]+", "-", str(preferred or "").strip()).strip("-/")
+        or "agensic/time-travel"
+    )
     candidate = base
     suffix = 2
     while True:
-        code, _, _ = _run_git_capture(repo_root, ["rev-parse", "--verify", "--quiet", candidate], timeout_seconds=1.0)
+        code, _, _ = _run_git_capture(
+            repo_root,
+            ["rev-parse", "--verify", "--quiet", candidate],
+            timeout_seconds=1.0,
+        )
         if code != 0:
             return candidate
         candidate = f"{base}-{suffix}"
@@ -1792,7 +1960,9 @@ def _capture_repo_snapshot(working_directory: str) -> dict[str, Any]:
     dirty = False
     untracked_files: list[str] = []
 
-    code, stdout, _ = _run_git_capture(working_directory, ["rev-parse", "--show-toplevel"])
+    code, stdout, _ = _run_git_capture(
+        working_directory, ["rev-parse", "--show-toplevel"]
+    )
     if code == 0:
         repo_root = str(stdout or "").strip()
     repo_cwd = repo_root or str(working_directory or "").strip()
@@ -1813,7 +1983,9 @@ def _capture_repo_snapshot(working_directory: str) -> dict[str, Any]:
     if repo_root:
         code, stdout, _ = _run_git_capture(repo_cwd, ["diff", "--name-only", "HEAD"])
         if code == 0:
-            changed_files = [line.strip() for line in stdout.splitlines() if line.strip()]
+            changed_files = [
+                line.strip() for line in stdout.splitlines() if line.strip()
+            ]
         code, stdout, _ = _run_git_capture(repo_cwd, ["diff", "--stat", "HEAD"])
         if code == 0:
             diff_stat = str(stdout or "").strip()
@@ -1832,10 +2004,16 @@ def _capture_repo_snapshot(working_directory: str) -> dict[str, Any]:
     }
 
 
-def _git_changed_files_between(repo_root: str, start_head: str, end_head: str) -> list[str]:
+def _git_changed_files_between(
+    repo_root: str, start_head: str, end_head: str
+) -> list[str]:
     if not repo_root or not start_head or not end_head or start_head == end_head:
         return []
-    code, stdout, _ = _run_git_capture(repo_root, ["diff", "--name-only", f"{start_head}..{end_head}"], timeout_seconds=2.0)
+    code, stdout, _ = _run_git_capture(
+        repo_root,
+        ["diff", "--name-only", f"{start_head}..{end_head}"],
+        timeout_seconds=2.0,
+    )
     if code != 0:
         return []
     return [line.strip() for line in stdout.splitlines() if line.strip()]
@@ -1844,14 +2022,22 @@ def _git_changed_files_between(repo_root: str, start_head: str, end_head: str) -
 def _git_diff_stat_between(repo_root: str, start_head: str, end_head: str) -> str:
     if not repo_root or not start_head or not end_head or start_head == end_head:
         return ""
-    code, stdout, _ = _run_git_capture(repo_root, ["diff", "--stat", f"{start_head}..{end_head}"], timeout_seconds=2.0)
+    code, stdout, _ = _run_git_capture(
+        repo_root, ["diff", "--stat", f"{start_head}..{end_head}"], timeout_seconds=2.0
+    )
     return str(stdout or "").strip() if code == 0 else ""
 
 
-def _git_commits_between(repo_root: str, start_head: str, end_head: str) -> list[dict[str, str]]:
+def _git_commits_between(
+    repo_root: str, start_head: str, end_head: str
+) -> list[dict[str, str]]:
     if not repo_root or not start_head or not end_head or start_head == end_head:
         return []
-    code, stdout, _ = _run_git_capture(repo_root, ["log", "--oneline", f"{start_head}..{end_head}"], timeout_seconds=2.0)
+    code, stdout, _ = _run_git_capture(
+        repo_root,
+        ["log", "--oneline", f"{start_head}..{end_head}"],
+        timeout_seconds=2.0,
+    )
     if code != 0:
         return []
     commits: list[dict[str, str]] = []
@@ -1864,7 +2050,9 @@ def _git_commits_between(repo_root: str, start_head: str, end_head: str) -> list
     return commits
 
 
-def _build_git_checkpoint_payload(repo_root: str, *, seq: int, reason: str = "") -> dict[str, Any] | None:
+def _build_git_checkpoint_payload(
+    repo_root: str, *, seq: int, reason: str = ""
+) -> dict[str, Any] | None:
     clean_repo_root = str(repo_root or "").strip()
     if not clean_repo_root:
         return None
@@ -1882,15 +2070,25 @@ def _build_git_checkpoint_payload(repo_root: str, *, seq: int, reason: str = "")
         "branch": str(snapshot.get("branch", "") or ""),
         "head": str(snapshot.get("head", "") or ""),
         "status_porcelain": status_porcelain,
-        "status_fingerprint": hashlib.sha256(status_porcelain.encode("utf-8", errors="replace")).hexdigest()
+        "status_fingerprint": hashlib.sha256(
+            status_porcelain.encode("utf-8", errors="replace")
+        ).hexdigest()
         if status_porcelain
         else "",
         "tracked_patch_b64": _encode_bytes(tracked_patch),
-        "tracked_patch_sha256": hashlib.sha256(tracked_patch).hexdigest() if tracked_patch else "",
+        "tracked_patch_sha256": hashlib.sha256(tracked_patch).hexdigest()
+        if tracked_patch
+        else "",
         "worktree_diff_stat": str(snapshot.get("diff_stat", "") or ""),
-        "changed_files": [str(item) for item in snapshot.get("changed_files", []) if str(item)],
+        "changed_files": [
+            str(item) for item in snapshot.get("changed_files", []) if str(item)
+        ],
         "untracked_files": [dict(item) for item in untracked],
-        "untracked_paths": [str(item.get("path", "") or "") for item in untracked if str(item.get("path", "") or "")],
+        "untracked_paths": [
+            str(item.get("path", "") or "")
+            for item in untracked
+            if str(item.get("path", "") or "")
+        ],
     }
     payload["fingerprint"] = hashlib.sha256(
         json.dumps(
@@ -1911,11 +2109,15 @@ def _load_git_checkpoint_records(path: str) -> list[dict[str, Any]]:
     records: list[dict[str, Any]] = []
     for idx, row in enumerate(rows, start=1):
         worktree_diff_stat = str(row.get("worktree_diff_stat", "") or "")
-        changed_files = [str(item) for item in row.get("changed_files", []) if str(item)]
+        changed_files = [
+            str(item) for item in row.get("changed_files", []) if str(item)
+        ]
         if not changed_files and worktree_diff_stat:
             changed_files = _git_changed_files_from_diff_stat(worktree_diff_stat)
         committed_diff_stat = str(row.get("committed_diff_stat", "") or "")
-        committed_files = [str(item) for item in row.get("committed_files", []) if str(item)]
+        committed_files = [
+            str(item) for item in row.get("committed_files", []) if str(item)
+        ]
         if not committed_files and committed_diff_stat:
             committed_files = _git_changed_files_from_diff_stat(committed_diff_stat)
         untracked_files = [
@@ -1927,12 +2129,20 @@ def _load_git_checkpoint_records(path: str) -> list[dict[str, Any]]:
             for item in row.get("untracked_files", [])
             if isinstance(item, dict) and str(item.get("path", "") or "")
         ]
-        untracked_paths = [str(item) for item in row.get("untracked_paths", []) if str(item)]
+        untracked_paths = [
+            str(item) for item in row.get("untracked_paths", []) if str(item)
+        ]
         if not untracked_paths and untracked_files:
-            untracked_paths = [str(item.get("path", "") or "") for item in untracked_files if str(item.get("path", "") or "")]
+            untracked_paths = [
+                str(item.get("path", "") or "")
+                for item in untracked_files
+                if str(item.get("path", "") or "")
+            ]
         records.append(
             {
-                "checkpoint_id": str(row.get("checkpoint_id", "") or f"chkpt-{idx:04d}"),
+                "checkpoint_id": str(
+                    row.get("checkpoint_id", "") or f"chkpt-{idx:04d}"
+                ),
                 "seq": int(row.get("seq", 0) or 0),
                 "timestamp": int(row.get("timestamp", 0) or 0),
                 "reason": str(row.get("reason", "") or ""),
@@ -1953,7 +2163,13 @@ def _load_git_checkpoint_records(path: str) -> list[dict[str, Any]]:
                 "fingerprint": str(row.get("fingerprint", "") or ""),
             }
         )
-    return sorted(records, key=lambda item: (int(item.get("seq", 0) or 0), int(item.get("timestamp", 0) or 0)))
+    return sorted(
+        records,
+        key=lambda item: (
+            int(item.get("seq", 0) or 0),
+            int(item.get("timestamp", 0) or 0),
+        ),
+    )
 
 
 def _resolve_git_checkpoint(
@@ -1980,7 +2196,9 @@ def _resolve_git_checkpoint(
     return (candidate, exact)
 
 
-def _resolve_time_travel_launch_agent(session: dict[str, Any] | None) -> tuple[str, str]:
+def _resolve_time_travel_launch_agent(
+    session: dict[str, Any] | None,
+) -> tuple[str, str]:
     state = dict(session or {})
     clean_agent = str(state.get("agent", "") or "").strip().lower()
     root_command = str(state.get("root_command", "") or "").strip()
@@ -1993,7 +2211,11 @@ def _resolve_time_travel_launch_agent(session: dict[str, Any] | None) -> tuple[s
         except ValueError:
             descriptor = None
     if descriptor is not None:
-        executables = [str(item or "").strip() for item in descriptor.get("executables", []) if str(item or "").strip()]
+        executables = [
+            str(item or "").strip()
+            for item in descriptor.get("executables", [])
+            if str(item or "").strip()
+        ]
         agent_id = str(descriptor.get("agent_id", "") or "").strip().lower()
         executable = executables[0] if executables else agent_id
         return (agent_id or clean_agent, executable or clean_agent)
@@ -2008,7 +2230,9 @@ def _resolve_time_travel_launch_agent(session: dict[str, Any] | None) -> tuple[s
     return (clean_agent, fallback_executable)
 
 
-def _post_session_event(session_id: str, event_type: str, payload: dict[str, Any] | None = None) -> int | None:
+def _post_session_event(
+    session_id: str, event_type: str, payload: dict[str, Any] | None = None
+) -> int | None:
     session = _state_store().get_session_summary(str(session_id or "").strip())
     if not session:
         return None
@@ -2050,7 +2274,9 @@ def _post_session_event(session_id: str, event_type: str, payload: dict[str, Any
     return next_seq
 
 
-def _git_checkpoint_candidate_paths(session_id: str, session: dict[str, Any] | None = None) -> list[str]:
+def _git_checkpoint_candidate_paths(
+    session_id: str, session: dict[str, Any] | None = None
+) -> list[str]:
     clean_session_id = str(session_id or "").strip()
     candidates: list[str] = []
 
@@ -2063,12 +2289,22 @@ def _git_checkpoint_candidate_paths(session_id: str, session: dict[str, Any] | N
     state = dict(session or {})
     transcript_path = str(state.get("transcript_path", "") or "")
     event_stream_path = str(state.get("event_stream_path", "") or "")
-    _add(_derive_sibling_track_artifact_path(transcript_path, ".transcript.jsonl", ".git-checkpoints.jsonl"))
-    _add(_derive_sibling_track_artifact_path(event_stream_path, ".events.jsonl", ".git-checkpoints.jsonl"))
+    _add(
+        _derive_sibling_track_artifact_path(
+            transcript_path, ".transcript.jsonl", ".git-checkpoints.jsonl"
+        )
+    )
+    _add(
+        _derive_sibling_track_artifact_path(
+            event_stream_path, ".events.jsonl", ".git-checkpoints.jsonl"
+        )
+    )
     return candidates
 
 
-def load_git_checkpoints_for_session(session_id: str, session: dict[str, Any] | None = None) -> list[dict[str, Any]]:
+def load_git_checkpoints_for_session(
+    session_id: str, session: dict[str, Any] | None = None
+) -> list[dict[str, Any]]:
     for candidate in _git_checkpoint_candidate_paths(session_id, session):
         records = _load_git_checkpoint_records(candidate)
         if records:
@@ -2076,7 +2312,9 @@ def load_git_checkpoints_for_session(session_id: str, session: dict[str, Any] | 
     return []
 
 
-def preview_time_travel(session_id: str, target_seq: int, *, target_ts: int = 0) -> dict[str, Any]:
+def preview_time_travel(
+    session_id: str, target_seq: int, *, target_ts: int = 0
+) -> dict[str, Any]:
     clean_session_id = str(session_id or "").strip()
     if not clean_session_id:
         return {"status": "error", "reason": "session_id_missing"}
@@ -2105,10 +2343,14 @@ def preview_time_travel(session_id: str, target_seq: int, *, target_ts: int = 0)
     if resolved is None:
         return {"status": "error", "reason": "git_checkpoint_not_found"}
     current_snapshot = _capture_repo_snapshot(repo_root)
-    clean_live = not bool(current_snapshot.get("dirty")) and not bool(current_snapshot.get("untracked_files"))
+    clean_live = not bool(current_snapshot.get("dirty")) and not bool(
+        current_snapshot.get("untracked_files")
+    )
     suggested_branch = _next_available_branch_name(
         repo_root,
-        _default_time_travel_branch_name(clean_session_id, int(resolved.get("seq", 0) or 0)),
+        _default_time_travel_branch_name(
+            clean_session_id, int(resolved.get("seq", 0) or 0)
+        ),
     )
     preview = {
         "status": "ok",
@@ -2121,8 +2363,16 @@ def preview_time_travel(session_id: str, target_seq: int, *, target_ts: int = 0)
             "branch": str(current_snapshot.get("branch", "") or ""),
             "head": str(current_snapshot.get("head", "") or ""),
             "dirty": bool(current_snapshot.get("dirty")),
-            "changed_files": [str(item) for item in current_snapshot.get("changed_files", []) if str(item)],
-            "untracked_files": [str(item) for item in current_snapshot.get("untracked_files", []) if str(item)],
+            "changed_files": [
+                str(item)
+                for item in current_snapshot.get("changed_files", [])
+                if str(item)
+            ],
+            "untracked_files": [
+                str(item)
+                for item in current_snapshot.get("untracked_files", [])
+                if str(item)
+            ],
             "diff_stat": str(current_snapshot.get("diff_stat", "") or ""),
         },
         "can_fork": bool(clean_live),
@@ -2145,20 +2395,36 @@ def preview_time_travel(session_id: str, target_seq: int, *, target_ts: int = 0)
     return preview
 
 
-def fork_time_travel(session_id: str, target_seq: int, branch_name: str = "") -> dict[str, Any]:
+def fork_time_travel(
+    session_id: str, target_seq: int, branch_name: str = ""
+) -> dict[str, Any]:
     preview = preview_time_travel(session_id, target_seq)
     if str(preview.get("status", "") or "") != "ok":
         return preview
     if not bool(preview.get("can_fork")):
-        return {"status": "error", "reason": str(preview.get("blocking_reason", "") or "fork_blocked"), "preview": preview}
+        return {
+            "status": "error",
+            "reason": str(preview.get("blocking_reason", "") or "fork_blocked"),
+            "preview": preview,
+        }
     checkpoint = dict(preview.get("resolved_checkpoint", {}) or {})
     repo_root = str(preview.get("repo_root", "") or "")
-    target_branch = _next_available_branch_name(repo_root, str(branch_name or "").strip() or str(preview.get("suggested_branch", "") or ""))
+    target_branch = _next_available_branch_name(
+        repo_root,
+        str(branch_name or "").strip()
+        or str(preview.get("suggested_branch", "") or ""),
+    )
     checkpoint_head = str(checkpoint.get("head", "") or "").strip()
     base_ref = checkpoint_head or "HEAD"
-    code, _, stderr = _run_git_capture(repo_root, ["checkout", "-b", target_branch, base_ref], timeout_seconds=5.0)
+    code, _, stderr = _run_git_capture(
+        repo_root, ["checkout", "-b", target_branch, base_ref], timeout_seconds=5.0
+    )
     if code != 0:
-        return {"status": "error", "reason": "branch_create_failed", "detail": stderr.strip() or ""}
+        return {
+            "status": "error",
+            "reason": "branch_create_failed",
+            "detail": stderr.strip() or "",
+        }
     # Remove any pre-existing untracked files, then restore the selected checkpoint's state.
     _remove_repo_paths(repo_root, _git_list_untracked_files(repo_root))
     tracked_patch = _decode_bytes(checkpoint.get("tracked_patch_b64"))
@@ -2190,7 +2456,9 @@ def fork_time_travel(session_id: str, target_seq: int, branch_name: str = "") ->
         "agent_name": str(session.get("agent_name", "") or ""),
         "resolved_agent": resolved_agent,
         "launch_executable": launch_executable,
-        "launch_command": ["agensic", "run", launch_executable] if launch_executable else [],
+        "launch_command": ["agensic", "run", launch_executable]
+        if launch_executable
+        else [],
         "working_directory": repo_root,
         "source_session_id": str(session_id or "").strip(),
         "source_target_seq": int(target_seq or 0),
@@ -2234,12 +2502,19 @@ def _load_session_events(path: str) -> list[dict[str, Any]]:
             data_b64 = str(event_payload.get("data_b64", "") or "").strip()
             if data_b64:
                 try:
-                    event_payload["data"] = base64.b64decode(data_b64.encode("ascii"), validate=True)
+                    event_payload["data"] = base64.b64decode(
+                        data_b64.encode("ascii"), validate=True
+                    )
                 except Exception:
                     event_payload["data"] = b""
             item["payload"] = event_payload
         events.append(item)
-    events.sort(key=lambda event: (float(event.get("ts_monotonic_ms", 0.0) or 0.0), int(event.get("seq", 0) or 0)))
+    events.sort(
+        key=lambda event: (
+            float(event.get("ts_monotonic_ms", 0.0) or 0.0),
+            int(event.get("seq", 0) or 0),
+        )
+    )
     return events
 
 
@@ -2374,9 +2649,15 @@ def stop_track_sessions(session_id: str = "", *, stop_all: bool = False) -> int:
     if stop_all:
         targets = active_states
     elif clean_session_id:
-        targets = [state for state in active_states if str(state.get("session_id", "") or "").strip() == clean_session_id]
+        targets = [
+            state
+            for state in active_states
+            if str(state.get("session_id", "") or "").strip() == clean_session_id
+        ]
         if not targets:
-            console.print(f"[red]No active tracked session found for session_id={clean_session_id}[/red]")
+            console.print(
+                f"[red]No active tracked session found for session_id={clean_session_id}[/red]"
+            )
             return 1
     elif len(active_states) == 1:
         targets = [active_states[0]]
@@ -2392,13 +2673,18 @@ def stop_track_sessions(session_id: str = "", *, stop_all: bool = False) -> int:
     _refresh_track_state_cache()
 
     session_ids = ",".join(str(state.get("session_id", "") or "-") for state in targets)
-    console.print(f"stop_requested sessions={len(targets)} session_ids={session_ids}", highlight=False)
+    console.print(
+        f"stop_requested sessions={len(targets)} session_ids={session_ids}",
+        highlight=False,
+    )
     return exit_code
 
 
 def print_sessions_text(limit: int = 20) -> int:
     reconcile_tracked_sessions()
-    rows = _state_store().list_session_summaries(limit=max(1, min(200, int(limit or 20))))
+    rows = _state_store().list_session_summaries(
+        limit=max(1, min(200, int(limit or 20)))
+    )
     if not rows:
         console.print("no_sessions")
         return 0
@@ -2414,8 +2700,14 @@ def print_sessions_text(limit: int = 20) -> int:
                 model=str(row.get("model", "") or "-"),
                 started_at=_format_ts(int(row.get("started_at", 0) or 0)),
                 repo=str(row.get("repo_root", "") or "-"),
-                branch=str(row.get("branch_end", "") or row.get("branch_start", "") or "-"),
-                exit_code=str(row.get("exit_code", "-") if row.get("exit_code") is not None else "-"),
+                branch=str(
+                    row.get("branch_end", "") or row.get("branch_start", "") or "-"
+                ),
+                exit_code=str(
+                    row.get("exit_code", "-")
+                    if row.get("exit_code") is not None
+                    else "-"
+                ),
                 violation=str(row.get("violation_code", "") or "-"),
             ),
             highlight=False,
@@ -2423,8 +2715,17 @@ def print_sessions_text(limit: int = 20) -> int:
     return 0
 
 
-def inspect_track_session(session_id: str = "", *, replay: bool = False, tail_events: int = TRACK_INSPECT_TAIL_EVENTS) -> int:
-    state = _state_store().get_session_summary(session_id) if str(session_id or "").strip() else get_latest_track_session(session_id)
+def inspect_track_session(
+    session_id: str = "",
+    *,
+    replay: bool = False,
+    tail_events: int = TRACK_INSPECT_TAIL_EVENTS,
+) -> int:
+    state = (
+        _state_store().get_session_summary(session_id)
+        if str(session_id or "").strip()
+        else get_latest_track_session(session_id)
+    )
     if not state:
         console.print("[red]No tracked session found.[/red]")
         return 1
@@ -2447,20 +2748,50 @@ def inspect_track_session(session_id: str = "", *, replay: bool = False, tail_ev
         "started_at={started_at} ended_at={ended_at} exit_code={exit_code} violation={violation}".format(
             started_at=_format_ts(int(state.get("started_at", 0) or 0)),
             ended_at=_format_ts(int(state.get("ended_at", 0) or 0)),
-            exit_code=str(state.get("exit_code", "-") if state.get("exit_code") is not None else "-"),
+            exit_code=str(
+                state.get("exit_code", "-")
+                if state.get("exit_code") is not None
+                else "-"
+            ),
             violation=str(state.get("violation_code", "") or "-"),
         ),
         highlight=False,
     )
-    console.print(f"command={str(state.get('root_command', '') or '-')}", highlight=False)
+    console.print(
+        f"command={str(state.get('root_command', '') or '-')}", highlight=False
+    )
     console.print(
         "repo_start={repo_start} branch_start={branch_start} head_start={head_start} repo_end={repo_end} branch_end={branch_end} head_end={head_end}".format(
-            repo_start=str((state.get("start_snapshot") or {}).get("repo_root", "") or state.get("repo_root", "") or "-"),
-            branch_start=str(state.get("branch_start", "") or (state.get("start_snapshot") or {}).get("branch", "") or "-"),
-            head_start=str(state.get("head_start", "") or (state.get("start_snapshot") or {}).get("head", "") or "-"),
-            repo_end=str((state.get("end_snapshot") or {}).get("repo_root", "") or state.get("repo_root", "") or "-"),
-            branch_end=str(state.get("branch_end", "") or (state.get("end_snapshot") or {}).get("branch", "") or "-"),
-            head_end=str(state.get("head_end", "") or (state.get("end_snapshot") or {}).get("head", "") or "-"),
+            repo_start=str(
+                (state.get("start_snapshot") or {}).get("repo_root", "")
+                or state.get("repo_root", "")
+                or "-"
+            ),
+            branch_start=str(
+                state.get("branch_start", "")
+                or (state.get("start_snapshot") or {}).get("branch", "")
+                or "-"
+            ),
+            head_start=str(
+                state.get("head_start", "")
+                or (state.get("start_snapshot") or {}).get("head", "")
+                or "-"
+            ),
+            repo_end=str(
+                (state.get("end_snapshot") or {}).get("repo_root", "")
+                or state.get("repo_root", "")
+                or "-"
+            ),
+            branch_end=str(
+                state.get("branch_end", "")
+                or (state.get("end_snapshot") or {}).get("branch", "")
+                or "-"
+            ),
+            head_end=str(
+                state.get("head_end", "")
+                or (state.get("end_snapshot") or {}).get("head", "")
+                or "-"
+            ),
         ),
         highlight=False,
     )
@@ -2472,17 +2803,29 @@ def inspect_track_session(session_id: str = "", *, replay: bool = False, tail_ev
         console.print(f"events={event_stream_path}", highlight=False)
 
     events = _load_transcript_events(transcript_path) if transcript_path else []
-    session_events = _load_session_events(event_stream_path) if event_stream_path else []
+    session_events = (
+        _load_session_events(event_stream_path) if event_stream_path else []
+    )
     if replay:
         if not events:
             console.print("transcript_replay=unavailable", highlight=False)
         else:
             console.print(f"transcript_replay_events={len(events)}", highlight=False)
-            chunks = [event["data"].decode("utf-8", errors="replace") for event in events if bytes(event.get("data", b""))]
+            chunks = [
+                event["data"].decode("utf-8", errors="replace")
+                for event in events
+                if bytes(event.get("data", b""))
+            ]
             console.print("".join(chunks), highlight=False, soft_wrap=True)
     else:
-        pty_events = [event for event in events if str(event.get("direction", "") or "") == "pty"]
-        stdin_events = [event for event in events if str(event.get("direction", "") or "") == "stdin"]
+        pty_events = [
+            event for event in events if str(event.get("direction", "") or "") == "pty"
+        ]
+        stdin_events = [
+            event
+            for event in events
+            if str(event.get("direction", "") or "") == "stdin"
+        ]
         console.print(
             "transcript_events={total} pty_events={pty_count} stdin_events={stdin_count}".format(
                 total=len(events),
@@ -2491,7 +2834,11 @@ def inspect_track_session(session_id: str = "", *, replay: bool = False, tail_ev
             ),
             highlight=False,
         )
-        tail = events[-max(1, int(tail_events or TRACK_INSPECT_TAIL_EVENTS)) :] if events else []
+        tail = (
+            events[-max(1, int(tail_events or TRACK_INSPECT_TAIL_EVENTS)) :]
+            if events
+            else []
+        )
         for idx, event in enumerate(tail, start=1):
             preview = _format_debug_preview(bytes(event.get("data", b"")))
             console.print(
@@ -2499,7 +2846,10 @@ def inspect_track_session(session_id: str = "", *, replay: bool = False, tail_ev
                 highlight=False,
             )
         console.print(f"session_events={len(session_events)}", highlight=False)
-        for idx, event in enumerate(session_events[-max(1, int(tail_events or TRACK_INSPECT_TAIL_EVENTS)) :], start=1):
+        for idx, event in enumerate(
+            session_events[-max(1, int(tail_events or TRACK_INSPECT_TAIL_EVENTS)) :],
+            start=1,
+        ):
             payload = dict(event.get("payload", {}) or {})
             preview = ""
             if isinstance(payload.get("data"), (bytes, bytearray)):
@@ -2532,12 +2882,18 @@ def inspect_track_session(session_id: str = "", *, replay: bool = False, tail_ev
             highlight=False,
         )
         suspicious_events = list(aggregate.get("suspicious_events", []) or [])
-        console.print(f"suspicious_events={','.join(str(item) for item in suspicious_events) or '-'}", highlight=False)
+        console.print(
+            f"suspicious_events={','.join(str(item) for item in suspicious_events) or '-'}",
+            highlight=False,
+        )
     if changes:
         console.print(
             "files_changed={count} file_list={files}".format(
                 count=len(list(changes.get("files_changed", []) or [])),
-                files=",".join(str(item) for item in list(changes.get("files_changed", []) or [])) or "-",
+                files=",".join(
+                    str(item) for item in list(changes.get("files_changed", []) or [])
+                )
+                or "-",
             ),
             highlight=False,
         )
@@ -2562,7 +2918,11 @@ def inspect_track_session(session_id: str = "", *, replay: bool = False, tail_ev
             console.print(
                 "run label={label} exit={exit_code} detached={detached} command={command}".format(
                     label=str(row.get("label", "") or "-"),
-                    exit_code=str(row.get("exit_code", "-") if row.get("exit_code") is not None else "-"),
+                    exit_code=str(
+                        row.get("exit_code", "-")
+                        if row.get("exit_code") is not None
+                        else "-"
+                    ),
                     detached="1" if payload.get("track_process_detached") else "0",
                     command=str(row.get("command", "") or "-"),
                 ),
@@ -2615,7 +2975,10 @@ def _build_startup_terminal_lines(
 ) -> list[str]:
     line = f"agensic session id {session_id}"
     if replay_metadata:
-        branch_name = str(replay_metadata.get("fork_branch", "") or "").strip() or "the time-travel branch"
+        branch_name = (
+            str(replay_metadata.get("fork_branch", "") or "").strip()
+            or "the time-travel branch"
+        )
         line += (
             f" / {TRACK_TIME_TRAVEL_BANNER_COLOR_SEQ}"
             "Time Travel activated. A new branch called "
@@ -2776,7 +3139,15 @@ def _command_runs_git_commit(command_text: str) -> bool:
                 return False
             return _command_runs_git_commit(tokens[index + 1])
 
-    options_with_values = {"-c", "-C", "--git-dir", "--work-tree", "--namespace", "--super-prefix", "--config-env"}
+    options_with_values = {
+        "-c",
+        "-C",
+        "--git-dir",
+        "--work-tree",
+        "--namespace",
+        "--super-prefix",
+        "--config-env",
+    }
     for index, token in enumerate(tokens):
         if os.path.basename(token) != "git":
             continue
@@ -2872,7 +3243,13 @@ def _write_session_event(
         "session_id": str(session_id or "").strip(),
         "seq": int(seq),
         "ts_wall": round(time.time(), 6),
-        "ts_monotonic_ms": int(max(0.0, (time.monotonic() - float(started_monotonic or time.monotonic())) * 1000.0)),
+        "ts_monotonic_ms": int(
+            max(
+                0.0,
+                (time.monotonic() - float(started_monotonic or time.monotonic()))
+                * 1000.0,
+            )
+        ),
         "type": str(event_type or "").strip(),
         "payload": dict(payload or {}),
     }
@@ -2944,16 +3321,28 @@ def _read_live_process_tree(root_pid: int) -> dict[int, dict[str, Any]]:
 
     if root_session_id > 0 or root_process_group_id > 0:
         try:
-            for proc in psutil.process_iter():
-                pid = int(getattr(proc, "pid", 0) or 0)
+            for proc in psutil.process_iter(attrs=["pid", "ppid", "status"]):
+                try:
+                    pid = int(proc.pid)
+                except (psutil.NoSuchProcess, psutil.ZombieProcess):
+                    continue
+                except Exception:
+                    continue
                 if pid <= 0 or pid in processes_by_pid:
                     continue
-                session_id = _safe_getsid(pid)
-                process_group_id = _safe_getpgid(pid)
-                if (
-                    root_session_id > 0
-                    and session_id == root_session_id
-                ) or (
+                try:
+                    session_id = _safe_getsid(pid)
+                    process_group_id = _safe_getpgid(pid)
+                except (
+                    psutil.NoSuchProcess,
+                    psutil.ZombieProcess,
+                    OSError,
+                    PermissionError,
+                ):
+                    continue
+                except Exception:
+                    continue
+                if (root_session_id > 0 and session_id == root_session_id) or (
                     root_process_group_id > 0
                     and process_group_id == root_process_group_id
                 ):
@@ -2970,7 +3359,11 @@ def _read_live_process_tree(root_pid: int) -> dict[int, dict[str, Any]]:
                 cwd = ""
                 try:
                     cwd = str(proc.cwd() or "").strip()
-                except (psutil.AccessDenied, psutil.NoSuchProcess, psutil.ZombieProcess):
+                except (
+                    psutil.AccessDenied,
+                    psutil.NoSuchProcess,
+                    psutil.ZombieProcess,
+                ):
                     cwd = ""
                 except Exception:
                     cwd = ""
@@ -2979,7 +3372,11 @@ def _read_live_process_tree(root_pid: int) -> dict[int, dict[str, Any]]:
                 started_at = 0.0
                 try:
                     started_at = float(proc.create_time() or 0.0)
-                except (psutil.AccessDenied, psutil.NoSuchProcess, psutil.ZombieProcess):
+                except (
+                    psutil.AccessDenied,
+                    psutil.NoSuchProcess,
+                    psutil.ZombieProcess,
+                ):
                     started_at = 0.0
                 except Exception:
                     started_at = 0.0
@@ -3009,7 +3406,9 @@ def _looks_like_unmanaged_terminal_launch(row: dict[str, Any]) -> bool:
     )
     if not haystack:
         return False
-    if "open -a" in haystack and any(token in haystack for token in TRACK_UNMANAGED_WINDOW_TOKENS):
+    if "open -a" in haystack and any(
+        token in haystack for token in TRACK_UNMANAGED_WINDOW_TOKENS
+    ):
         return True
     return any(token in haystack for token in TRACK_UNMANAGED_WINDOW_TOKENS)
 
@@ -3025,11 +3424,24 @@ def _looks_like_escape_primitive(row: dict[str, Any]) -> bool:
         return False
     if any(token in haystack for token in TRACK_ESCAPE_PRIMITIVE_TOKENS):
         return True
-    if "osascript" in haystack and "do script" in haystack and any(
-        token in haystack for token in (*TRACK_UNMANAGED_WINDOW_TOKENS, "terminal", "iterm", "warp", "ghostty")
+    if (
+        "osascript" in haystack
+        and "do script" in haystack
+        and any(
+            token in haystack
+            for token in (
+                *TRACK_UNMANAGED_WINDOW_TOKENS,
+                "terminal",
+                "iterm",
+                "warp",
+                "ghostty",
+            )
+        )
     ):
         return True
-    if "open -a" in haystack and any(token in haystack for token in TRACK_UNMANAGED_WINDOW_TOKENS):
+    if "open -a" in haystack and any(
+        token in haystack for token in TRACK_UNMANAGED_WINDOW_TOKENS
+    ):
         return True
     return False
 
@@ -3105,7 +3517,9 @@ class TrackRuntime:
         self.git_checkpoint_counter += 1
         return f"chkpt-{self.git_checkpoint_counter:04d}"
 
-    def emit_event(self, event_type: str, payload: dict[str, Any] | None = None) -> int | None:
+    def emit_event(
+        self, event_type: str, payload: dict[str, Any] | None = None
+    ) -> int | None:
         handle = self._event_handle
         if handle is None or bool(getattr(handle, "closed", False)):
             return None
@@ -3125,21 +3539,42 @@ class TrackRuntime:
             return None
         return seq
 
-    def capture_git_checkpoint(self, seq: int | None = None, *, reason: str = "") -> dict[str, Any] | None:
+    def capture_git_checkpoint(
+        self, seq: int | None = None, *, reason: str = ""
+    ) -> dict[str, Any] | None:
         handle = self._git_checkpoint_handle
-        repo_root = str(self.end_snapshot.get("repo_root", "") or self.start_snapshot.get("repo_root", "") or self.launch.working_directory)
+        repo_root = str(
+            self.end_snapshot.get("repo_root", "")
+            or self.start_snapshot.get("repo_root", "")
+            or self.launch.working_directory
+        )
         if handle is None or bool(getattr(handle, "closed", False)):
             return None
-        payload = _build_git_checkpoint_payload(repo_root, seq=int(seq or self._event_seq or 0), reason=reason)
+        payload = _build_git_checkpoint_payload(
+            repo_root, seq=int(seq or self._event_seq or 0), reason=reason
+        )
         if payload is None:
             return None
         current_head = str(payload.get("head", "") or "")
-        comparison_base_head = str(self.last_git_checkpoint_head or self.start_snapshot.get("head", "") or "")
+        comparison_base_head = str(
+            self.last_git_checkpoint_head or self.start_snapshot.get("head", "") or ""
+        )
         payload["comparison_base_head"] = comparison_base_head
-        if repo_root and comparison_base_head and current_head and comparison_base_head != current_head:
-            payload["committed_files"] = _git_changed_files_between(repo_root, comparison_base_head, current_head)
-            payload["committed_diff_stat"] = _git_diff_stat_between(repo_root, comparison_base_head, current_head)
-            payload["commits_created"] = _git_commits_between(repo_root, comparison_base_head, current_head)
+        if (
+            repo_root
+            and comparison_base_head
+            and current_head
+            and comparison_base_head != current_head
+        ):
+            payload["committed_files"] = _git_changed_files_between(
+                repo_root, comparison_base_head, current_head
+            )
+            payload["committed_diff_stat"] = _git_diff_stat_between(
+                repo_root, comparison_base_head, current_head
+            )
+            payload["commits_created"] = _git_commits_between(
+                repo_root, comparison_base_head, current_head
+            )
         else:
             payload["committed_files"] = []
             payload["committed_diff_stat"] = ""
@@ -3156,11 +3591,23 @@ class TrackRuntime:
                 "branch": str(payload.get("branch", "") or ""),
                 "head": str(payload.get("head", "") or ""),
                 "comparison_base_head": comparison_base_head,
-                "committed_diff_stat": str(payload.get("committed_diff_stat", "") or ""),
-                "committed_files": [str(item) for item in payload.get("committed_files", []) if str(item)],
+                "committed_diff_stat": str(
+                    payload.get("committed_diff_stat", "") or ""
+                ),
+                "committed_files": [
+                    str(item)
+                    for item in payload.get("committed_files", [])
+                    if str(item)
+                ],
                 "worktree_diff_stat": str(payload.get("worktree_diff_stat", "") or ""),
-                "changed_files": [str(item) for item in payload.get("changed_files", []) if str(item)],
-                "untracked_paths": [str(item) for item in payload.get("untracked_paths", []) if str(item)],
+                "changed_files": [
+                    str(item) for item in payload.get("changed_files", []) if str(item)
+                ],
+                "untracked_paths": [
+                    str(item)
+                    for item in payload.get("untracked_paths", [])
+                    if str(item)
+                ],
             },
         )
         payload["checkpoint_id"] = checkpoint_id
@@ -3181,7 +3628,11 @@ class TrackRuntime:
         end_snapshot = dict(self.end_snapshot or {})
         self.state_store.upsert_session_summary(
             session_id=self.session_id,
-            repo_root=str(end_snapshot.get("repo_root", "") or start_snapshot.get("repo_root", "") or ""),
+            repo_root=str(
+                end_snapshot.get("repo_root", "")
+                or start_snapshot.get("repo_root", "")
+                or ""
+            ),
             branch_start=str(start_snapshot.get("branch", "") or ""),
             branch_end=str(end_snapshot.get("branch", "") or ""),
             head_start=str(start_snapshot.get("head", "") or ""),
@@ -3206,11 +3657,19 @@ class TrackRuntime:
             if command.startswith("git push") or " git push" in command:
                 push_attempts += 1
 
-        repo_root = str(self.end_snapshot.get("repo_root", "") or self.start_snapshot.get("repo_root", "") or "")
+        repo_root = str(
+            self.end_snapshot.get("repo_root", "")
+            or self.start_snapshot.get("repo_root", "")
+            or ""
+        )
         head_start = str(self.start_snapshot.get("head", "") or "")
         head_end = str(self.end_snapshot.get("head", "") or "")
         committed_files = _git_changed_files_between(repo_root, head_start, head_end)
-        worktree_files = [str(item) for item in self.end_snapshot.get("changed_files", []) if str(item)]
+        worktree_files = [
+            str(item)
+            for item in self.end_snapshot.get("changed_files", [])
+            if str(item)
+        ]
         files_changed = sorted({*committed_files, *worktree_files})
         commits_created = _git_commits_between(repo_root, head_start, head_end)
 
@@ -3222,19 +3681,25 @@ class TrackRuntime:
             "commits_created": len(commits_created),
             "transcript_event_count": int(self.transcript_event_count),
             "structured_event_count": int(self._event_seq),
-            "suspicious_events": [item for item in self.violation_code.split(",") if item],
+            "suspicious_events": [
+                item for item in self.violation_code.split(",") if item
+            ],
         }
         changes = {
             "files_changed": files_changed,
             "committed_files": committed_files,
             "worktree_files": worktree_files,
-            "committed_diff_stat": _git_diff_stat_between(repo_root, head_start, head_end),
+            "committed_diff_stat": _git_diff_stat_between(
+                repo_root, head_start, head_end
+            ),
             "worktree_diff_stat": str(self.end_snapshot.get("diff_stat", "") or ""),
             "commits_created": commits_created,
         }
         return (aggregate, changes)
 
-    def session_payload(self, status: str, *, exit_code: int | None = None) -> dict[str, Any]:
+    def session_payload(
+        self, status: str, *, exit_code: int | None = None
+    ) -> dict[str, Any]:
         payload = {
             "session_id": self.session_id,
             "status": str(status or "").strip().lower(),
@@ -3296,7 +3761,9 @@ class TrackRuntime:
             self.violation_code = ",".join(existing)
         self.emit_event("violation.noted", {"code": clean})
         state = self.state_store.get_tracked_session(self.session_id) or {}
-        current_status = str(state.get("status", "") or "active").strip().lower() or "active"
+        current_status = (
+            str(state.get("status", "") or "active").strip().lower() or "active"
+        )
         self.persist_state(current_status)
 
     def _record_command_provenance_via_daemon(
@@ -3323,11 +3790,16 @@ class TrackRuntime:
                 },
             )
         except Exception as exc:
-            self.emit_event("command.record_failed", {"pid": int(proc.pid), "reason": f"daemon_unreachable:{exc}"})
+            self.emit_event(
+                "command.record_failed",
+                {"pid": int(proc.pid), "reason": f"daemon_unreachable:{exc}"},
+            )
             return None
         if response.status_code != 200:
             reason = f"daemon_status_{response.status_code}"
-            self.emit_event("command.record_failed", {"pid": int(proc.pid), "reason": reason})
+            self.emit_event(
+                "command.record_failed", {"pid": int(proc.pid), "reason": reason}
+            )
             return None
         try:
             body = response.json()
@@ -3335,8 +3807,13 @@ class TrackRuntime:
             body = {}
         status = str(body.get("status", "") or "").strip().lower()
         if status != "ok":
-            reason = str(body.get("reason", "") or "daemon_rejected").strip().lower() or "daemon_rejected"
-            self.emit_event("command.record_failed", {"pid": int(proc.pid), "reason": reason})
+            reason = (
+                str(body.get("reason", "") or "daemon_rejected").strip().lower()
+                or "daemon_rejected"
+            )
+            self.emit_event(
+                "command.record_failed", {"pid": int(proc.pid), "reason": reason}
+            )
             return None
         return "AI_EXECUTED"
 
@@ -3364,19 +3841,26 @@ class TrackRuntime:
                 pid=-(self.root_pid * 1000 + index),
                 ppid=self.root_pid,
                 command=command,
-                working_directory=proc.working_directory or self.launch.working_directory,
+                working_directory=proc.working_directory
+                or self.launch.working_directory,
                 started_at=float(proc.started_at or time.time()),
                 session_id=self.root_session_id,
                 process_group_id=self.root_process_group_id,
             )
             self.finalize_process(synthetic, exit_code=synthetic_exit_code)
 
-    def _record_missing_session_escape(self, proc: ObservedProcess, *, exit_code: int | None = None) -> None:
+    def _record_missing_session_escape(
+        self, proc: ObservedProcess, *, exit_code: int | None = None
+    ) -> None:
         if proc.pid != self.root_pid:
             return
         if not _shell_script_indicates_session_escape(proc.command):
             return
-        if any(item.session_escape for item in self.processes.values() if item.pid != self.root_pid):
+        if any(
+            item.session_escape
+            for item in self.processes.values()
+            if item.pid != self.root_pid
+        ):
             return
         self.note_violation("session_boundary_escape")
         script = _shell_eval_script(proc.command) or proc.command
@@ -3393,13 +3877,17 @@ class TrackRuntime:
         synthetic_exit_code = 0 if int(exit_code or 0) == 0 else None
         self.finalize_process(synthetic, exit_code=synthetic_exit_code)
 
-    def finalize_process(self, proc: ObservedProcess, *, exit_code: int | None = None) -> None:
+    def finalize_process(
+        self, proc: ObservedProcess, *, exit_code: int | None = None
+    ) -> None:
         if proc.finalized:
             return
         proc.finalized = True
         self._record_missing_shell_background_commands(proc, exit_code=exit_code)
         self._record_missing_session_escape(proc, exit_code=exit_code)
-        duration_ms = max(0, int((time.time() - float(proc.started_at or time.time())) * 1000.0))
+        duration_ms = max(
+            0, int((time.time() - float(proc.started_at or time.time())) * 1000.0)
+        )
         working_directory = proc.working_directory or self.launch.working_directory
         trace_id = f"track-{self.session_id}-{proc.pid}"
         ts = int(time.time())
@@ -3436,9 +3924,15 @@ class TrackRuntime:
             "proof_trace": trace_id,
             "proof_timestamp": ts,
             "proof_signature": signature,
-            "proof_signer_scope": str(proof_metadata.get("proof_signer_scope", "") or ""),
-            "proof_key_fingerprint": str(proof_metadata.get("proof_key_fingerprint", "") or ""),
-            "proof_host_fingerprint": str(proof_metadata.get("proof_host_fingerprint", "") or ""),
+            "proof_signer_scope": str(
+                proof_metadata.get("proof_signer_scope", "") or ""
+            ),
+            "proof_key_fingerprint": str(
+                proof_metadata.get("proof_key_fingerprint", "") or ""
+            ),
+            "proof_host_fingerprint": str(
+                proof_metadata.get("proof_host_fingerprint", "") or ""
+            ),
             "track_session_id": self.session_id,
             "track_session_capability": self.session_capability,
             "track_root_pid": self.root_pid,
@@ -3490,7 +3984,9 @@ class TrackRuntime:
         self._emit_runtime_git_commits(proc, exit_code=exit_code)
         self.capture_git_checkpoint(reason=f"process_exit:{int(proc.pid)}")
 
-    def _emit_runtime_git_commits(self, proc: ObservedProcess, *, exit_code: int | None = None) -> None:
+    def _emit_runtime_git_commits(
+        self, proc: ObservedProcess, *, exit_code: int | None = None
+    ) -> None:
         if int(exit_code or 0) != 0:
             return
         command_text = str(proc.command or "").strip()
@@ -3516,7 +4012,9 @@ class TrackRuntime:
         self.last_observed_head = current_head
 
 
-def _scan_tracked_process_tree(runtime: TrackRuntime, detached_finalize_deadline: float) -> tuple[float, bool]:
+def _scan_tracked_process_tree(
+    runtime: TrackRuntime, detached_finalize_deadline: float
+) -> tuple[float, bool]:
     descendants = _read_live_process_tree(runtime.root_pid)
     descendant_ids = set(descendants.keys())
 
@@ -3526,8 +4024,10 @@ def _scan_tracked_process_tree(runtime: TrackRuntime, detached_finalize_deadline
             runtime.processes[pid] = ObservedProcess(
                 pid=pid,
                 ppid=int(row.get("ppid", 0) or 0),
-                command=str(row.get("args", "") or "").strip() or str(row.get("comm", "") or "").strip(),
-                working_directory=str(row.get("working_directory", "") or "").strip() or _best_effort_cwd(pid),
+                command=str(row.get("args", "") or "").strip()
+                or str(row.get("comm", "") or "").strip(),
+                working_directory=str(row.get("working_directory", "") or "").strip()
+                or _best_effort_cwd(pid),
                 started_at=float(row.get("started_at", 0.0) or time.time()),
                 session_id=int(row.get("session_id", 0) or 0),
                 process_group_id=int(row.get("process_group_id", 0) or 0),
@@ -3552,16 +4052,25 @@ def _scan_tracked_process_tree(runtime: TrackRuntime, detached_finalize_deadline
                     },
                 )
         else:
-            command = str(row.get("args", "") or "").strip() or str(row.get("comm", "") or "").strip()
+            command = (
+                str(row.get("args", "") or "").strip()
+                or str(row.get("comm", "") or "").strip()
+            )
             if command and (not existing.command or existing.command.startswith("(")):
                 existing.command = command
             working_directory = str(row.get("working_directory", "") or "").strip()
             if working_directory:
                 existing.working_directory = working_directory
             existing.ppid = int(row.get("ppid", 0) or existing.ppid or 0)
-            existing.session_id = int(row.get("session_id", 0) or existing.session_id or 0)
-            existing.process_group_id = int(row.get("process_group_id", 0) or existing.process_group_id or 0)
-        if pid != runtime.root_pid and _leaves_allowed_session(row, root_session_id=runtime.root_session_id):
+            existing.session_id = int(
+                row.get("session_id", 0) or existing.session_id or 0
+            )
+            existing.process_group_id = int(
+                row.get("process_group_id", 0) or existing.process_group_id or 0
+            )
+        if pid != runtime.root_pid and _leaves_allowed_session(
+            row, root_session_id=runtime.root_session_id
+        ):
             existing.session_escape = True
             runtime.note_violation("session_boundary_escape")
         if _looks_like_escape_primitive(row):
@@ -3580,7 +4089,10 @@ def _scan_tracked_process_tree(runtime: TrackRuntime, detached_finalize_deadline
         if _is_pid_alive(pid):
             proc.detached = True
             runtime.note_violation("detached_descendants")
-            if detached_finalize_deadline > 0 and time.monotonic() >= detached_finalize_deadline:
+            if (
+                detached_finalize_deadline > 0
+                and time.monotonic() >= detached_finalize_deadline
+            ):
                 runtime.finalize_process(proc, exit_code=None)
             continue
         exit_code = runtime.root_exit_code if pid == runtime.root_pid else None
@@ -3746,7 +4258,9 @@ def run_tracked_command(
     runtime.persist_state("active")
     runtime.persist_summary()
 
-    watcher = threading.Thread(target=_watch_tracked_process_tree, args=(runtime,), daemon=True)
+    watcher = threading.Thread(
+        target=_watch_tracked_process_tree, args=(runtime,), daemon=True
+    )
     watcher_started = False
     watcher.start()
     watcher_started = True
@@ -3766,7 +4280,9 @@ def run_tracked_command(
         if sys.stdin.isatty():
             stdin_fd = sys.stdin.fileno()
             stdout_fd = sys.stdout.fileno()
-            for line in _build_startup_terminal_lines(session_id, replay_metadata=replay_metadata):
+            for line in _build_startup_terminal_lines(
+                session_id, replay_metadata=replay_metadata
+            ):
                 console.print(_render_startup_terminal_line(line), highlight=False)
             old_tty = termios.tcgetattr(stdin_fd)
             tty.setraw(stdin_fd)
@@ -3779,11 +4295,15 @@ def run_tracked_command(
             resize_handler = signal.getsignal(signal.SIGWINCH)
             signal.signal(signal.SIGWINCH, _on_resize)
 
-        with open(transcript_path, "a", encoding="utf-8") as transcript, open(
-            event_stream_path,
-            "a",
-            encoding="utf-8",
-        ) as event_stream, open(git_checkpoint_path, "a", encoding="utf-8") as git_checkpoint_stream:
+        with (
+            open(transcript_path, "a", encoding="utf-8") as transcript,
+            open(
+                event_stream_path,
+                "a",
+                encoding="utf-8",
+            ) as event_stream,
+            open(git_checkpoint_path, "a", encoding="utf-8") as git_checkpoint_stream,
+        ):
             checkpoint_recorder = _start_checkpoint_recorder(checkpoint_path)
             runtime.set_event_handle(event_stream)
             runtime.set_git_checkpoint_handle(git_checkpoint_stream)
@@ -3799,7 +4319,9 @@ def run_tracked_command(
             runtime.emit_event("git.snapshot.start", dict(runtime.start_snapshot))
             runtime.capture_git_checkpoint(reason="session_start")
             if replay_metadata:
-                runtime.emit_event("session.replayed_from_checkpoint", dict(replay_metadata))
+                runtime.emit_event(
+                    "session.replayed_from_checkpoint", dict(replay_metadata)
+                )
             if pending_initial_winsize is not None:
                 rows, cols = pending_initial_winsize
                 seq = runtime.emit_event(
@@ -3835,7 +4357,10 @@ def run_tracked_command(
                 if stdin_fd is not None and resize_pending:
                     resize_pending = False
                     next_winsize = _apply_winsize(master_fd, stdin_fd)
-                    if next_winsize is not None and next_winsize != last_transcript_winsize:
+                    if (
+                        next_winsize is not None
+                        and next_winsize != last_transcript_winsize
+                    ):
                         rows, cols = next_winsize
                         seq = runtime.emit_event(
                             "terminal.resize",
@@ -3871,7 +4396,9 @@ def run_tracked_command(
                             "terminal.stdin",
                             {
                                 "stream": "stdin",
-                                "data_b64": base64.b64encode(bytes(data)).decode("ascii"),
+                                "data_b64": base64.b64encode(bytes(data)).decode(
+                                    "ascii"
+                                ),
                                 "size": len(data),
                             },
                         )
@@ -3892,7 +4419,9 @@ def run_tracked_command(
                             "terminal.stdout",
                             {
                                 "stream": "stdout",
-                                "data_b64": base64.b64encode(bytes(data)).decode("ascii"),
+                                "data_b64": base64.b64encode(bytes(data)).decode(
+                                    "ascii"
+                                ),
                                 "size": len(data),
                             },
                         )
@@ -3912,7 +4441,9 @@ def run_tracked_command(
 
                 exit_code = proc.poll()
                 if exit_code is not None:
-                    runtime.root_exit_code = int(128 + abs(exit_code)) if exit_code < 0 else int(exit_code)
+                    runtime.root_exit_code = (
+                        int(128 + abs(exit_code)) if exit_code < 0 else int(exit_code)
+                    )
                     checkpoint_recorder = _drain_master_output(
                         master_fd,
                         transcript,
@@ -3925,21 +4456,33 @@ def run_tracked_command(
             if watcher_started:
                 watcher.join(timeout=5.0)
                 watcher_started = False
-            runtime.end_snapshot = _capture_repo_snapshot(runtime.launch.working_directory)
+            runtime.end_snapshot = _capture_repo_snapshot(
+                runtime.launch.working_directory
+            )
             session_has_git_commit_command = _session_has_git_commit_command(runtime)
             for commit in _git_commits_between(
-                str(runtime.end_snapshot.get("repo_root", "") or runtime.start_snapshot.get("repo_root", "") or ""),
+                str(
+                    runtime.end_snapshot.get("repo_root", "")
+                    or runtime.start_snapshot.get("repo_root", "")
+                    or ""
+                ),
                 str(runtime.start_snapshot.get("head", "") or ""),
                 str(runtime.end_snapshot.get("head", "") or ""),
             ):
                 sha = str(commit.get("sha", "") or "").strip()
                 if not sha or sha in runtime.emitted_commit_shas:
                     continue
-                event_type = "git.commit.created" if session_has_git_commit_command else "git.commit.sess_sync"
+                event_type = (
+                    "git.commit.created"
+                    if session_has_git_commit_command
+                    else "git.commit.sess_sync"
+                )
                 runtime.emit_event(event_type, commit)
                 runtime.capture_git_checkpoint(reason=f"commit_created:{sha}")
                 runtime.emitted_commit_shas.add(sha)
-            runtime.last_observed_head = str(runtime.end_snapshot.get("head", "") or runtime.last_observed_head or "")
+            runtime.last_observed_head = str(
+                runtime.end_snapshot.get("head", "") or runtime.last_observed_head or ""
+            )
             runtime.emit_event("git.snapshot.end", dict(runtime.end_snapshot))
             runtime.capture_git_checkpoint(reason="session_end")
             runtime.emit_event(
@@ -3981,8 +4524,15 @@ def run_tracked_command(
     runtime.event_stream_path = event_stream_path
 
     final_state = state_store.get_tracked_session(session_id) or _load_track_state()
-    final_status = "stopped" if str(final_state.get("status", "") or "").strip().lower() == "stopping" else "exited"
-    runtime.persist_state(final_status, exit_code=runtime.root_exit_code if runtime.root_exit_code is not None else 1)
+    final_status = (
+        "stopped"
+        if str(final_state.get("status", "") or "").strip().lower() == "stopping"
+        else "exited"
+    )
+    runtime.persist_state(
+        final_status,
+        exit_code=runtime.root_exit_code if runtime.root_exit_code is not None else 1,
+    )
     if session_name:
         state_store.rename_tracked_session(session_id, session_name)
     state_store.clear_tracked_session_capability(session_id)
@@ -3991,7 +4541,14 @@ def run_tracked_command(
         aggregate = dict(aggregate or {})
         aggregate["replay_metadata"] = dict(replay_metadata)
     runtime.persist_summary(aggregate=aggregate, changes=changes)
-    _prune_tracked_transcripts(exclude_paths={transcript_path, event_stream_path, checkpoint_path, git_checkpoint_path})
+    _prune_tracked_transcripts(
+        exclude_paths={
+            transcript_path,
+            event_stream_path,
+            checkpoint_path,
+            git_checkpoint_path,
+        }
+    )
     _refresh_track_state_cache()
     return int(runtime.root_exit_code if runtime.root_exit_code is not None else 1)
 
@@ -4046,8 +4603,12 @@ def launch_tracked_command_async(
             return {
                 "status": "ok",
                 "session_id": session_id,
-                "working_directory": str(active.get("working_directory", "") or launch.working_directory),
-                "root_command": str(active.get("root_command", "") or launch.root_command),
+                "working_directory": str(
+                    active.get("working_directory", "") or launch.working_directory
+                ),
+                "root_command": str(
+                    active.get("root_command", "") or launch.root_command
+                ),
             }
         time.sleep(0.02)
     return {
