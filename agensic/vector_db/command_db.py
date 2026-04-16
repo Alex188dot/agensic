@@ -10,7 +10,6 @@ import subprocess
 import threading
 import time
 from collections import defaultdict, OrderedDict
-from functools import partial
 from pathlib import Path
 from typing import Dict, List, Optional, Tuple
 import torch
@@ -34,6 +33,17 @@ from agensic.utils.shell import (
     strip_leading_agensic_env_assignments,
     token_has_short_flag,
 )
+
+
+def _clear_gpu_cache() -> None:
+    try:
+        if torch.cuda.is_available():
+            torch.cuda.empty_cache()
+        elif torch.backends.mps.is_available():
+            torch.mps.empty_cache()
+    except Exception:
+        pass
+
 
 # Tell HuggingFace to avoid implicit network checks by default.
 os.environ["HF_HUB_OFFLINE"] = "1"
@@ -1774,6 +1784,7 @@ class CommandVectorDB:
                     self.collection.insert(docs[i : i + batch_size])
 
             self.inserted_commands.update(new_commands)
+            _clear_gpu_cache()
             logger.info(f"Successfully inserted {len(docs)} commands")
             return len(docs)
         except Exception as exc:
@@ -1892,6 +1903,7 @@ class CommandVectorDB:
                     for i in range(0, len(docs), batch_size):
                         self.collection.insert(docs[i : i + batch_size])
                 self.inserted_commands.update(new_commands)
+                _clear_gpu_cache()
 
             return updated + len(new_commands)
         except Exception as exc:
@@ -3210,6 +3222,7 @@ class CommandVectorDB:
 
             self.model = None
             gc.collect()
+            _clear_gpu_cache()
             logger.info("Vector database closed successfully")
         except Exception as exc:
             logger.error(f"Error closing vector database: {exc}")
