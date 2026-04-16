@@ -119,6 +119,7 @@ elif [ -f "$TUI_MANIFEST_PATH" ]; then
 fi
 
 if [ -x "$LOCAL_TUI_BIN" ]; then
+    rm -f "$INSTALL_BIN_DIR/agensic-tuis"
     cp "$LOCAL_TUI_BIN" "$INSTALL_BIN_DIR/agensic-tuis"
     chmod +x "$INSTALL_BIN_DIR/agensic-tuis"
     echo "✅ Installed local TUI sidecar to $INSTALL_BIN_DIR"

@@ -20,6 +20,7 @@ import re
 import select
 from typing import Any
 from pathlib import Path
+
 try:
     import termios  # type: ignore
 except Exception:
@@ -51,7 +52,12 @@ from agensic.config.auth import (
     rotate_auth_token,
 )
 from agensic.engine.provenance import build_local_proof_metadata, sign_proof_payload
-from agensic.paths import APP_PATHS, LEGACY_ROOT_DIR, ensure_app_layout, migrate_legacy_layout
+from agensic.paths import (
+    APP_PATHS,
+    LEGACY_ROOT_DIR,
+    ensure_app_layout,
+    migrate_legacy_layout,
+)
 from agensic.utils import (
     atomic_write_json_private,
     atomic_write_text_private,
@@ -59,7 +65,10 @@ from agensic.utils import (
     ensure_private_dir,
     harden_private_tree,
 )
-from agensic.utils.shell import current_shell_name, strip_leading_agensic_env_assignments
+from agensic.utils.shell import (
+    current_shell_name,
+    strip_leading_agensic_env_assignments,
+)
 
 try:
     import questionary
@@ -81,6 +90,7 @@ except Exception as exc:
     merge_styles_default = None
     utils = None
     QUESTIONARY_IMPORT_ERROR = exc
+
 
 class AgensicRootGroup(TyperGroup):
     _AUTH_HELP_ALIASES = ("auth rotate", "auth status")
@@ -122,8 +132,12 @@ class AgensicRootGroup(TyperGroup):
 
 
 app = typer.Typer(add_completion=False, cls=AgensicRootGroup)
-provenance_registry_app = typer.Typer(add_completion=False, help="Manage provenance agent registry")
-ai_session_app = typer.Typer(add_completion=False, help="Manage AI session signing context")
+provenance_registry_app = typer.Typer(
+    add_completion=False, help="Manage provenance agent registry"
+)
+ai_session_app = typer.Typer(
+    add_completion=False, help="Manage AI session signing context"
+)
 auth_app = typer.Typer(add_completion=False, help="Manage local API auth token")
 app.add_typer(provenance_registry_app, name="provenance-registry", hidden=True)
 app.add_typer(ai_session_app, name="ai-session", hidden=True)
@@ -142,7 +156,9 @@ LEGACY_BRAND = "".join(("ghost", "shell"))
 LEGACY_CLI_NAME = "".join(("ai", "terminal"))
 LEGACY_CONFIG_DIR = LEGACY_ROOT_DIR
 LEGACY_PID_FILE = os.path.join(LEGACY_CONFIG_DIR, "daemon.pid")
-UNINSTALL_SENTINEL = os.path.join(tempfile.gettempdir(), f"agensic-shell-uninstalled-{os.getuid()}")
+UNINSTALL_SENTINEL = os.path.join(
+    tempfile.gettempdir(), f"agensic-shell-uninstalled-{os.getuid()}"
+)
 PROJECT_ROOT = str(Path(__file__).resolve().parents[2])
 SERVER_SCRIPT = os.path.join(PROJECT_ROOT, "server.py")
 SHELL_CLIENT_SCRIPT = (
@@ -151,7 +167,9 @@ SHELL_CLIENT_SCRIPT = (
     else os.path.join(PROJECT_ROOT, "shell_client.py")
 )
 PLIST_PATH = os.path.expanduser("~/Library/LaunchAgents/com.agensic.daemon.plist")
-LEGACY_PLIST_PATH = os.path.expanduser(f"~/Library/LaunchAgents/com.{LEGACY_BRAND}.daemon.plist")
+LEGACY_PLIST_PATH = os.path.expanduser(
+    f"~/Library/LaunchAgents/com.{LEGACY_BRAND}.daemon.plist"
+)
 SYSTEMD_USER_DIR = os.path.expanduser("~/.config/systemd/user")
 SYSTEMD_UNIT_PATH = os.path.join(SYSTEMD_USER_DIR, "agensic-daemon.service")
 LOCKS_DIR = APP_PATHS.locks_dir
@@ -177,7 +195,9 @@ ALT_SCREEN_EXIT_SEQ = "\x1b[?1049l"
 DEFAULT_TUIS_MANIFEST_URL = (
     "https://github.com/Alex188dot/agensic/releases/latest/download/tuis_manifest.json"
 )
-DEFAULT_RELEASE_API_URL = "https://api.github.com/repos/Alex188dot/agensic/releases/latest"
+DEFAULT_RELEASE_API_URL = (
+    "https://api.github.com/repos/Alex188dot/agensic/releases/latest"
+)
 VERSION_CHECK_TIMEOUT_SECONDS = 4.0
 VERSION_CACHE_TTL_SECONDS = 6 * 60 * 60
 PUBLISHED_TUIS_PLATFORMS = {"darwin-arm64"}
@@ -209,6 +229,7 @@ def _run_command_passthrough(args: list[str]) -> int:
                 process.wait()
         return int(process.returncode or 130)
 
+
 class _BackSignal:
     pass
 
@@ -221,7 +242,8 @@ def _require_questionary() -> None:
         return
     detail = f": {QUESTIONARY_IMPORT_ERROR}" if QUESTIONARY_IMPORT_ERROR else ""
     raise RuntimeError(
-        "Interactive CLI features require the optional 'questionary' dependency" + detail
+        "Interactive CLI features require the optional 'questionary' dependency"
+        + detail
     )
 
 
@@ -243,11 +265,15 @@ def _print_screen_heading(title: str) -> None:
 
 def _print_setup_banner(title: str = "Agensic Configuration") -> None:
     console.print(
-        Panel.fit(f"[bold cyan]{title}[/bold cyan] [bold #ff8c00](Esc: back)[/bold #ff8c00]")
+        Panel.fit(
+            f"[bold cyan]{title}[/bold cyan] [bold #ff8c00](Esc: back)[/bold #ff8c00]"
+        )
     )
 
 
-def _reset_setup_screen(section_title: str | None = None, banner_title: str = "Agensic Configuration") -> None:
+def _reset_setup_screen(
+    section_title: str | None = None, banner_title: str = "Agensic Configuration"
+) -> None:
     console.clear()
     _print_setup_banner(banner_title)
     if section_title:
@@ -417,7 +443,9 @@ def _read_raw_setup_key(fd: int) -> str | None:
     return None
 
 
-def _setup_select_raw(message: str, choices: list[str], pointer: str, instruction: str | None) -> Any:
+def _setup_select_raw(
+    message: str, choices: list[str], pointer: str, instruction: str | None
+) -> Any:
     if not choices:
         return None
 
@@ -517,6 +545,7 @@ def _setup_password(message: str, **kwargs) -> Any:
 def _is_back(value: Any) -> bool:
     return value is BACK_SIGNAL
 
+
 def ensure_config_dir():
     migrate_legacy_layout()
     ensure_app_layout()
@@ -524,8 +553,10 @@ def ensure_config_dir():
         ensure_private_dir(path)
         harden_private_tree(path)
 
+
 def _load_config() -> dict:
     return load_config_file(CONFIG_FILE)
+
 
 def _save_config(config: dict):
     save_config_file(config, CONFIG_FILE)
@@ -640,7 +671,9 @@ def _print_update_notice_if_available() -> None:
     console.print(
         f"[bold #ff8c00]A new Agensic version is available, update now: {__version__} -> {latest_version}[/bold #ff8c00]"
     )
-    console.print("[bold #ff8c00]Run 'agensic update' to get the latest version[/bold #ff8c00]")
+    console.print(
+        "[bold #ff8c00]Run 'agensic update' to get the latest version[/bold #ff8c00]"
+    )
 
 
 def _download_release_tarball(url: str, destination: Path) -> None:
@@ -663,7 +696,9 @@ def _extract_release_tarball(archive_path: Path, destination_dir: Path) -> Path:
         archive.extractall(destination_dir)
     extracted_roots = [path for path in destination_dir.iterdir() if path.is_dir()]
     if not extracted_roots:
-        raise RuntimeError("release archive did not contain an extracted project directory")
+        raise RuntimeError(
+            "release archive did not contain an extracted project directory"
+        )
     root_dir = extracted_roots[0]
     install_script = root_dir / "install.sh"
     if not install_script.is_file():
@@ -704,15 +739,21 @@ def _daemon_request(method: str, path: str, timeout: float, **kwargs):
     merged_headers = _daemon_auth_headers()
     if isinstance(supplied_headers, dict):
         merged_headers.update({str(k): str(v) for k, v in supplied_headers.items()})
-    return requests.request(method.upper(), url, headers=merged_headers, timeout=timeout, **kwargs)
+    return requests.request(
+        method.upper(), url, headers=merged_headers, timeout=timeout, **kwargs
+    )
 
 
 def _print_daemon_auth_hint() -> None:
-    console.print("[yellow]Daemon auth failed.[/yellow] Run `agensic setup`, reload your shell, and retry.")
+    console.print(
+        "[yellow]Daemon auth failed.[/yellow] Run `agensic setup`, reload your shell, and retry."
+    )
 
 
 def _default_shell_name() -> str:
-    return current_shell_name(default="bash" if sys.platform.startswith("linux") else "zsh")
+    return current_shell_name(
+        default="bash" if sys.platform.startswith("linux") else "zsh"
+    )
 
 
 def _decode_common_escapes(text: str) -> str:
@@ -769,9 +810,13 @@ def _explain_command_or_exit(command_text: str) -> None:
             _print_daemon_auth_hint()
         body = response.text.strip()
         if body:
-            console.print(f"[red]Explain request failed ({response.status_code}):[/red] {body}")
+            console.print(
+                f"[red]Explain request failed ({response.status_code}):[/red] {body}"
+            )
         else:
-            console.print(f"[red]Explain request failed ({response.status_code}).[/red]")
+            console.print(
+                f"[red]Explain request failed ({response.status_code}).[/red]"
+            )
         raise typer.Exit(code=1)
 
     try:
@@ -780,7 +825,11 @@ def _explain_command_or_exit(command_text: str) -> None:
         console.print("[red]Invalid JSON response from explain endpoint.[/red]")
         raise typer.Exit(code=1)
 
-    answer = str(response_payload.get("answer", "") or "").strip() if isinstance(response_payload, dict) else ""
+    answer = (
+        str(response_payload.get("answer", "") or "").strip()
+        if isinstance(response_payload, dict)
+        else ""
+    )
     if not answer:
         console.print("[red]No explanation returned.[/red]")
         raise typer.Exit(code=1)
@@ -1042,7 +1091,9 @@ def _ensure_tuis_binary() -> str:
     if installed_bin:
         return installed_bin
     platform_tag = _platform_tag()
-    manifest_override = str(os.environ.get("AGENSIC_TUIS_MANIFEST_URL", "") or "").strip()
+    manifest_override = str(
+        os.environ.get("AGENSIC_TUIS_MANIFEST_URL", "") or ""
+    ).strip()
     if not manifest_override and platform_tag not in PUBLISHED_TUIS_PLATFORMS:
         raise RuntimeError(
             "tuis_unavailable:"
@@ -1081,13 +1132,17 @@ def _reset_terminal_mouse_reporting() -> None:
         pass
 
 
-def _export_provenance_rows_to_file(payload: dict, export_format: str, out_path: str) -> None:
+def _export_provenance_rows_to_file(
+    payload: dict, export_format: str, out_path: str
+) -> None:
     runs = payload.get("runs", []) if isinstance(payload, dict) else []
     rows = runs if isinstance(runs, list) else []
     os.makedirs(os.path.dirname(os.path.abspath(out_path)), exist_ok=True)
     if export_format == "json":
         with open(out_path, "w", encoding="utf-8") as f:
-            json.dump({"runs": rows, "total": len(rows)}, f, ensure_ascii=True, indent=2)
+            json.dump(
+                {"runs": rows, "total": len(rows)}, f, ensure_ascii=True, indent=2
+            )
         return
     if export_format != "csv":
         raise RuntimeError("unsupported_export_format")
@@ -1155,7 +1210,9 @@ def _fallback_export_provenance(
         body = response.text.strip()
         raise RuntimeError(f"export_request_failed:{response.status_code}:{body}")
     payload = response.json()
-    _export_provenance_rows_to_file(payload, export_format=export_format, out_path=out_path)
+    _export_provenance_rows_to_file(
+        payload, export_format=export_format, out_path=out_path
+    )
 
 
 def _run_tuis(
@@ -1255,7 +1312,9 @@ def _run_agents_tui(agents: list[dict[str, Any]]) -> bool:
         )
 
     payload_path = ""
-    with tempfile.NamedTemporaryFile("w", encoding="utf-8", suffix="-agents.json", delete=False) as handle:
+    with tempfile.NamedTemporaryFile(
+        "w", encoding="utf-8", suffix="-agents.json", delete=False
+    ) as handle:
         json.dump({"agents": agents}, handle, ensure_ascii=True, indent=2)
         payload_path = handle.name
 
@@ -1300,7 +1359,9 @@ def _rotate_auth_token_or_exit(context: str) -> None:
         rotate_auth_token()
         _DAEMON_AUTH_CACHE.get_token(force_reload=True)
     except Exception as exc:
-        console.print(f"[red]Failed to rotate local auth token ({context}):[/red] {exc}")
+        console.print(
+            f"[red]Failed to rotate local auth token ({context}):[/red] {exc}"
+        )
         raise typer.Exit(code=1)
 
 
@@ -1465,6 +1526,7 @@ def _write_snapshot_artifact(snapshot: dict) -> str:
     atomic_write_json_private(out_path, snapshot, indent=2)
     return out_path
 
+
 def _normalize_command_pattern(raw: str) -> str:
     value = str(raw or "").strip()
     if not value:
@@ -1477,6 +1539,7 @@ def _normalize_command_pattern(raw: str) -> str:
         return ""
     token = os.path.basename(tokens[0]).strip().lower()
     return token
+
 
 def _extract_executable_token(command: str) -> str:
     raw = str(command or "").strip()
@@ -1503,7 +1566,11 @@ def _extract_executable_token(command: str) -> str:
             i += 1
             while i < n:
                 env_token = (tokens[i] or "").strip()
-                if not env_token or env_token.startswith("-") or ("=" in env_token and not env_token.startswith("=")):
+                if (
+                    not env_token
+                    or env_token.startswith("-")
+                    or ("=" in env_token and not env_token.startswith("="))
+                ):
                     i += 1
                     continue
                 break
@@ -1517,6 +1584,7 @@ def _extract_executable_token(command: str) -> str:
         return os.path.basename(token).strip().lower()
     return ""
 
+
 def _command_matches_disabled_patterns(command: str, patterns: list[str]) -> bool:
     exe = _extract_executable_token(command)
     if not exe:
@@ -1525,6 +1593,7 @@ def _command_matches_disabled_patterns(command: str, patterns: list[str]) -> boo
         if exe.startswith(pattern) or pattern.startswith(exe):
             return True
     return False
+
 
 def _sanitize_disabled_patterns(values) -> list[str]:
     if not isinstance(values, list):
@@ -1539,8 +1608,10 @@ def _sanitize_disabled_patterns(values) -> list[str]:
         clean.append(normalized)
     return clean
 
+
 def _get_disabled_patterns(config: dict) -> list[str]:
     return _sanitize_disabled_patterns(config.get("disabled_command_patterns", []))
+
 
 def _with_disabled_patterns(config: dict, patterns: list[str]) -> dict:
     updated = dict(config or {})
@@ -1560,7 +1631,11 @@ def _with_autocomplete_enabled(config: dict, enabled: bool) -> dict:
 
 
 def _autocomplete_toggle_label(config: dict) -> str:
-    return "Turn Off Autocomplete" if _is_autocomplete_enabled(config) else "Turn On Autocomplete"
+    return (
+        "Turn Off Autocomplete"
+        if _is_autocomplete_enabled(config)
+        else "Turn On Autocomplete"
+    )
 
 
 def _confirm_disable_autocomplete() -> bool:
@@ -1626,7 +1701,10 @@ def _with_llm_budget_unlimited(config: dict, enabled: bool) -> dict:
     updated["llm_budget_unlimited"] = bool(enabled)
     return updated
 
-def _disable_pattern_in_config(config: dict, raw_pattern: str) -> tuple[dict, str, bool]:
+
+def _disable_pattern_in_config(
+    config: dict, raw_pattern: str
+) -> tuple[dict, str, bool]:
     normalized = _normalize_command_pattern(raw_pattern)
     if not normalized:
         return (dict(config or {}), "", False)
@@ -1637,12 +1715,14 @@ def _disable_pattern_in_config(config: dict, raw_pattern: str) -> tuple[dict, st
         patterns.append(normalized)
     return (_with_disabled_patterns(config, patterns), normalized, changed)
 
+
 def _enable_pattern_in_config(config: dict, raw_pattern: str) -> tuple[dict, bool]:
     normalized = _normalize_command_pattern(raw_pattern)
     patterns = _get_disabled_patterns(config)
     filtered = [pattern for pattern in patterns if pattern != normalized]
     changed = len(filtered) != len(patterns)
     return (_with_disabled_patterns(config, filtered), changed)
+
 
 _PROVIDER_SETUP_CHOICES: list[tuple[str, str]] = [
     ("anthropic", "Anthropic"),
@@ -1711,6 +1791,7 @@ def _default_model_for_provider(provider: str) -> str:
     normalized = str(provider or "").strip().lower()
     return _PROVIDER_DEFAULT_MODELS.get(normalized, "gpt-5-mini")
 
+
 def _manage_pattern_controls(existing_config: dict):
     while True:
         _reset_setup_screen("Manage Agensic command patterns")
@@ -1732,19 +1813,27 @@ def _manage_pattern_controls(existing_config: dict):
             )
             if _is_back(raw_pattern):
                 continue
-            updated, normalized, changed = _disable_pattern_in_config(config, raw_pattern)
+            updated, normalized, changed = _disable_pattern_in_config(
+                config, raw_pattern
+            )
             if not normalized:
-                console.print("[yellow]No valid pattern provided. Nothing changed.[/yellow]")
+                console.print(
+                    "[yellow]No valid pattern provided. Nothing changed.[/yellow]"
+                )
                 continue
             _save_config(updated)
             if changed:
                 console.print(f"[green]✓ Disabled Agensic for '{normalized}'.[/green]")
             else:
-                console.print(f"[yellow]Pattern '{normalized}' was already disabled.[/yellow]")
+                console.print(
+                    f"[yellow]Pattern '{normalized}' was already disabled.[/yellow]"
+                )
             continue
 
         if not patterns:
-            console.print("[yellow]No disabled patterns found. Nothing to re-enable.[/yellow]")
+            console.print(
+                "[yellow]No disabled patterns found. Nothing to re-enable.[/yellow]"
+            )
             continue
 
         selected = _setup_select(
@@ -1759,6 +1848,7 @@ def _manage_pattern_controls(existing_config: dict):
             continue
         _save_config(updated)
         console.print(f"[green]✓ Re-enabled Agensic for '{selected}'.[/green]")
+
 
 def _configure_provider(
     existing_config: dict,
@@ -1785,7 +1875,9 @@ def _configure_provider(
             )
             if _is_back(selected_provider) or not selected_provider:
                 return False
-            provider = _provider_labels_to_id().get(str(selected_provider), str(selected_provider))
+            provider = _provider_labels_to_id().get(
+                str(selected_provider), str(selected_provider)
+            )
             if provider == "history_only":
                 model = _default_model_for_provider(provider)
                 api_key = ""
@@ -1801,7 +1893,10 @@ def _configure_provider(
 
         if step == 1:
             current_provider = str(config.get("provider", "") or "").strip().lower()
-            if current_provider == provider and str(config.get("model", "") or "").strip():
+            if (
+                current_provider == provider
+                and str(config.get("model", "") or "").strip()
+            ):
                 default_model = str(config.get("model"))
             else:
                 default_model = _default_model_for_provider(provider)
@@ -1821,7 +1916,9 @@ def _configure_provider(
         if step == 2:
             if provider in _PROVIDER_OPTIONAL_API_KEY_PROMPT:
                 provider_label = _provider_id_to_label().get(provider, provider)
-                wants_api_key = _setup_confirm(f"Set an API key for {provider_label}?", default=False)
+                wants_api_key = _setup_confirm(
+                    f"Set an API key for {provider_label}?", default=False
+                )
                 if _is_back(wants_api_key):
                     step = 1
                     continue
@@ -1858,7 +1955,7 @@ def _configure_provider(
         if step == 4:
             if provider == "custom":
                 value = _setup_text(
-                    "Optional headers as JSON (e.g. {\"X-API-Key\": \"...\"}):",
+                    'Optional headers as JSON (e.g. {"X-API-Key": "..."}):',
                     default=headers_raw,
                 )
                 if _is_back(value):
@@ -1878,7 +1975,9 @@ def _configure_provider(
                     continue
                 api_version = value or ""
 
-                value = _setup_text("Optional extra body as JSON:", default=extra_body_raw)
+                value = _setup_text(
+                    "Optional extra body as JSON:", default=extra_body_raw
+                )
                 if _is_back(value):
                     step = 3
                     continue
@@ -1892,7 +1991,9 @@ def _configure_provider(
             config["api_key"] = api_key
             config["base_url"] = base_url
             if "disabled_command_patterns" in existing_config:
-                config["disabled_command_patterns"] = _get_disabled_patterns(existing_config)
+                config["disabled_command_patterns"] = _get_disabled_patterns(
+                    existing_config
+                )
 
             if provider == "custom":
                 if headers_raw.strip():
@@ -1901,9 +2002,13 @@ def _configure_provider(
                         if isinstance(parsed_headers, dict):
                             config["headers"] = parsed_headers
                         else:
-                            console.print("[yellow]Ignoring headers: JSON must be an object.[/yellow]")
+                            console.print(
+                                "[yellow]Ignoring headers: JSON must be an object.[/yellow]"
+                            )
                     except json.JSONDecodeError:
-                        console.print("[yellow]Ignoring headers: invalid JSON.[/yellow]")
+                        console.print(
+                            "[yellow]Ignoring headers: invalid JSON.[/yellow]"
+                        )
 
                 if timeout_raw.strip():
                     try:
@@ -1911,9 +2016,13 @@ def _configure_provider(
                         if timeout_value > 0:
                             config["timeout"] = timeout_value
                         else:
-                            console.print("[yellow]Ignoring timeout: must be > 0.[/yellow]")
+                            console.print(
+                                "[yellow]Ignoring timeout: must be > 0.[/yellow]"
+                            )
                     except ValueError:
-                        console.print("[yellow]Ignoring timeout: invalid number.[/yellow]")
+                        console.print(
+                            "[yellow]Ignoring timeout: invalid number.[/yellow]"
+                        )
 
                 if api_version.strip():
                     config["api_version"] = api_version.strip()
@@ -1924,9 +2033,13 @@ def _configure_provider(
                         if isinstance(parsed_body, dict):
                             config["extra_body"] = parsed_body
                         else:
-                            console.print("[yellow]Ignoring extra_body: JSON must be an object.[/yellow]")
+                            console.print(
+                                "[yellow]Ignoring extra_body: JSON must be an object.[/yellow]"
+                            )
                     except json.JSONDecodeError:
-                        console.print("[yellow]Ignoring extra_body: invalid JSON.[/yellow]")
+                        console.print(
+                            "[yellow]Ignoring extra_body: invalid JSON.[/yellow]"
+                        )
             else:
                 config.pop("headers", None)
                 config.pop("timeout", None)
@@ -1940,12 +2053,17 @@ def _configure_provider(
 
             _save_config(config)
             console.print("[green]✓ Configuration saved![/green]")
-            console.print(f"Provider: {provider}, Model: {model}", style="dim", highlight=False)
+            console.print(
+                f"Provider: {provider}, Model: {model}", style="dim", highlight=False
+            )
             return True
+
 
 def _ensure_command_store_backend_ready() -> bool:
     if not is_port_open():
-        should_start = _setup_confirm("Command store needs the daemon running. Start daemon now?")
+        should_start = _setup_confirm(
+            "Command store needs the daemon running. Start daemon now?"
+        )
         if _is_back(should_start) or not should_start:
             console.print("[yellow]Command store cancelled.[/yellow]")
             return False
@@ -1961,7 +2079,9 @@ def _ensure_command_store_backend_ready() -> bool:
     if isinstance(bootstrap, dict) and bootstrap.get("ready"):
         return True
 
-    console.print("[yellow]Daemon is running but command index is not ready yet. Waiting...[/yellow]")
+    console.print(
+        "[yellow]Daemon is running but command index is not ready yet. Waiting...[/yellow]"
+    )
     ready, _, error = _wait_for_bootstrap_ready()
     if ready:
         return True
@@ -2003,12 +2123,22 @@ def _disable_startup_impl() -> None:
         return
 
     if os.path.exists(PLIST_PATH):
-        subprocess.run(["launchctl", "unload", PLIST_PATH], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, check=False)
+        subprocess.run(
+            ["launchctl", "unload", PLIST_PATH],
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+            check=False,
+        )
         if _remove_file_if_exists(PLIST_PATH):
             removed = True
 
     if os.path.exists(LEGACY_PLIST_PATH):
-        subprocess.run(["launchctl", "unload", LEGACY_PLIST_PATH], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, check=False)
+        subprocess.run(
+            ["launchctl", "unload", LEGACY_PLIST_PATH],
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+            check=False,
+        )
         if _remove_file_if_exists(LEGACY_PLIST_PATH):
             removed = True
 
@@ -2063,7 +2193,9 @@ def _configure_llm_budget(existing_config: dict):
     console.print("Budget range: 0-99 calls per command line")
     console.print("0 = no LLM calls")
     console.print("Use 'No budget limit' for unlimited calls")
-    console.print("[dim]This limit resets when you submit or clear the command line.[/dim]")
+    console.print(
+        "[dim]This limit resets when you submit or clear the command line.[/dim]"
+    )
 
     set_unlimited = _setup_confirm(
         "Enable 'No budget limit'?",
@@ -2074,7 +2206,9 @@ def _configure_llm_budget(existing_config: dict):
     if set_unlimited:
         config = _with_llm_budget_unlimited(config, True)
         _save_config(config)
-        console.print("[green]✓ LLM budget saved.[/green] Unlimited calls per command line")
+        console.print(
+            "[green]✓ LLM budget saved.[/green] Unlimited calls per command line"
+        )
         return
 
     while True:
@@ -2099,7 +2233,10 @@ def _configure_llm_budget(existing_config: dict):
         )
         return
 
-def _command_store_request(method: str, path: str, payload: dict | None = None) -> dict | None:
+
+def _command_store_request(
+    method: str, path: str, payload: dict | None = None
+) -> dict | None:
     try:
         response = _daemon_request(method.upper(), path, json=payload, timeout=20)
     except Exception as exc:
@@ -2114,9 +2251,13 @@ def _command_store_request(method: str, path: str, payload: dict | None = None) 
             return None
         body = response.text.strip()
         if body:
-            console.print(f"[red]Command store request failed ({response.status_code}):[/red] {body}")
+            console.print(
+                f"[red]Command store request failed ({response.status_code}):[/red] {body}"
+            )
         else:
-            console.print(f"[red]Command store request failed ({response.status_code}).[/red]")
+            console.print(
+                f"[red]Command store request failed ({response.status_code}).[/red]"
+            )
         return None
 
     try:
@@ -2125,15 +2266,16 @@ def _command_store_request(method: str, path: str, payload: dict | None = None) 
         console.print("[red]Invalid response from command store endpoint.[/red]")
         return None
     if not isinstance(data, dict):
-        console.print("[red]Unexpected response format from command store endpoint.[/red]")
+        console.print(
+            "[red]Unexpected response format from command store endpoint.[/red]"
+        )
         return None
     return data
 
+
 def _manage_command_store_add():
     _reset_setup_screen("Add commands")
-    raw = _setup_text(
-        "Add commands (comma-separated; spaces are ok):"
-    )
+    raw = _setup_text("Add commands (comma-separated; spaces are ok):")
     if _is_back(raw):
         return
     raw = raw or ""
@@ -2143,7 +2285,9 @@ def _manage_command_store_add():
         console.print("[yellow]No commands provided. Nothing changed.[/yellow]")
         return
 
-    payload = _command_store_request("POST", "/command_store/add", {"commands": commands})
+    payload = _command_store_request(
+        "POST", "/command_store/add", {"commands": commands}
+    )
     if not payload:
         return
     inserted = int(payload.get("inserted", 0) or 0)
@@ -2154,6 +2298,7 @@ def _manage_command_store_add():
         f"[green]✓ Added commands[/green] inserted={inserted}, already_present={already_present}, "
         f"unblocked_from_removed={unblocked_removed}"
     )
+
 
 def _percentile(sorted_values: list[int], q: float) -> float:
     if not sorted_values:
@@ -2166,6 +2311,7 @@ def _percentile(sorted_values: list[int], q: float) -> float:
     hi = min(lo + 1, len(sorted_values) - 1)
     frac = pos - lo
     return float(sorted_values[lo] + (sorted_values[hi] - sorted_values[lo]) * frac)
+
 
 def _format_command_store_choice(
     item: dict,
@@ -2190,6 +2336,7 @@ def _format_command_store_choice(
         if reason:
             label.append(("class:potential-wrong-reason", f" ({reason})"))
     return label
+
 
 def _checkbox_without_invert(
     message: str,
@@ -2253,7 +2400,12 @@ def _checkbox_without_invert(
             elif nbr_selected == 1:
                 selected_title = ic.get_selected_values()[0].title
                 if isinstance(selected_title, list):
-                    tokens.append(("class:answer", "".join([token[1] for token in selected_title])))
+                    tokens.append(
+                        (
+                            "class:answer",
+                            "".join([token[1] for token in selected_title]),
+                        )
+                    )
                 else:
                     tokens.append(("class:answer", f"[{selected_title}]"))
             else:
@@ -2305,7 +2457,11 @@ def _checkbox_without_invert(
     def _toggle_all(_event):
         all_selected = True
         for c in ic.choices:
-            if not isinstance(c, Separator) and c.value not in ic.selected_options and not c.disabled:
+            if (
+                not isinstance(c, Separator)
+                and c.value not in ic.selected_options
+                and not c.disabled
+            ):
                 ic.selected_options.append(c.value)
                 all_selected = False
         if all_selected:
@@ -2368,6 +2524,7 @@ def _checkbox_without_invert(
             **application_kwargs,
         )
     )
+
 
 def _manage_command_store_remove():
     _require_questionary()
@@ -2494,6 +2651,7 @@ def _manage_command_store_remove():
                     console.print(f"[yellow]{message}[/yellow]")
         return
 
+
 def _manage_command_store_resync():
     console.print(
         "[yellow]This only imports commands missing from current history counts "
@@ -2503,9 +2661,7 @@ def _manage_command_store_resync():
         "[red]Important:[/red] this could add wrong commands and non-zero-exit commands "
         "to your command store."
     )
-    confirmed = _setup_confirm(
-        "Resync command store from your shell history?"
-    )
+    confirmed = _setup_confirm("Resync command store from your shell history?")
     if _is_back(confirmed) or not confirmed:
         if confirmed is False:
             console.print("[yellow]History resync cancelled.[/yellow]")
@@ -2524,7 +2680,9 @@ def _manage_command_store_resync():
     reason = str(result.get("reason", "") or "").strip()
     if status != "ok":
         if reason:
-            console.print(f"[yellow]History resync did not import commands:[/yellow] {reason}")
+            console.print(
+                f"[yellow]History resync did not import commands:[/yellow] {reason}"
+            )
         else:
             console.print("[yellow]History resync did not import commands.[/yellow]")
         return
@@ -2539,11 +2697,14 @@ def _manage_command_store_resync():
         f"imported_commands={imported_commands}"
     )
 
+
 def _manage_command_store():
     config = _load_config()
     if not _is_autocomplete_enabled(config):
         _reset_setup_screen("Manage command store")
-        console.print("[yellow]Autocomplete is turned off. Turn it back on in setup to manage the command store.[/yellow]")
+        console.print(
+            "[yellow]Autocomplete is turned off. Turn it back on in setup to manage the command store.[/yellow]"
+        )
         return
     if not _ensure_command_store_backend_ready():
         return
@@ -2568,11 +2729,13 @@ def _manage_command_store():
             continue
         _manage_command_store_resync()
 
+
 def is_port_open(host: str = "127.0.0.1", port: int = 22000) -> bool:
     """Return True if something is already listening on host:port."""
     with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
         s.settimeout(0.3)
         return s.connect_ex((host, port)) == 0
+
 
 def _read_pid_file(path: str = PID_FILE) -> int | None:
     if not os.path.exists(path):
@@ -2582,6 +2745,7 @@ def _read_pid_file(path: str = PID_FILE) -> int | None:
             return int(f.read().strip())
     except Exception:
         return None
+
 
 def _find_listening_pids(port: int = 22000) -> list[int]:
     try:
@@ -2601,6 +2765,7 @@ def _find_listening_pids(port: int = 22000) -> list[int]:
             pids.append(int(line))
     return pids
 
+
 def _try_kill_pid(pid: int, sig: int = signal.SIGTERM) -> bool:
     try:
         os.kill(pid, sig)
@@ -2609,6 +2774,7 @@ def _try_kill_pid(pid: int, sig: int = signal.SIGTERM) -> bool:
         return True
     except Exception:
         return False
+
 
 def _is_pid_alive(pid: int | None) -> bool:
     if pid is None or pid <= 0:
@@ -2623,8 +2789,12 @@ def _is_pid_alive(pid: int | None) -> bool:
     except Exception:
         return False
 
-def _wait_for_port_close(timeout_seconds: float = 10.0, interval_seconds: float = 0.2) -> bool:
+
+def _wait_for_port_close(
+    timeout_seconds: float = 10.0, interval_seconds: float = 0.2
+) -> bool:
     import time
+
     deadline = time.time() + timeout_seconds
     while time.time() < deadline:
         if not is_port_open():
@@ -2709,7 +2879,9 @@ def _scrub_shell_rc_file(path: Path) -> bool:
 
     alias_patterns = (
         re.compile(r"alias agensic='python3 .*\.agensic/cli\.py'"),
-        re.compile(rf"alias {re.escape(LEGACY_CLI_NAME)}='python3 .*\.{re.escape(LEGACY_BRAND)}/cli\.py'"),
+        re.compile(
+            rf"alias {re.escape(LEGACY_CLI_NAME)}='python3 .*\.{re.escape(LEGACY_BRAND)}/cli\.py'"
+        ),
     )
     export_patterns = (
         re.compile(r'export PATH=".*\.agensic/bin:\$PATH"'),
@@ -2718,10 +2890,16 @@ def _scrub_shell_rc_file(path: Path) -> bool:
     source_patterns = (
         re.compile(r"source .*\.agensic/agensic\.zsh"),
         re.compile(r"source .*\.agensic/agensic\.bash"),
-        re.compile(rf"source .*\.{re.escape(LEGACY_BRAND)}/{re.escape(LEGACY_BRAND)}\.zsh"),
+        re.compile(
+            rf"source .*\.{re.escape(LEGACY_BRAND)}/{re.escape(LEGACY_BRAND)}\.zsh"
+        ),
     )
     legacy_bash_block_start, legacy_bash_block_end = _legacy_bash_block_markers()
-    block_starts = {SHELL_RC_BLOCK_START, LEGACY_SHELL_RC_BLOCK_START, legacy_bash_block_start}
+    block_starts = {
+        SHELL_RC_BLOCK_START,
+        LEGACY_SHELL_RC_BLOCK_START,
+        legacy_bash_block_start,
+    }
     block_ends = {SHELL_RC_BLOCK_END, LEGACY_SHELL_RC_BLOCK_END, legacy_bash_block_end}
 
     cleaned_lines: list[str] = []
@@ -2738,7 +2916,10 @@ def _scrub_shell_rc_file(path: Path) -> bool:
             if stripped in block_ends:
                 in_block = False
             continue
-        if any(pattern.search(stripped) for pattern in alias_patterns + export_patterns + source_patterns):
+        if any(
+            pattern.search(stripped)
+            for pattern in alias_patterns + export_patterns + source_patterns
+        ):
             changed = True
             continue
         cleaned_lines.append(line)
@@ -2756,7 +2937,12 @@ def _scrub_shell_rc_file(path: Path) -> bool:
 def _cleanup_legacy_daemon_artifacts() -> None:
     legacy_pid = _read_pid_file(LEGACY_PID_FILE)
     if os.path.exists(LEGACY_PLIST_PATH):
-        subprocess.run(["launchctl", "unload", LEGACY_PLIST_PATH], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, check=False)
+        subprocess.run(
+            ["launchctl", "unload", LEGACY_PLIST_PATH],
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+            check=False,
+        )
 
     if legacy_pid is not None:
         if _try_kill_pid(legacy_pid):
@@ -2768,6 +2954,7 @@ def _cleanup_legacy_daemon_artifacts() -> None:
     _remove_file_if_exists(LEGACY_PID_FILE)
     _remove_file_if_exists(LEGACY_PLIST_PATH)
 
+
 def _fetch_daemon_status() -> dict | None:
     try:
         response = _daemon_request("GET", "/status", timeout=0.8)
@@ -2776,6 +2963,7 @@ def _fetch_daemon_status() -> dict | None:
         return response.json()
     except Exception:
         return None
+
 
 def _wait_for_bootstrap_ready(
     started_pid: int | None = None,
@@ -2805,8 +2993,12 @@ def _wait_for_bootstrap_ready(
                 last_indexed = int(bootstrap.get("indexed_commands", 0) or 0)
                 phase = str(bootstrap.get("phase") or "starting")
                 error = str(bootstrap.get("error") or "").strip()
-                storage_state = str(bootstrap.get("storage_state", "unknown") or "unknown")
-                storage_error = str(bootstrap.get("storage_error_detail", "") or "").strip()
+                storage_state = str(
+                    bootstrap.get("storage_state", "unknown") or "unknown"
+                )
+                storage_error = str(
+                    bootstrap.get("storage_error_detail", "") or ""
+                ).strip()
                 if storage_state == "corrupt":
                     return (
                         False,
@@ -2817,14 +3009,22 @@ def _wait_for_bootstrap_ready(
                 if bootstrap.get("ready"):
                     return (True, last_indexed, "")
                 if phase == "error":
-                    return (False, last_indexed, error or "Backend initialization failed.")
+                    return (
+                        False,
+                        last_indexed,
+                        error or "Backend initialization failed.",
+                    )
 
                 if phase == "downloading_model":
-                    status.update("[yellow]Downloading embedding model from Hugging Face...[/yellow]")
+                    status.update(
+                        "[yellow]Downloading embedding model from Hugging Face...[/yellow]"
+                    )
                 elif phase == "syncing_history":
                     status.update("[yellow]Warming up command index...[/yellow]")
                 elif phase == "loading_model_local":
-                    status.update("[yellow]Loading embedding model from local cache...[/yellow]")
+                    status.update(
+                        "[yellow]Loading embedding model from local cache...[/yellow]"
+                    )
                 elif phase == "initializing_db":
                     status.update("[yellow]Initializing vector database...[/yellow]")
                 else:
@@ -2869,6 +3069,7 @@ def _doctor_suggestion_preview(buffer: str, payload: dict[str, Any]) -> str:
 
     return _decode_common_escapes(preview).strip()
 
+
 def _setup_pause(message: str = "Press Enter to continue") -> Any:
     return _setup_text(message, default="")
 
@@ -2897,7 +3098,9 @@ def _autocomplete_setup_menu() -> None:
                 console.print("[yellow]Autocomplete setting unchanged.[/yellow]")
                 continue
             _save_config(_with_autocomplete_enabled(existing_config, not enabled))
-            console.print(f"[green]✓ Autocomplete turned {'off' if enabled else 'on'}.[/green]")
+            console.print(
+                f"[green]✓ Autocomplete turned {'off' if enabled else 'on'}.[/green]"
+            )
             continue
         if action == "Choose AI provider":
             completed = _configure_provider(existing_config)
@@ -2921,7 +3124,10 @@ def _setup_session_choice_label(session: dict[str, Any]) -> str:
 
     session_name = str(session.get("session_name", "") or "").strip() or "-"
     session_id = str(session.get("session_id", "") or "").strip() or "-"
-    agent = str(session.get("agent_name", "") or session.get("agent", "") or "").strip() or "-"
+    agent = (
+        str(session.get("agent_name", "") or session.get("agent", "") or "").strip()
+        or "-"
+    )
     started_at = str(track_runtime._format_ts(int(session.get("started_at", 0) or 0)))
     return f"{session_name} | {session_id} | {agent} | {started_at}"
 
@@ -2969,10 +3175,7 @@ def _setup_remove_custom_agent() -> None:
         console.print("[yellow]No custom agents found.[/yellow]")
         _setup_pause()
         return
-    labels = [
-        f"{agent['agent_id']} | {agent['display_name']}"
-        for agent in agents
-    ]
+    labels = [f"{agent['agent_id']} | {agent['display_name']}" for agent in agents]
     mapping = {label: agent for label, agent in zip(labels, agents)}
     selected = _setup_select("Choose a custom agent to remove:", choices=labels)
     if _is_back(selected) or not selected:
@@ -3033,7 +3236,9 @@ def _render_setup_agents_table(agents: list[dict[str, Any]]) -> None:
             ", ".join([str(x) for x in agent.get("aliases", []) if str(x)]),
         )
     console.print(table)
-    console.print("`source` is where the mapping came from. `status` is the trust/registry classification.")
+    console.print(
+        "`source` is where the mapping came from. `status` is the trust/registry classification."
+    )
 
 
 def _setup_rename_session() -> None:
@@ -3047,7 +3252,9 @@ def _setup_rename_session() -> None:
     new_name = _setup_text("Enter the session name", default=current_name)
     if _is_back(new_name) or new_name is None:
         return
-    updated = track_runtime.rename_track_session(str(session.get("session_id", "") or ""), str(new_name))
+    updated = track_runtime.rename_track_session(
+        str(session.get("session_id", "") or ""), str(new_name)
+    )
     if updated is None:
         console.print("[red]Session not found.[/red]")
     else:
@@ -3099,9 +3306,13 @@ def _setup_sessions_menu() -> None:
         if action == toggle_label:
             enabled = _is_automatic_agensic_sessions_enabled(existing_config)
             if enabled and not _confirm_disable_automatic_agensic_sessions():
-                console.print("[yellow]Automatic Agensic Sessions setting unchanged.[/yellow]")
+                console.print(
+                    "[yellow]Automatic Agensic Sessions setting unchanged.[/yellow]"
+                )
                 continue
-            _save_config(_with_automatic_agensic_sessions_enabled(existing_config, not enabled))
+            _save_config(
+                _with_automatic_agensic_sessions_enabled(existing_config, not enabled)
+            )
             console.print(
                 f"[green]✓ Automatic Agensic Sessions turned {'off' if enabled else 'on'}.[/green]"
             )
@@ -3147,6 +3358,7 @@ def setup():
                 continue
             _autocomplete_setup_menu()
 
+
 def _enable_startup_impl(start_now: bool) -> None:
     _clear_uninstall_sentinel()
     _cleanup_legacy_daemon_artifacts()
@@ -3182,16 +3394,34 @@ WantedBy=default.target
             check=False,
         )
         if reload_res.returncode != 0:
-            err_text = (reload_res.stderr or reload_res.stdout or "systemctl --user daemon-reload failed").strip()
-            console.print(f"[red]✗ Failed to reload user systemd units:[/red] {err_text}")
+            err_text = (
+                reload_res.stderr
+                or reload_res.stdout
+                or "systemctl --user daemon-reload failed"
+            ).strip()
+            console.print(
+                f"[red]✗ Failed to reload user systemd units:[/red] {err_text}"
+            )
             raise typer.Exit(code=1)
 
         enable_cmd = ["systemctl", "--user", "enable", "agensic-daemon.service"]
         if start_now:
-            enable_cmd = ["systemctl", "--user", "enable", "--now", "agensic-daemon.service"]
-        enable_res = subprocess.run(enable_cmd, capture_output=True, text=True, check=False)
+            enable_cmd = [
+                "systemctl",
+                "--user",
+                "enable",
+                "--now",
+                "agensic-daemon.service",
+            ]
+        enable_res = subprocess.run(
+            enable_cmd, capture_output=True, text=True, check=False
+        )
         if enable_res.returncode != 0:
-            err_text = (enable_res.stderr or enable_res.stdout or "systemctl --user enable failed").strip()
+            err_text = (
+                enable_res.stderr
+                or enable_res.stdout
+                or "systemctl --user enable failed"
+            ).strip()
             console.print(f"[red]✗ Failed to enable start on boot:[/red] {err_text}")
             raise typer.Exit(code=1)
 
@@ -3202,14 +3432,18 @@ WantedBy=default.target
         ready, indexed, error = _wait_for_bootstrap_ready()
         if ready:
             console.print("[green]✔ Command index ready[/green]")
-            console.print("[bold green]✔ Agensic started and set to start automatically! Open a new terminal to use it![/bold green]")
+            console.print(
+                "[bold green]✔ Agensic started and set to start automatically! Open a new terminal to use it![/bold green]"
+            )
             return
 
         console.print(f"[red]✗ Startup failed before readiness:[/red] {error}")
         raise typer.Exit(code=1)
 
     if sys.platform != "darwin":
-        console.print("[red]Start on boot is currently supported on macOS and Linux systemd user sessions.[/red]")
+        console.print(
+            "[red]Start on boot is currently supported on macOS and Linux systemd user sessions.[/red]"
+        )
         return
 
     python_path = sys.executable
@@ -3244,21 +3478,34 @@ WantedBy=default.target
 
     was_running = is_port_open()
     if was_running:
-        console.print("[yellow]Agensic is already running. Restarting under launchd...[/yellow]")
+        console.print(
+            "[yellow]Agensic is already running. Restarting under launchd...[/yellow]"
+        )
         stop()
 
     # Load the service immediately.
-    subprocess.run(["launchctl", "unload", PLIST_PATH], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, check=False)
-    load_res = subprocess.run(["launchctl", "load", PLIST_PATH], capture_output=True, text=True, check=False)
+    subprocess.run(
+        ["launchctl", "unload", PLIST_PATH],
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.DEVNULL,
+        check=False,
+    )
+    load_res = subprocess.run(
+        ["launchctl", "load", PLIST_PATH], capture_output=True, text=True, check=False
+    )
     if load_res.returncode != 0:
-        err_text = (load_res.stderr or load_res.stdout or "launchctl load failed").strip()
+        err_text = (
+            load_res.stderr or load_res.stdout or "launchctl load failed"
+        ).strip()
         console.print(f"[red]✗ Failed to enable start on boot:[/red] {err_text}")
         raise typer.Exit(code=1)
 
     ready, indexed, error = _wait_for_bootstrap_ready()
     if ready:
         console.print("[green]✔ Command index ready[/green]")
-        console.print("[bold green]✔ Agensic started and set to start automatically! Open a new terminal to use it![/bold green]")
+        console.print(
+            "[bold green]✔ Agensic started and set to start automatically! Open a new terminal to use it![/bold green]"
+        )
         return
 
     console.print(f"[red]✗ Startup failed before readiness:[/red] {error}")
@@ -3297,7 +3544,9 @@ def _run_first_install_onboarding() -> bool:
             if enable_boot
             else None
         )
-        console.print("[bold green]Open a new terminal window and start using agensic[/bold green]")
+        console.print(
+            "[bold green]Open a new terminal window and start using agensic[/bold green]"
+        )
         return True
 
 
@@ -3307,6 +3556,7 @@ def first_run():
     completed = _run_first_install_onboarding()
     if not completed:
         raise typer.Exit(code=1)
+
 
 def _start_impl(pending_status_message: str | None = None) -> None:
     ensure_config_dir()
@@ -3321,8 +3571,12 @@ def _start_impl(pending_status_message: str | None = None) -> None:
             console.print("[yellow]Daemon already running on port 22000.[/yellow]")
             console.print(f"[green]✔ Command index ready[/green]")
             return
-        console.print("[yellow]Daemon already running; waiting for readiness...[/yellow]")
-        ready, indexed, error = _wait_for_bootstrap_ready(pending_status_message=pending_status_message)
+        console.print(
+            "[yellow]Daemon already running; waiting for readiness...[/yellow]"
+        )
+        ready, indexed, error = _wait_for_bootstrap_ready(
+            pending_status_message=pending_status_message
+        )
         if ready:
             console.print(f"[green]✔ Command index ready[/green]")
             return
@@ -3341,12 +3595,12 @@ def _start_impl(pending_status_message: str | None = None) -> None:
             [sys.executable, SERVER_SCRIPT],
             stdout=out,
             stderr=out,
-            start_new_session=True
+            start_new_session=True,
         )
     enforce_private_file(log_path)
-    
+
     atomic_write_text_private(PID_FILE, str(process.pid))
-    
+
     console.print(f"[green]✔ Started (PID: {process.pid})[/green]")
     console.print(f"[dim]Log file: {SERVER_LOG_FILE}[/dim]")
     ready, indexed, error = _wait_for_bootstrap_ready(
@@ -3365,6 +3619,7 @@ def start():
     """Start the background AI daemon manually."""
     _start_impl()
 
+
 @app.command()
 def stop():
     """Stop the daemon."""
@@ -3375,8 +3630,10 @@ def stop():
 
     if startup_service_stopped:
         was_running = True
-        graceful_stopped = _wait_for_port_close(timeout_seconds=4.0, interval_seconds=0.2)
-    
+        graceful_stopped = _wait_for_port_close(
+            timeout_seconds=4.0, interval_seconds=0.2
+        )
+
     # Try graceful shutdown first
     if is_port_open():
         try:
@@ -3384,11 +3641,15 @@ def stop():
             response = _daemon_request("POST", "/shutdown", timeout=4)
             if response.status_code == 200:
                 console.print("[green]✔ Shutdown request accepted.[/green]")
-                graceful_stopped = _wait_for_port_close(timeout_seconds=12.0, interval_seconds=0.2)
+                graceful_stopped = _wait_for_port_close(
+                    timeout_seconds=12.0, interval_seconds=0.2
+                )
                 if graceful_stopped:
                     console.print("[green]✔ Server exited cleanly.[/green]")
                 else:
-                    console.print("[yellow]Graceful shutdown timed out, applying fallback stop.[/yellow]")
+                    console.print(
+                        "[yellow]Graceful shutdown timed out, applying fallback stop.[/yellow]"
+                    )
         except Exception:
             pass
 
@@ -3436,10 +3697,11 @@ def logs():
     if not os.path.exists(log_file):
         console.print("[yellow]No logs found. Server may not be running.[/yellow]")
         return
-    
+
     console.print(f"[cyan]Tailing {log_file}...[/cyan]")
     console.print("[dim]Press Ctrl+C to stop[/dim]\n")
     os.system(f"tail -f {log_file}")
+
 
 @app.command()
 def test():
@@ -3453,23 +3715,27 @@ def test():
                 "command_buffer": "git comm",
                 "cursor_position": 8,
                 "working_directory": "/tmp",
-                "shell": current_shell_name()
+                "shell": current_shell_name(),
             },
-            timeout=5
+            timeout=5,
         )
         data = response.json()
         suggestions = data.get("suggestions", [])
         sugg = suggestions[0] if suggestions else ""
         error = data.get("error", "")
-        
+
         if error:
             console.print(f"[red]✗ Server Error:[/red] {error}")
-        
+
         console.print(f"[green]✓ Server Response:[/green] {suggestions}")
         if sugg == "":
-            console.print("[yellow]⚠ Received empty suggestion (Model might be unsure or filtered).[/yellow]")
+            console.print(
+                "[yellow]⚠ Received empty suggestion (Model might be unsure or filtered).[/yellow]"
+            )
         else:
-            console.print(f"[cyan]Visual Preview:[/cyan] git comm[grey50]{sugg}[/grey50]")
+            console.print(
+                f"[cyan]Visual Preview:[/cyan] git comm[grey50]{sugg}[/grey50]"
+            )
 
     except Exception as e:
         console.print(f"[red]✗ Connection Failed:[/red] {e}")
@@ -3480,15 +3746,21 @@ def test():
 
 @app.command()
 def uninstall(
-    yes: bool = typer.Option(False, "--yes", "-y", help="Skip the confirmation prompt."),
-    keep_data: bool = typer.Option(False, "--keep-data", help="Keep local config/state/cache directories."),
+    yes: bool = typer.Option(
+        False, "--yes", "-y", help="Skip the confirmation prompt."
+    ),
+    keep_data: bool = typer.Option(
+        False, "--keep-data", help="Keep local config/state/cache directories."
+    ),
 ):
     """Remove Agensic startup wiring and local install state."""
     if not yes:
         if keep_data:
             prompt = "Uninstall Agensic from this machine? This removes shell wiring and startup artifacts."
         else:
-            console.print("[red]Uninstall Agensic from this machine and delete local state?[/red]")
+            console.print(
+                "[red]Uninstall Agensic from this machine and delete local state?[/red]"
+            )
             prompt = "Continue?"
         confirmed = typer.confirm(prompt)
         if not confirmed:
@@ -3533,16 +3805,21 @@ def uninstall(
             console.print(f"  - {item}")
     else:
         console.print("[yellow]Nothing to remove.[/yellow]")
-    console.print("[dim]Current shell plugin disabled. Open a new shell for a fully clean session.[/dim]")
+    console.print(
+        "[dim]Current shell plugin disabled. Open a new shell for a fully clean session.[/dim]"
+    )
 
 
 @app.command()
 def update():
     """Install the latest published Agensic release from GitHub."""
     ensure_config_dir()
+    _remove_file_if_exists(TUIS_BIN)
     release = _fetch_latest_release_info(force_refresh=True)
     if release is None:
-        console.print("[red]Could not determine the latest Agensic release from GitHub.[/red]")
+        console.print(
+            "[red]Could not determine the latest Agensic release from GitHub.[/red]"
+        )
         raise typer.Exit(code=1)
 
     latest_version = str(release.get("version", "") or "").strip()
@@ -3555,7 +3832,9 @@ def update():
         console.print(f"[green]Agensic is already up to date ({__version__}).[/green]")
         return
 
-    console.print(f"[cyan]Updating Agensic from {__version__} to {latest_version}...[/cyan]")
+    console.print(
+        f"[cyan]Updating Agensic from {__version__} to {latest_version}...[/cyan]"
+    )
     with tempfile.TemporaryDirectory(prefix="agensic-update-") as tmpdir:
         archive_path = Path(tmpdir) / "agensic-release.tar.gz"
         try:
@@ -3566,8 +3845,13 @@ def update():
             console.print(f"[red]Update failed:[/red] {exc}")
             raise typer.Exit(code=1)
 
-    console.print(f"[green]Agensic updated successfully: {__version__} -> {latest_version}[/green]")
-    console.print("[dim]Open a new terminal or run `hash -r` if your shell still points to the old launcher.[/dim]")
+    console.print(
+        f"[green]Agensic updated successfully: {__version__} -> {latest_version}[/green]"
+    )
+    console.print(
+        "[dim]Open a new terminal or run `hash -r` if your shell still points to the old launcher.[/dim]"
+    )
+
 
 @app.command()
 def doctor():
@@ -3584,7 +3868,11 @@ def doctor():
         console.print("[red]✗ Daemon status:[/red] unreachable")
     else:
         console.print("[green]✓ Daemon status:[/green] reachable")
-        bootstrap = payload.get("bootstrap", {}) if isinstance(payload.get("bootstrap"), dict) else {}
+        bootstrap = (
+            payload.get("bootstrap", {})
+            if isinstance(payload.get("bootstrap"), dict)
+            else {}
+        )
         if not bootstrap.get("ready"):
             issues.append("bootstrap_not_ready")
             phase = str(bootstrap.get("phase") or "unknown")
@@ -3595,7 +3883,9 @@ def doctor():
 
         storage_state, storage_code, storage_detail = _extract_storage_health(payload)
         sqlite_state = str(bootstrap.get("sqlite_state", "unknown") or "unknown")
-        journal_state = str(bootstrap.get("journal_state", "unavailable") or "unavailable")
+        journal_state = str(
+            bootstrap.get("journal_state", "unavailable") or "unavailable"
+        )
         snapshot_state = str(bootstrap.get("snapshot_state", "missing") or "missing")
         auto_recover = str(bootstrap.get("auto_recover_result", "skipped") or "skipped")
         if storage_state == "corrupt":
@@ -3639,14 +3929,18 @@ def doctor():
             else:
                 parsed = json.loads(output)
                 if not parsed.get("ok"):
-                    error_code = str(parsed.get("error_code", "predict_error") or "predict_error")
+                    error_code = str(
+                        parsed.get("error_code", "predict_error") or "predict_error"
+                    )
                     issues.append(error_code)
                     console.print(f"[red]✗ Predict probe:[/red] {error_code}")
                 else:
                     pool = parsed.get("pool", [])
                     if not isinstance(pool, list):
                         issues.append("predict_error")
-                        console.print("[red]✗ Predict probe:[/red] invalid response shape")
+                        console.print(
+                            "[red]✗ Predict probe:[/red] invalid response shape"
+                        )
                     elif not pool:
                         warnings.append("empty_pool")
                         console.print("[yellow]⚠ Predict probe:[/yellow] empty_pool")
@@ -3655,7 +3949,9 @@ def doctor():
                             sample_payload["command_buffer"],
                             parsed,
                         )
-                        console.print("[green]✓ Predict probe:[/green] returned suggestions")
+                        console.print(
+                            "[green]✓ Predict probe:[/green] returned suggestions"
+                        )
         except subprocess.TimeoutExpired:
             issues.append("predict_timeout")
             console.print("[red]✗ Predict probe:[/red] predict_timeout")
@@ -3671,7 +3967,12 @@ def doctor():
         console.print(f"[dim]Plugin log: {plugin_log}[/dim]")
 
     if suggestion_preview:
-        console.print(f"Suggestion preview: {suggestion_preview}", style="dim", markup=False, highlight=False)
+        console.print(
+            f"Suggestion preview: {suggestion_preview}",
+            style="dim",
+            markup=False,
+            highlight=False,
+        )
 
     unique_issues = list(dict.fromkeys(issues))
     unique_warnings = list(dict.fromkeys(warnings))
@@ -3681,7 +3982,9 @@ def doctor():
         raise typer.Exit(code=1)
 
     if unique_warnings:
-        console.print(f"[yellow]Doctor result:[/yellow] WARN ({', '.join(unique_warnings)})")
+        console.print(
+            f"[yellow]Doctor result:[/yellow] WARN ({', '.join(unique_warnings)})"
+        )
         return
 
     console.print("[green]Doctor result:[/green] OK")
@@ -3715,7 +4018,9 @@ def auth_status(
     exists = target.exists() and target.is_file()
     payload = load_auth_payload(AUTH_FILE) if exists else None
     created_at = int((payload or {}).get("created_at", 0) or 0)
-    last_rotated_at = int((payload or {}).get("last_rotated_at", created_at) or created_at)
+    last_rotated_at = int(
+        (payload or {}).get("last_rotated_at", created_at) or created_at
+    )
     try:
         mtime = int(target.stat().st_mtime) if exists else 0
     except Exception:
@@ -3747,15 +4052,21 @@ def auth_status(
 
 @app.command()
 def provenance(
-    limit: int = typer.Option(500, "--limit", min=1, max=500, help="Max rows to return"),
+    limit: int = typer.Option(
+        500, "--limit", min=1, max=500, help="Max rows to return"
+    ),
     label: str = typer.Option("", "--label", help="Filter by attribution label"),
     contains: str = typer.Option("", "--contains", help="Filter commands by substring"),
     since_ts: int = typer.Option(0, "--since-ts", help="Only rows with ts >= value"),
     tier: str = typer.Option("", "--tier", help="Filter by evidence tier"),
     agent: str = typer.Option("", "--agent", help="Filter by inferred agent"),
-    agent_name: str = typer.Option("", "--agent-name", help="Filter by optional agent display name"),
+    agent_name: str = typer.Option(
+        "", "--agent-name", help="Filter by optional agent display name"
+    ),
     provider: str = typer.Option("", "--provider", help="Filter by provider"),
-    export: str = typer.Option("", "--export", help="Export the current provenance view to json or csv"),
+    export: str = typer.Option(
+        "", "--export", help="Export the current provenance view to json or csv"
+    ),
     out: str = typer.Option("", "--out", help="Output file path for --export"),
     as_json: bool = typer.Option(False, "--json", help="Print raw JSON payload"),
 ):
@@ -3785,9 +4096,13 @@ def provenance(
             )
             if ok:
                 if export_format:
-                    console.print(f"[green]Exported provenance rows to:[/green] {out_path}")
+                    console.print(
+                        f"[green]Exported provenance rows to:[/green] {out_path}"
+                    )
                 return
-            console.print("[yellow]TUI exited with non-zero status, falling back.[/yellow]")
+            console.print(
+                "[yellow]TUI exited with non-zero status, falling back.[/yellow]"
+            )
             if export_format:
                 _fallback_export_provenance(
                     limit=limit,
@@ -3819,7 +4134,9 @@ def provenance(
                         export_format=export_format,
                         out_path=out_path,
                     )
-                    console.print(f"[green]Exported provenance rows to:[/green] {out_path}")
+                    console.print(
+                        f"[green]Exported provenance rows to:[/green] {out_path}"
+                    )
                     return
                 except Exception as export_exc:
                     console.print(f"[red]Export failed:[/red] {export_exc}")
@@ -3851,9 +4168,13 @@ def provenance(
             _print_daemon_auth_hint()
         body = response.text.strip()
         if body:
-            console.print(f"[red]Provenance request failed ({response.status_code}):[/red] {body}")
+            console.print(
+                f"[red]Provenance request failed ({response.status_code}):[/red] {body}"
+            )
         else:
-            console.print(f"[red]Provenance request failed ({response.status_code}).[/red]")
+            console.print(
+                f"[red]Provenance request failed ({response.status_code}).[/red]"
+            )
         raise typer.Exit(code=1)
 
     try:
@@ -3927,7 +4248,9 @@ def provenance(
 
 @app.command()
 def sessions(
-    text: bool = typer.Option(False, "--text", help="Print sessions as text instead of opening the TUI"),
+    text: bool = typer.Option(
+        False, "--text", help="Print sessions as text instead of opening the TUI"
+    ),
 ):
     """Browse tracked sessions."""
     _print_update_notice_if_available()
@@ -3939,7 +4262,9 @@ def sessions(
         ok = _run_sessions_tui()
         if ok:
             return
-        console.print("[yellow]Sessions TUI exited with non-zero status, falling back.[/yellow]")
+        console.print(
+            "[yellow]Sessions TUI exited with non-zero status, falling back.[/yellow]"
+        )
     except Exception as exc:
         console.print(f"[yellow]Sessions TUI unavailable, falling back:[/yellow] {exc}")
     raise typer.Exit(code=track_runtime.print_sessions_text())
@@ -4036,10 +4361,16 @@ def _read_live_ai_session_state() -> dict[str, str]:
 
 def _resolve_ai_session_values() -> dict[str, str]:
     values = {key: str(os.environ.get(key, "") or "") for key in AI_SESSION_ENV_KEYS}
-    if str(values.get("AGENSIC_AI_SESSION_ACTIVE", "") or "").strip() == "1" and _ai_session_owner_matches_current_shell(values):
+    if str(
+        values.get("AGENSIC_AI_SESSION_ACTIVE", "") or ""
+    ).strip() == "1" and _ai_session_owner_matches_current_shell(values):
         return values
     persisted = _read_live_ai_session_state()
-    return persisted if persisted and _ai_session_owner_matches_current_shell(persisted) else values
+    return (
+        persisted
+        if persisted and _ai_session_owner_matches_current_shell(persisted)
+        else values
+    )
 
 
 def _normalize_signing_identity(agent: str, model: str) -> tuple[str, str, bool]:
@@ -4066,10 +4397,18 @@ def _warn_defaulted_identity(context: str, defaulted: bool) -> None:
 
 @ai_session_app.command("start")
 def ai_session_start(
-    agent: str = typer.Option("", "--agent", help="Agent identifier (defaults to unknown)"),
-    model: str = typer.Option("", "--model", help="Raw model identifier (defaults to unknown-model)"),
-    agent_name: str = typer.Option("", "--agent-name", help="Optional user-facing agent name"),
-    ttl_minutes: int = typer.Option(120, "--ttl-minutes", min=1, max=1440, help="Session expiration in minutes"),
+    agent: str = typer.Option(
+        "", "--agent", help="Agent identifier (defaults to unknown)"
+    ),
+    model: str = typer.Option(
+        "", "--model", help="Raw model identifier (defaults to unknown-model)"
+    ),
+    agent_name: str = typer.Option(
+        "", "--agent-name", help="Optional user-facing agent name"
+    ),
+    ttl_minutes: int = typer.Option(
+        120, "--ttl-minutes", min=1, max=1440, help="Session expiration in minutes"
+    ),
 ):
     """Deprecated: manual AI session signing has been removed."""
     console.print("Use `agensic run <agent>` for observed agent sessions.")
@@ -4090,14 +4429,26 @@ def ai_session_status():
     raise typer.Exit(code=2)
 
 
-@app.command("ai-exec", context_settings={"allow_extra_args": True, "ignore_unknown_options": True}, hidden=True)
+@app.command(
+    "ai-exec",
+    context_settings={"allow_extra_args": True, "ignore_unknown_options": True},
+    hidden=True,
+)
 def ai_exec(
     ctx: typer.Context,
-    agent: str = typer.Option("", "--agent", help="Agent identifier, for example codex"),
-    model: str = typer.Option("", "--model", help="Raw model identifier, for example gpt-5.3"),
-    agent_name: str = typer.Option("", "--agent-name", help="Optional user-facing agent name"),
+    agent: str = typer.Option(
+        "", "--agent", help="Agent identifier, for example codex"
+    ),
+    model: str = typer.Option(
+        "", "--model", help="Raw model identifier, for example gpt-5.3"
+    ),
+    agent_name: str = typer.Option(
+        "", "--agent-name", help="Optional user-facing agent name"
+    ),
     trace: str = typer.Option("", "--trace", help="Optional trace id"),
-    source: str = typer.Option("unknown", "--source", help="Log source (runtime/history/unknown)"),
+    source: str = typer.Option(
+        "unknown", "--source", help="Log source (runtime/history/unknown)"
+    ),
 ):
     """Deprecated: manual AI_EXECUTED wrappers have been removed."""
     console.print("Use `agensic run <agent>` for observed agent sessions.")
@@ -4107,7 +4458,9 @@ def ai_exec(
 @app.command(hidden=True)
 def wrap(
     agent: str = typer.Argument(..., help="Agent identifier"),
-    model: str = typer.Option("gpt-5.3", "--model", help="Default model for the wrapper"),
+    model: str = typer.Option(
+        "gpt-5.3", "--model", help="Default model for the wrapper"
+    ),
     function_name: str = typer.Option("", "--name", help="Wrapper function name"),
 ):
     """Deprecated: manual shell wrappers have been removed."""
@@ -4117,7 +4470,9 @@ def wrap(
 
 @provenance_registry_app.command("list")
 def provenance_registry_list(
-    status: str = typer.Option("", "--status", help="Optional status filter: verified/community"),
+    status: str = typer.Option(
+        "", "--status", help="Optional status filter: verified/community"
+    ),
     as_json: bool = typer.Option(False, "--json", help="Print raw JSON payload"),
 ):
     params = {"status": str(status or "").strip()}
@@ -4221,7 +4576,9 @@ def _run_fix_safe() -> int:
     try:
         start()
     except typer.Exit as exc:
-        _append_repair_log("fix_safe_restart_failed", {"exit_code": int(exc.exit_code or 1)})
+        _append_repair_log(
+            "fix_safe_restart_failed", {"exit_code": int(exc.exit_code or 1)}
+        )
         raise
 
     elapsed = round(time.time() - started, 2)
@@ -4286,7 +4643,9 @@ def _run_fix_recover() -> int:
     try:
         start()
     except typer.Exit as exc:
-        _append_repair_log("fix_recover_restart_failed", {"exit_code": int(exc.exit_code or 1)})
+        _append_repair_log(
+            "fix_recover_restart_failed", {"exit_code": int(exc.exit_code or 1)}
+        )
         raise
 
     elapsed = round(time.time() - started, 2)
@@ -4336,14 +4695,26 @@ def _run_fix_factory_reset() -> int:
 
 @app.command()
 def fix(
-    safe: bool = typer.Option(False, "--safe", help="Rebuild vector index and preserve metadata when possible."),
-    recover: bool = typer.Option(False, "--recover", help="Restore SQLite from latest snapshot, replay journal, then rebuild vector cache."),
-    factory_reset: bool = typer.Option(False, "--factory-reset", help="Fully wipe Agensic state."),
+    safe: bool = typer.Option(
+        False,
+        "--safe",
+        help="Rebuild vector index and preserve metadata when possible.",
+    ),
+    recover: bool = typer.Option(
+        False,
+        "--recover",
+        help="Restore SQLite from latest snapshot, replay journal, then rebuild vector cache.",
+    ),
+    factory_reset: bool = typer.Option(
+        False, "--factory-reset", help="Fully wipe Agensic state."
+    ),
 ):
     """Repair Agensic storage state."""
     selected = [flag for flag in (safe, recover, factory_reset) if flag]
     if len(selected) > 1:
-        console.print("[red]Choose exactly one mode:[/red] --safe, --recover, or --factory-reset")
+        console.print(
+            "[red]Choose exactly one mode:[/red] --safe, --recover, or --factory-reset"
+        )
         raise typer.Exit(code=1)
     if not selected:
         safe = True
@@ -4365,20 +4736,35 @@ def fix(
     finally:
         _release_fix_lock(lock_fd)
 
+
 @app.command("shortcuts")
 def shortcuts_command():
     """Show keyboard shortcuts."""
     show_shortcuts()
 
 
-@app.command("run", context_settings={"allow_extra_args": True, "ignore_unknown_options": True})
+@app.command(
+    "run", context_settings={"allow_extra_args": True, "ignore_unknown_options": True}
+)
 def track_command(
     ctx: typer.Context,
-    model: str = typer.Option("", "--model", help="Explicit tracked model identifier for any provider"),
-    agent_name: str = typer.Option("", "--agent-name", help="Override tracked agent display name"),
-    replay: bool = typer.Option(False, "--replay", help="Replay the decoded transcript when using 'run inspect'"),
-    text: bool = typer.Option(False, "--text", help="Print text output instead of opening the session TUI for 'run inspect'"),
-    tail: int = typer.Option(8, "--tail", min=1, max=100, help="Tail event count for 'run inspect'"),
+    model: str = typer.Option(
+        "", "--model", help="Explicit tracked model identifier for any provider"
+    ),
+    agent_name: str = typer.Option(
+        "", "--agent-name", help="Override tracked agent display name"
+    ),
+    replay: bool = typer.Option(
+        False, "--replay", help="Replay the decoded transcript when using 'run inspect'"
+    ),
+    text: bool = typer.Option(
+        False,
+        "--text",
+        help="Print text output instead of opening the session TUI for 'run inspect'",
+    ),
+    tail: int = typer.Option(
+        8, "--tail", min=1, max=100, help="Tail event count for 'run inspect'"
+    ),
 ):
     """Launch, inspect, and manage agent CLI sessions."""
     from . import track as track_runtime
@@ -4395,7 +4781,9 @@ def track_command(
         raise typer.Exit(code=2)
 
     if args[0] == "--":
-        console.print("[red]Raw command mode is no longer supported. Use `agensic run <agent>`. [/red]")
+        console.print(
+            "[red]Raw command mode is no longer supported. Use `agensic run <agent>`. [/red]"
+        )
         raise typer.Exit(code=2)
 
     if args[0].startswith("-"):
@@ -4417,26 +4805,44 @@ def track_command(
                 console.print(f"[red]Unknown run stop option:[/red] {clean_arg}")
                 raise typer.Exit(code=2)
             if session_id:
-                console.print("[red]Usage: agensic run stop [<session_id>] [--all][/red]")
+                console.print(
+                    "[red]Usage: agensic run stop [<session_id>] [--all][/red]"
+                )
                 raise typer.Exit(code=2)
             session_id = clean_arg
         if stop_all and session_id:
-            console.print("[red]Use either a session_id or --all for 'run stop', not both.[/red]")
+            console.print(
+                "[red]Use either a session_id or --all for 'run stop', not both.[/red]"
+            )
             raise typer.Exit(code=2)
-        raise typer.Exit(code=track_runtime.stop_track_sessions(session_id, stop_all=stop_all))
+        raise typer.Exit(
+            code=track_runtime.stop_track_sessions(session_id, stop_all=stop_all)
+        )
     if args[0] == "inspect" and len(args) <= 2:
         session_id = args[1] if len(args) == 2 else ""
         if text:
-            raise typer.Exit(code=track_runtime.inspect_track_session(session_id, replay=replay, tail_events=tail))
+            raise typer.Exit(
+                code=track_runtime.inspect_track_session(
+                    session_id, replay=replay, tail_events=tail
+                )
+            )
         try:
             ok = _run_sessions_tui(session_id=session_id, replay=replay)
         except Exception as exc:
-            console.print(f"[yellow]Sessions TUI unavailable, falling back:[/yellow] {exc}")
+            console.print(
+                f"[yellow]Sessions TUI unavailable, falling back:[/yellow] {exc}"
+            )
         else:
             if ok:
                 raise typer.Exit(code=0)
-            console.print("[yellow]Sessions TUI exited with non-zero status, falling back.[/yellow]")
-        raise typer.Exit(code=track_runtime.inspect_track_session(session_id, replay=replay, tail_events=tail))
+            console.print(
+                "[yellow]Sessions TUI exited with non-zero status, falling back.[/yellow]"
+            )
+        raise typer.Exit(
+            code=track_runtime.inspect_track_session(
+                session_id, replay=replay, tail_events=tail
+            )
+        )
 
     try:
         launch = track_runtime.prepare_track_launch(
@@ -4449,7 +4855,9 @@ def track_command(
         raise typer.Exit(code=2)
 
     replay_metadata = _consume_time_travel_replay_metadata()
-    raise typer.Exit(code=track_runtime.run_tracked_command(launch, replay_metadata=replay_metadata))
+    raise typer.Exit(
+        code=track_runtime.run_tracked_command(launch, replay_metadata=replay_metadata)
+    )
 
 
 @app.callback(invoke_without_command=True)
@@ -4489,10 +4897,15 @@ def main(
     if ctx.invoked_subcommand is None:
         console.print("[bold cyan]Agensic[/bold cyan] - Use --help for commands.")
 
+
 def show_shortcuts():
     """Display the shortcuts help panel."""
     rows = [
-        ("Accept inline suggestion", "Tab", "Accept full suggestion (native completion in path/script contexts)"),
+        (
+            "Accept inline suggestion",
+            "Tab",
+            "Accept full suggestion (native completion in path/script contexts)",
+        ),
         ("Trigger suggestion", "Ctrl+Space", "Manual trigger"),
         ("Partial accept (word)", "Option+Right", "Accept next word"),
         ("Cycle suggestions", "Ctrl+N / Ctrl+P", "Next / previous"),
@@ -4528,6 +4941,7 @@ def _add_custom_agent_and_exit(agent_token: str) -> None:
         f"[green]Agent '{created['agent_id']}' added.[/green] Tracked launch command: [bold]{created['command']}[/bold]"
     )
     raise typer.Exit(code=0)
+
 
 if __name__ == "__main__":
     app()
