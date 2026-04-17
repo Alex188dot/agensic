@@ -4,6 +4,14 @@ import sys
 from dataclasses import dataclass
 from pathlib import Path
 
+from agensic.utils.platform import (
+    binary_suffix,
+    default_shell_name,
+    is_linux,
+    is_windows,
+    venv_python_path,
+)
+
 
 APP_NAME = "agensic"
 APP_DISPLAY_NAME = "Agensic"
@@ -88,7 +96,14 @@ def get_app_paths() -> AppPaths:
         user_bin_dir = _env_path("XDG_BIN_HOME", _home_child(".local", "bin"))
 
     install_bin_dir = os.path.join(install_dir, "bin")
-    primary_shell_integration = "agensic.bash" if sys.platform.startswith("linux") else "agensic.zsh"
+    _suffix = binary_suffix()
+    _default_shell = default_shell_name()
+    if _default_shell == "powershell":
+        primary_shell_integration = "agensic_profile.ps1"
+    elif _default_shell == "bash":
+        primary_shell_integration = "agensic.bash"
+    else:
+        primary_shell_integration = "agensic.zsh"
     shell_support_dir = os.path.join(install_dir, "shell")
     return AppPaths(
         config_dir=config_dir,
@@ -116,13 +131,13 @@ def get_app_paths() -> AppPaths:
         shell_bash_integration_path=os.path.join(install_dir, "agensic.bash"),
         shell_shared_helpers_path=os.path.join(shell_support_dir, "agensic_shared.sh"),
         shell_client_path=os.path.join(install_dir, "shell_client.py"),
-        runtime_python_path=os.path.join(install_dir, ".venv", "bin", "python"),
-        launcher_path=os.path.join(user_bin_dir, APP_NAME),
-        session_start_launcher_path=os.path.join(user_bin_dir, "agensic_session_start"),
-        session_status_launcher_path=os.path.join(user_bin_dir, "agensic_session_status"),
-        session_stop_launcher_path=os.path.join(user_bin_dir, "agensic_session_stop"),
+        runtime_python_path=venv_python_path(os.path.join(install_dir, ".venv")),
+        launcher_path=os.path.join(user_bin_dir, APP_NAME + _suffix),
+        session_start_launcher_path=os.path.join(user_bin_dir, "agensic_session_start" + _suffix),
+        session_status_launcher_path=os.path.join(user_bin_dir, "agensic_session_status" + _suffix),
+        session_stop_launcher_path=os.path.join(user_bin_dir, "agensic_session_stop" + _suffix),
         ai_session_state_path=os.path.join(state_dir, "ai_session.env"),
-        tuis_bin=os.path.join(install_bin_dir, "agensic-tuis"),
+        tuis_bin=os.path.join(install_bin_dir, "agensic-tuis" + _suffix),
         provenance_private_key_path=os.path.join(config_dir, "provenance_ed25519.pem"),
         provenance_public_key_path=os.path.join(config_dir, "provenance_ed25519.pub.pem"),
         agent_registry_local_override_path=os.path.join(config_dir, "agent_registry.local.json"),
@@ -142,7 +157,12 @@ def ensure_app_layout() -> None:
         APP_PATHS.shell_support_dir,
         APP_PATHS.user_bin_dir,
     ):
-        os.makedirs(path, mode=0o700, exist_ok=True)
+        os.makedirs(path, exist_ok=True)
+        if not is_windows():
+            try:
+                os.chmod(path, 0o700)
+            except OSError:
+                pass
 
 
 def migrate_legacy_layout() -> None:
@@ -167,7 +187,7 @@ def migrate_legacy_layout() -> None:
         (legacy_root / "shell" / "agensic_shared.sh", Path(APP_PATHS.shell_shared_helpers_path)),
         (legacy_root / "shell_client.py", Path(APP_PATHS.shell_client_path)),
     )
-    if not sys.platform.startswith("linux"):
+    if not is_linux():
         file_migrations = (
             (legacy_root / "agensic.zsh", Path(APP_PATHS.shell_integration_path)),
             *file_migrations,
@@ -175,7 +195,12 @@ def migrate_legacy_layout() -> None:
     for source, dest in file_migrations:
         if not source.exists() or dest.exists():
             continue
-        os.makedirs(dest.parent, mode=0o700, exist_ok=True)
+        os.makedirs(dest.parent, exist_ok=True)
+        if not is_windows():
+            try:
+                os.chmod(dest.parent, 0o700)
+            except OSError:
+                pass
         shutil.copy2(source, dest)
 
     dir_migrations = (
@@ -191,5 +216,10 @@ def migrate_legacy_layout() -> None:
     for source, dest in dir_migrations:
         if not source.exists() or dest.exists():
             continue
-        os.makedirs(dest.parent, mode=0o700, exist_ok=True)
+        os.makedirs(dest.parent, exist_ok=True)
+        if not is_windows():
+            try:
+                os.chmod(dest.parent, 0o700)
+            except OSError:
+                pass
         shutil.copytree(source, dest, dirs_exist_ok=True)

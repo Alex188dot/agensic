@@ -1,6 +1,5 @@
 import base64
 import errno
-import fcntl
 import gzip
 import hashlib
 import json
@@ -14,12 +13,20 @@ import signal
 import struct
 import subprocess
 import sys
-import termios
 import threading
 import time
 import tomllib
-import tty
 import uuid
+
+# POSIX-only modules — not available on Windows.
+if sys.platform != "win32":
+    import fcntl  # type: ignore
+    import termios  # type: ignore
+    import tty  # type: ignore
+else:
+    fcntl = None  # type: ignore
+    termios = None  # type: ignore
+    tty = None  # type: ignore
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
@@ -470,9 +477,13 @@ def ensure_track_supported() -> None:
 
 
 def _ensure_track_layout() -> None:
+    from agensic.utils.platform import is_windows
     migrate_legacy_layout()
     ensure_app_layout()
-    os.makedirs(_track_transcripts_dir(), mode=0o700, exist_ok=True)
+    if is_windows():
+        os.makedirs(_track_transcripts_dir(), exist_ok=True)
+    else:
+        os.makedirs(_track_transcripts_dir(), mode=0o700, exist_ok=True)
 
 
 def _track_transcript_path(session_id: str) -> str:
@@ -619,27 +630,22 @@ def _compress_track_artifact(path: str) -> str:
 
 
 def _platform_rust_target() -> str:
-    machine = (os.uname().machine if hasattr(os, "uname") else "").strip().lower()
-    if sys.platform == "darwin" and machine in {"arm64", "aarch64"}:
-        return "aarch64-apple-darwin"
-    if sys.platform == "darwin" and machine in {"x86_64", "amd64"}:
-        return "x86_64-apple-darwin"
-    if sys.platform.startswith("linux") and machine in {"x86_64", "amd64"}:
-        return "x86_64-unknown-linux-gnu"
-    if sys.platform.startswith("linux") and machine in {"arm64", "aarch64"}:
-        return "aarch64-unknown-linux-gnu"
-    return ""
+    from agensic.utils.platform import platform_rust_target as _prt
+    return _prt()
 
 
 def _local_tuis_candidates() -> list[str]:
+    from agensic.utils.platform import binary_suffix as _bin_suffix
     explicit = str(os.environ.get("AGENSIC_TUIS_LOCAL_BIN", "") or "").strip()
     target = _platform_rust_target()
+    _suffix = _bin_suffix()
+    _tuis_name = "agensic-tuis" + _suffix
     project_root = str(Path(__file__).resolve().parents[2])
     cwd = os.getcwd()
     candidates = [
         explicit,
         APP_PATHS.tuis_bin,
-        os.path.join(cwd, "rust", "tuis", "target", "release", "agensic-tuis"),
+        os.path.join(cwd, "rust", "tuis", "target", "release", _tuis_name),
         (
             os.path.join(
                 cwd,
@@ -648,12 +654,12 @@ def _local_tuis_candidates() -> list[str]:
                 "target",
                 target,
                 "release",
-                "agensic-tuis",
+                _tuis_name,
             )
             if target
             else ""
         ),
-        os.path.join(project_root, "rust", "tuis", "target", "release", "agensic-tuis"),
+        os.path.join(project_root, "rust", "tuis", "target", "release", _tuis_name),
         (
             os.path.join(
                 project_root,
@@ -662,7 +668,7 @@ def _local_tuis_candidates() -> list[str]:
                 "target",
                 target,
                 "release",
-                "agensic-tuis",
+                _tuis_name,
             )
             if target
             else ""
@@ -2615,15 +2621,29 @@ def _request_track_session_stop(state: dict[str, Any]) -> int:
         )
 
     if root_pid > 0:
-        try:
-            os.killpg(root_pid, signal.SIGTERM)
-        except ProcessLookupError:
-            pass
-        except Exception as exc:
-            console.print(
-                f"[red]Failed to stop tracked session {session_id or '-'}:[/red] {exc}"
-            )
-            return 1
+        if sys.platform == "win32":
+            # os.killpg is not available on Windows; use psutil to terminate
+            # the process tree (parent + all children).
+            try:
+                proc = psutil.Process(root_pid)
+                proc.terminate()  # SIGTERM equivalent
+            except psutil.NoSuchProcess:
+                pass
+            except Exception as exc:
+                console.print(
+                    f"[red]Failed to stop tracked session {session_id or '-'}:[/red] {exc}"
+                )
+                return 1
+        else:
+            try:
+                os.killpg(root_pid, signal.SIGTERM)
+            except ProcessLookupError:
+                pass
+            except Exception as exc:
+                console.print(
+                    f"[red]Failed to stop tracked session {session_id or '-'}:[/red] {exc}"
+                )
+                return 1
 
         deadline = time.monotonic() + TRACK_STOP_GRACE_SECONDS
         while time.monotonic() < deadline:
@@ -2631,10 +2651,17 @@ def _request_track_session_stop(state: dict[str, Any]) -> int:
                 break
             time.sleep(0.05)
         if _is_pid_alive(root_pid):
-            try:
-                os.killpg(root_pid, signal.SIGKILL)
-            except Exception:
-                pass
+            if sys.platform == "win32":
+                try:
+                    proc = psutil.Process(root_pid)
+                    proc.kill()  # SIGKILL equivalent
+                except Exception:
+                    pass
+            else:
+                try:
+                    os.killpg(root_pid, signal.SIGKILL)
+                except Exception:
+                    pass
     return 0
 
 
@@ -4117,6 +4144,8 @@ def _watch_tracked_process_tree(runtime: TrackRuntime) -> None:
 
 
 def _apply_winsize(master_fd: int, stdin_fd: int) -> tuple[int, int] | None:
+    if fcntl is None or termios is None:
+        return None
     try:
         raw = fcntl.ioctl(stdin_fd, termios.TIOCGWINSZ, struct.pack("HHHH", 0, 0, 0, 0))
         fcntl.ioctl(master_fd, termios.TIOCSWINSZ, raw)
@@ -4292,8 +4321,13 @@ def run_tracked_command(
                 nonlocal resize_pending
                 resize_pending = True
 
-            resize_handler = signal.getsignal(signal.SIGWINCH)
-            signal.signal(signal.SIGWINCH, _on_resize)
+            resize_handler = (
+                signal.getsignal(signal.SIGWINCH)
+                if hasattr(signal, SIGWINCH)
+                else None
+            )
+            if hasattr(signal, SIGWINCH):
+                signal.signal(signal.SIGWINCH, _on_resize)
 
         with (
             open(transcript_path, "a", encoding="utf-8") as transcript,
@@ -4496,7 +4530,7 @@ def run_tracked_command(
         runtime.stop_event.set()
         if watcher_started:
             watcher.join(timeout=5.0)
-        if resize_handler is not None:
+        if resize_handler is not None and hasattr(signal, SIGWINCH):
             try:
                 signal.signal(signal.SIGWINCH, resize_handler)
             except Exception:

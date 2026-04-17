@@ -16,6 +16,7 @@ from cryptography.hazmat.primitives.asymmetric.ed25519 import (
 from agensic.paths import APP_PATHS
 from .agent_registry import AgentRegistry, build_model_fingerprint
 from agensic.utils import ensure_private_dir
+from agensic.utils.platform import is_windows
 
 
 PROOF_MAX_AGE_SECONDS = 900
@@ -134,7 +135,11 @@ def ensure_provenance_keypair(
         if not isinstance(loaded_private, Ed25519PrivateKey):
             raise RuntimeError("provenance private key is not Ed25519")
         private_key = loaded_private
-    os.chmod(private_target, 0o600)
+    if not is_windows():
+        try:
+            os.chmod(private_target, 0o600)
+        except OSError:
+            pass
 
     public_key = private_key.public_key()
     expected_public_bytes = public_key.public_bytes(
@@ -153,7 +158,11 @@ def ensure_provenance_keypair(
     if existing_public_bytes != expected_public_bytes:
         with open(public_target, "wb") as public_file:
             public_file.write(expected_public_bytes)
-    os.chmod(public_target, 0o600)
+    if not is_windows():
+        try:
+            os.chmod(public_target, 0o600)
+        except OSError:
+            pass
     return (private_target, public_target)
 
 

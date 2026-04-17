@@ -39,7 +39,7 @@ def _clear_gpu_cache() -> None:
     try:
         if torch.cuda.is_available():
             torch.cuda.empty_cache()
-        elif torch.backends.mps.is_available():
+        elif hasattr(torch, 'mps') and hasattr(torch.mps, 'is_available') and torch.mps.is_available():
             torch.mps.empty_cache()
     except Exception:
         pass

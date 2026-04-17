@@ -1,5 +1,6 @@
 import os
 import shlex
+import subprocess
 import sys
 
 BLOCKED_EXECUTABLES = {
@@ -80,9 +81,8 @@ def strip_leading_agensic_env_assignments(command: str) -> str:
 
 
 def _default_shell_name() -> str:
-    if sys.platform.startswith("linux"):
-        return "bash"
-    return "zsh"
+    from agensic.utils.platform import default_shell_name
+    return default_shell_name()
 
 
 def normalize_shell_name(value: str) -> str:
@@ -336,6 +336,35 @@ def is_git_destructive_subcommand(args: list[str]) -> bool:
                 return True
 
     return False
+
+
+def shell_split(value: str) -> list[str]:
+    """Split a shell command string into tokens.
+
+    Uses ``posix=True`` on Unix and ``posix=False`` on Windows so that
+    backslash paths and different quoting rules are handled correctly
+    on each platform.
+    """
+    raw = str(value or "").strip()
+    if not raw:
+        return []
+    try:
+        return [str(token or "") for token in shlex.split(raw, posix=sys.platform != "win32")]
+    except Exception:
+        return [part for part in raw.split() if part]
+
+
+def shell_join(tokens: list[str]) -> str:
+    """Join command tokens back into a shell string.
+
+    Uses :func:`shlex.join` on Unix (single-quote style) and
+    :func:`subprocess.list2cmdline` on Windows (double-quote / cmd.exe style).
+    """
+    if not tokens:
+        return ""
+    if sys.platform == "win32":
+        return subprocess.list2cmdline(tokens)
+    return shlex.join(tokens)
 
 
 def is_blocked_command(command: str) -> bool:

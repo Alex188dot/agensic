@@ -65,6 +65,15 @@ from agensic.utils import (
     ensure_private_dir,
     harden_private_tree,
 )
+from agensic.utils.platform import (
+    binary_suffix as _binary_suffix,
+    is_linux,
+    is_macos,
+    is_windows,
+    machine as _platform_machine,
+    platform_tag as _platform_tag_from_module,
+    platform_rust_target as _platform_rust_target_from_module,
+)
 from agensic.utils.shell import (
     current_shell_name,
     strip_leading_agensic_env_assignments,
@@ -156,8 +165,24 @@ LEGACY_BRAND = "".join(("ghost", "shell"))
 LEGACY_CLI_NAME = "".join(("ai", "terminal"))
 LEGACY_CONFIG_DIR = LEGACY_ROOT_DIR
 LEGACY_PID_FILE = os.path.join(LEGACY_CONFIG_DIR, "daemon.pid")
+def _get_uid_fragment() -> str:
+    """Return a unique fragment for the uninstall sentinel file.
+
+    Uses ``os.getuid()`` on Unix and ``os.getlogin()`` on Windows.
+    """
+    if is_windows():
+        try:
+            return str(os.getlogin()).replace(" ", "_")
+        except Exception:
+            return str(os.getpid())
+    try:
+        return str(os.getuid())
+    except AttributeError:
+        return str(os.getpid())
+
+
 UNINSTALL_SENTINEL = os.path.join(
-    tempfile.gettempdir(), f"agensic-shell-uninstalled-{os.getuid()}"
+    tempfile.gettempdir(), f"agensic-shell-uninstalled-{_get_uid_fragment()}"
 )
 PROJECT_ROOT = str(Path(__file__).resolve().parents[2])
 SERVER_SCRIPT = os.path.join(PROJECT_ROOT, "server.py")
@@ -709,14 +734,36 @@ def _extract_release_tarball(archive_path: Path, destination_dir: Path) -> Path:
 def _run_release_installer(source_dir: Path) -> None:
     env = os.environ.copy()
     env["AGENSIC_INSTALL_SKIP_FIRST_RUN"] = "1"
-    result = subprocess.run(
-        ["bash", "install.sh"],
-        cwd=str(source_dir),
-        env=env,
-        capture_output=True,
-        text=True,
-        check=False,
-    )
+    if is_windows():
+        install_script = source_dir / "install.ps1"
+        if install_script.is_file():
+            result = subprocess.run(
+                ["powershell", "-ExecutionPolicy", "Bypass", "-File", str(install_script)],
+                cwd=str(source_dir),
+                env=env,
+                capture_output=True,
+                text=True,
+                check=False,
+            )
+        else:
+            # Fallback: try install.sh via bash (WSL or Git Bash may provide it)
+            result = subprocess.run(
+                ["bash", "install.sh"],
+                cwd=str(source_dir),
+                env=env,
+                capture_output=True,
+                text=True,
+                check=False,
+            )
+    else:
+        result = subprocess.run(
+            ["bash", "install.sh"],
+            cwd=str(source_dir),
+            env=env,
+            capture_output=True,
+            text=True,
+            check=False,
+        )
     if result.returncode != 0:
         detail = (result.stderr or result.stdout or "installer failed").strip()
         raise RuntimeError(detail)
@@ -751,8 +798,10 @@ def _print_daemon_auth_hint() -> None:
 
 
 def _default_shell_name() -> str:
+    if is_windows():
+        return current_shell_name(default="powershell")
     return current_shell_name(
-        default="bash" if sys.platform.startswith("linux") else "zsh"
+        default="bash" if is_linux() else "zsh"
     )
 
 
@@ -872,39 +921,18 @@ def _version_lt(left: str, right: str) -> bool:
     return tuple(a) < tuple(b)
 
 
-def _platform_tag() -> str:
-    machine = (os.uname().machine if hasattr(os, "uname") else "").strip().lower()
-    if sys.platform == "darwin" and machine in {"arm64", "aarch64"}:
-        return "darwin-arm64"
-    if sys.platform == "darwin" and machine in {"x86_64", "amd64"}:
-        return "darwin-x64"
-    if sys.platform.startswith("linux") and machine in {"x86_64", "amd64"}:
-        return "linux-x64"
-    if sys.platform.startswith("linux") and machine in {"arm64", "aarch64"}:
-        return "linux-arm64"
-    return f"{sys.platform}-{machine or 'unknown'}"
-
-
 def _platform_rust_target() -> str:
-    machine = (os.uname().machine if hasattr(os, "uname") else "").strip().lower()
-    if sys.platform == "darwin" and machine in {"arm64", "aarch64"}:
-        return "aarch64-apple-darwin"
-    if sys.platform == "darwin" and machine in {"x86_64", "amd64"}:
-        return "x86_64-apple-darwin"
-    if sys.platform.startswith("linux") and machine in {"x86_64", "amd64"}:
-        return "x86_64-unknown-linux-gnu"
-    if sys.platform.startswith("linux") and machine in {"arm64", "aarch64"}:
-        return "aarch64-unknown-linux-gnu"
-    return ""
+    return _platform_rust_target_from_module()
 
 
 def _local_tuis_candidates() -> list[str]:
+    _suffix = _binary_suffix()
     explicit = str(os.environ.get("AGENSIC_TUIS_LOCAL_BIN", "") or "").strip()
     cwd = os.getcwd()
     target = _platform_rust_target()
     candidates = [
         explicit,
-        os.path.join(cwd, "rust", "tuis", "target", "release", "agensic-tuis"),
+        os.path.join(cwd, "rust", "tuis", "target", "release", "agensic-tuis" + _suffix),
         (
             os.path.join(
                 cwd,
@@ -913,12 +941,12 @@ def _local_tuis_candidates() -> list[str]:
                 "target",
                 target,
                 "release",
-                "agensic-tuis",
+                "agensic-tuis" + _suffix,
             )
             if target
             else ""
         ),
-        os.path.join(PROJECT_ROOT, "rust", "tuis", "target", "release", "agensic-tuis"),
+        os.path.join(PROJECT_ROOT, "rust", "tuis", "target", "release", "agensic-tuis" + _suffix),
         (
             os.path.join(
                 PROJECT_ROOT,
@@ -927,7 +955,7 @@ def _local_tuis_candidates() -> list[str]:
                 "target",
                 target,
                 "release",
-                "agensic-tuis",
+                "agensic-tuis" + _suffix,
             )
             if target
             else ""
@@ -1023,7 +1051,7 @@ def _resolve_tuis_platform_entry(manifest: dict) -> dict:
     platforms = manifest.get("platforms", {})
     if not isinstance(platforms, dict):
         raise RuntimeError("manifest_missing_platforms")
-    tag = _platform_tag()
+    tag = _platform_tag_from_module()
     entry = platforms.get(tag)
     if not isinstance(entry, dict):
         raise RuntimeError(f"platform_not_supported:{tag}")
@@ -1090,7 +1118,7 @@ def _ensure_tuis_binary() -> str:
     installed_bin = _resolve_installed_tuis_binary()
     if installed_bin:
         return installed_bin
-    platform_tag = _platform_tag()
+    platform_tag = _platform_tag_from_module()
     manifest_override = str(
         os.environ.get("AGENSIC_TUIS_MANIFEST_URL", "") or ""
     ).strip()
@@ -2091,15 +2119,23 @@ def _ensure_command_store_backend_ready() -> bool:
 
 
 def _is_startup_enabled() -> bool:
-    if sys.platform.startswith("linux"):
+    if is_windows():
+        # Windows startup will be implemented via Task Scheduler in Phase 2
+        return False
+    if is_linux():
         return os.path.exists(SYSTEMD_UNIT_PATH)
     return os.path.exists(PLIST_PATH)
 
 
 def _disable_startup_impl() -> None:
+    if is_windows():
+        # Windows startup will be implemented via Task Scheduler in Phase 2
+        console.print("[yellow]Daemon startup management is not yet supported on Windows.[/yellow]")
+        return
+
     removed = False
 
-    if sys.platform.startswith("linux"):
+    if is_linux():
         if os.path.exists(SYSTEMD_UNIT_PATH):
             subprocess.run(
                 ["systemctl", "--user", "disable", "--now", "agensic-daemon.service"],
@@ -2748,6 +2784,19 @@ def _read_pid_file(path: str = PID_FILE) -> int | None:
 
 
 def _find_listening_pids(port: int = 22000) -> list[int]:
+    if is_windows():
+        try:
+            import psutil
+            return [
+                conn.pid
+                for conn in psutil.net_connections(kind="tcp")
+                if conn.laddr.port == port
+                and conn.status == "LISTEN"
+                and conn.pid is not None
+                and conn.pid > 0
+            ]
+        except Exception:
+            return []
     try:
         result = subprocess.run(
             ["lsof", "-nP", f"-iTCP:{port}", "-sTCP:LISTEN", "-t"],
@@ -2935,6 +2984,8 @@ def _scrub_shell_rc_file(path: Path) -> bool:
 
 
 def _cleanup_legacy_daemon_artifacts() -> None:
+    if is_windows():
+        return  # launchctl/systemd cleanup not applicable on Windows
     legacy_pid = _read_pid_file(LEGACY_PID_FILE)
     if os.path.exists(LEGACY_PLIST_PATH):
         subprocess.run(
@@ -3362,6 +3413,10 @@ def setup():
 def _enable_startup_impl(start_now: bool) -> None:
     _clear_uninstall_sentinel()
     _cleanup_legacy_daemon_artifacts()
+
+    if is_windows():
+        console.print("[dim]Daemon auto-start is not yet supported on Windows.[/dim]")
+        return
 
     if sys.platform.startswith("linux"):
         os.makedirs(SYSTEMD_USER_DIR, mode=0o700, exist_ok=True)

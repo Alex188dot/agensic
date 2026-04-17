@@ -239,6 +239,18 @@ def get_history_file(shell: str) -> str:
         if not shell_name or any(name in shell_name for name in ("bash", "zsh", "sh")):
             return os.path.join(home, ".bash_history")
         return ""
+    if sys.platform == "win32":
+        # PowerShell history is stored in a different location
+        if "powershell" in shell_name or "pwsh" in shell_name:
+            ps_history = os.path.join(
+                home, "AppData", "Roaming", "Microsoft", "Windows", "PowerShell", "PSReadLine", "ConsoleHost_history.txt"
+            )
+            if os.path.exists(ps_history):
+                return ps_history
+            return ""
+        if "bash" in shell_name:
+            return os.path.join(home, ".bash_history")
+        return ""
     if "zsh" in shell_name:
         return os.path.join(home, ".zsh_history")
     if "bash" in shell_name:

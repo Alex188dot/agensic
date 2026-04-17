@@ -14,6 +14,7 @@ from agensic.server.routes_intent import router as intent_router
 from agensic.server.routes_predict import router as predict_router
 from agensic.server.routes_provenance import router as provenance_router
 from agensic.server.routes_sessions import router as sessions_router
+from agensic.utils.platform import is_windows
 from agensic.utils.shell import current_shell_name
 
 
@@ -90,8 +91,11 @@ def run():
 
     try:
         signal.signal(signal.SIGTERM, _handle_sigterm)
-    except Exception as exc:
-        deps.logger.warning("Failed to register SIGTERM handler: %s", str(exc))
+    except (OSError, ValueError) as exc:
+        # SIGTERM handler registration may fail on Windows or when not the
+        # main thread; the lifespan shutdown path still provides graceful exit.
+        if not is_windows():
+            deps.logger.warning("Failed to register SIGTERM handler: %s", str(exc))
 
     uvicorn_server.run()
 

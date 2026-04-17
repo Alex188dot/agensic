@@ -5,6 +5,8 @@ import tempfile
 from pathlib import Path
 from typing import Any
 
+from agensic.utils.platform import is_windows
+
 
 PRIVATE_DIR_MODE = 0o700
 PRIVATE_FILE_MODE = 0o600
@@ -12,6 +14,8 @@ PRIVATE_EXECUTABLE_MODE = 0o700
 
 
 def _chmod_best_effort(path: Path, mode: int) -> None:
+    if is_windows():
+        return
     try:
         os.chmod(path, mode)
     except Exception:
@@ -60,7 +64,11 @@ def atomic_write_text_private(
         dir=str(target.parent),
     )
     try:
-        os.fchmod(fd, desired_mode)
+        if not is_windows():
+            try:
+                os.fchmod(fd, desired_mode)
+            except OSError:
+                pass
         with os.fdopen(fd, "w", encoding=encoding) as f:
             f.write(content)
         os.replace(tmp_path, target)

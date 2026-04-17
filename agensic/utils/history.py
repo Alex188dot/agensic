@@ -2,6 +2,8 @@ import os
 import tempfile
 from pathlib import Path
 
+from agensic.utils.platform import is_windows
+
 
 def parse_history_line(raw_line: str) -> str:
     line = (raw_line or "").strip()
@@ -47,7 +49,11 @@ def rewrite_history_without_commands(
                         continue
                     dst.write(line)
 
-        os.chmod(tmp_path, source_stat.st_mode)
+        if not is_windows():
+            try:
+                os.chmod(tmp_path, source_stat.st_mode)
+            except OSError:
+                pass
         os.replace(tmp_path, history_path)
         return (removed_lines, "")
     except Exception as exc:

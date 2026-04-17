@@ -8,6 +8,7 @@ from pathlib import Path
 from agensic.paths import APP_PATHS, ensure_app_layout, migrate_legacy_layout
 from .loader import CONFIG_DIR
 from agensic.utils import ensure_private_dir, enforce_private_file
+from agensic.utils.platform import is_windows
 
 
 AUTH_FILE = APP_PATHS.auth_file
@@ -84,12 +85,20 @@ def save_auth_token(token: str, path: str | None = None) -> dict:
 
     fd, tmp_path = tempfile.mkstemp(prefix=".auth.", suffix=".json", dir=str(target.parent))
     try:
-        os.fchmod(fd, 0o600)
+        if not is_windows():
+            try:
+                os.fchmod(fd, 0o600)
+            except OSError:
+                pass
         with os.fdopen(fd, "w", encoding="utf-8") as f:
             json.dump(payload, f, indent=2)
             f.write("\n")
         os.replace(tmp_path, target)
-        os.chmod(target, 0o600)
+        if not is_windows():
+            try:
+                os.chmod(target, 0o600)
+            except OSError:
+                pass
     except Exception:
         try:
             os.remove(tmp_path)

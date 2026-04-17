@@ -6,6 +6,7 @@ import uuid
 from pathlib import Path
 
 from agensic.paths import ensure_app_layout, get_app_paths
+from agensic.utils.platform import is_windows
 
 AI_SESSION_ENV_KEYS = (
     "AGENSIC_AI_SESSION_ACTIVE",
@@ -28,12 +29,16 @@ def _shell_export_line(name: str, value: str) -> str:
 def _write_ai_session_state(values: dict[str, str]) -> None:
     ensure_app_layout()
     state_path = Path(get_app_paths().ai_session_state_path)
-    state_path.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
+    state_path.parent.mkdir(parents=True, exist_ok=True)
     lines = [f"{key}\t{str(values.get(key, '') or '')}" for key in AI_SESSION_ENV_KEYS]
     payload = "\n".join(lines) + "\n"
     tmp_path = state_path.with_suffix(f"{state_path.suffix}.tmp")
     tmp_path.write_text(payload, encoding="utf-8")
-    os.chmod(tmp_path, 0o600)
+    if not is_windows():
+        try:
+            os.chmod(tmp_path, 0o600)
+        except OSError:
+            pass
     os.replace(tmp_path, state_path)
 
 

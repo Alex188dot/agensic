@@ -10,8 +10,8 @@ Each phase has a checklist — mark items with `[x]` as they are completed.
 The current dependency is `zvec>=0.1.0`. Version 0.3.0+ introduced **native Windows builds**
 (MSVC 2022 tested). Without this upgrade, the vector database layer cannot run on Windows at all.
 
-- [ ] Bump `zvec>=0.3.1` in `pyproject.toml`
-- [ ] Bump `zvec>=0.3.1` in `requirements.txt`
+- [x] Bump `zvec>=0.3.1` in `pyproject.toml`
+- [x] Bump `zvec>=0.3.1` in `requirements.txt`
 - [ ] Verify `zvec` import works on a Windows Python 3.10+ environment
 - [ ] Run existing unit tests on macOS/Linux with the upgraded zvec to confirm no regressions
 
@@ -26,37 +26,37 @@ without crashing, even if some features are gated behind platform checks.
 
 `agensic/paths.py` already has a `win32` branch, but several fields are still Unix-specific.
 
-- [ ] Fix `runtime_python_path`: change `.venv/bin/python` → `.venv/Scripts/python.exe` on Windows
-- [ ] Fix `launcher_path` / `session_*_launcher_path`: replace bare `agensic` with `agensic.exe`
-- [ ] Fix `tuis_bin`: append `.exe` suffix on Windows
-- [ ] Fix `primary_shell_integration`: add `powershell` option for Windows
-- [ ] Review `ensure_app_layout()`: `mode=0o700` is a no-op on Windows — use `os.makedirs(path, exist_ok=True)` and rely on per-file ACLs
-- [ ] Add Windows-specific shell integration path: `agensic_profile.ps1`
+- [x] Fix `runtime_python_path`: change `.venv/bin/python` → `.venv/Scripts/python.exe` on Windows
+- [x] Fix `launcher_path` / `session_*_launcher_path`: replace bare `agensic` with `agensic.exe`
+- [x] Fix `tuis_bin`: append `.exe` suffix on Windows
+- [x] Fix `primary_shell_integration`: add `powershell` option for Windows
+- [x] Review `ensure_app_layout()`: `mode=0o700` is a no-op on Windows — use `os.makedirs(path, exist_ok=True)` and rely on per-file ACLs
+- [x] Add Windows-specific shell integration path: `agensic_profile.ps1`
 
 ### 1.2 File Permissions & Security
 
 `agensic/utils/fs.py`, `agensic/config/auth.py`, `agensic/engine/provenance.py`
 
-- [ ] Wrap every `os.chmod()` / `os.fchmod()` call in a `if os.name != 'nt':` guard
+- [x] Wrap every `os.chmod()` / `os.fchmod()` call in a `if os.name != 'nt':` guard
   (already partially done via `_chmod_best_effort`, but some direct calls remain)
-- [ ] `PRIVATE_DIR_MODE` / `PRIVATE_FILE_MODE` — document that these are no-ops on NTFS;
+- [x] `PRIVATE_DIR_MODE` / `PRIVATE_FILE_MODE` — document that these are no-ops on NTFS;
   rely on per-directory ACLs via `icacls` or Python `os.chmod` limited support
-- [ ] `cli.py` line 36: `os.chmod(tmp_path, 0o600)` → guard with platform check
-- [ ] `agensic/engine/provenance.py` lines 137/156: same pattern
-- [ ] `agensic/utils/history.py` line 50: same pattern
+- [x] `cli.py` line 36: `os.chmod(tmp_path, 0o600)` → guard with platform check
+- [x] `agensic/engine/provenance.py` lines 137/156: same pattern
+- [x] `agensic/utils/history.py` line 50: same pattern
 
 ### 1.3 Platform Detection Helpers
 
 Repeated across `app.py`, `track.py`, `paths.py`, `shell.py`.
 
-- [ ] Create `agensic/utils/platform.py` with:
+- [x] Create `agensic/utils/platform.py` with:
   - `is_windows() -> bool`
   - `is_macos() -> bool`
   - `is_linux() -> bool`
   - `platform_tag() -> str` (consolidate from `app.py._platform_tag` + `track.py._platform_rust_target`)
   - `python_executable() -> str` (`.venv/Scripts/python.exe` vs `.venv/bin/python`)
   - `binary_suffix() -> str` (`.exe` on Windows, `` elsewhere)
-- [ ] Replace all `sys.platform == "win32"` / `sys.platform.startswith("linux")` / etc.
+- [x] Replace all `sys.platform == "win32"` / `sys.platform.startswith("linux")` / etc.
   scattered across the codebase with calls to this module
 
 ### 1.4 shlex Usage (posix=True)
@@ -64,36 +64,36 @@ Repeated across `app.py`, `track.py`, `paths.py`, `shell.py`.
 `shlex.split(value, posix=True)` is used in ~15 places. On Windows, shell syntax
 differs (backslash paths, different quoting rules).
 
-- [ ] Audit all `shlex.split(..., posix=True)` calls
-- [ ] Create a helper `shell_split(value: str) -> list[str]` in `agensic/utils/shell.py`
+- [x] Audit all `shlex.split(..., posix=True)` calls
+- [x] Create a helper `shell_split(value: str) -> list[str]` in `agensic/utils/shell.py`
   that uses `posix=True` on Unix and `posix=False` on Windows
 - [ ] Replace direct `shlex.split` calls with the helper
 - [ ] Handle Windows backslash paths in command tokenization
 
 ### 1.5 os.uname() and Machine Detection
 
-- [ ] `app.py._platform_tag()` and `track.py._platform_rust_target()` use `os.uname()`
+- [x] `app.py._platform_tag()` and `track.py._platform_rust_target()` use `os.uname()`
   which does not exist on Windows
-- [ ] Replace with `platform.machine()` (already imported in `engine/context.py`)
-- [ ] Add Windows platform tags: `windows-x64`, `windows-arm64`
-- [ ] Add Windows Rust targets: `x86_64-pc-windows-msvc`, `aarch64-pc-windows-msvc`
+- [x] Replace with `platform.machine()` (already imported in `engine/context.py`)
+- [x] Add Windows platform tags: `windows-x64`, `windows-arm64`
+- [x] Add Windows Rust targets: `x86_64-pc-windows-msvc`, `aarch64-pc-windows-msvc`
 
 ### 1.6 Process Management
 
 `agensic/cli/app.py`, `agensic/cli/track.py`
 
-- [ ] `os.kill(pid, signal.SIGTERM)` / `os.kill(pid, signal.SIGKILL)` — these **do work** on
+- [x] `os.kill(pid, signal.SIGTERM)` / `os.kill(pid, signal.SIGKILL)` — these **do work** on
   Windows (Python maps them to `TerminateProcess`), so no code change needed ✓
-- [ ] `os.killpg(root_pid, signal.SIGTERM)` → not available on Windows;
+- [x] `os.killpg(root_pid, signal.SIGTERM)` → not available on Windows;
   use `psutil.Process(root_pid).terminate()` (recursively terminates children) or
   `subprocess.run(["taskkill", "/PID", str(root_pid), "/T"])`
-- [ ] `os.getsid()` / `os.getpgid()` → not available on Windows (already guarded in
+- [x] `os.getsid()` / `os.getpgid()` → not available on Windows (already guarded in
   `_safe_getsid`/`_safe_getpgid` with try/except, but verify `AttributeError` is caught)
-- [ ] `_is_pid_alive()`: `os.kill(pid, 0)` **does work** on Windows — raises `OSError` if
+- [x] `_is_pid_alive()`: `os.kill(pid, 0)` **does work** on Windows — raises `OSError` if
   process doesn't exist. Current implementation should be fine, but verify on Windows ✓
-- [ ] `_find_listening_pids()`: `lsof` doesn't exist on Windows;
+- [x] `_find_listening_pids()`: `lsof` doesn't exist on Windows;
   use `psutil.net_connections()` or `netstat` as fallback
-- [ ] `UNINSTALL_SENTINEL`: uses `os.getuid()` which doesn't exist on Windows;
+- [x] `UNINSTALL_SENTINEL`: uses `os.getuid()` which doesn't exist on Windows;
   use `os.getlogin()` or `getpass.getuser()` as fallback
 - [ ] `os.fork()` — used in test code and possibly `track.py`; does **not exist** on Windows
   at all. Must replace with `subprocess` multiprocessing approach
@@ -105,14 +105,14 @@ differs (backslash paths, different quoting rules).
 
 ### 1.7 Signals
 
-- [ ] `signal.SIGTERM` and `signal.SIGKILL` — **are defined on Windows** (values 15 and 9)
+- [x] `signal.SIGTERM` and `signal.SIGKILL` — **are defined on Windows** (values 15 and 9)
   and `os.kill()` with them works (maps to `TerminateProcess`). No code change needed ✓
-- [ ] `signal.SIGWINCH` → not available on Windows; disable terminal resize handling or
+- [x] `signal.SIGWINCH` → not available on Windows; disable terminal resize handling or
   use `threading`-based approach
 - [ ] `signal.SIGUSR1` / `SIGUSR2` if used → not available on Windows
-- [ ] `agensic/server/app.py` line 92: `signal.signal(signal.SIGTERM, ...)` → works on Windows
+- [x] `agensic/server/app.py` line 92: `signal.signal(signal.SIGTERM, ...)` → works on Windows
   but the handler behavior differs; verify graceful shutdown works via `CTRL_C_EVENT`
-- [ ] `agensic/cli/track.py` line 4295: `signal.getsignal/set(signal.SIGWINCH)` → guard
+- [x] `agensic/cli/track.py` line 4295: `signal.getsignal/set(signal.SIGWINCH)` → guard
   with `hasattr(signal, 'SIGWINCH')` for Windows
 
 ### 1.8 select / poll
@@ -124,32 +124,32 @@ differs (backslash paths, different quoting rules).
 
 ### 1.9 Environment Variables
 
-- [ ] `HOME` vs `USERPROFILE` — `os.path.expanduser("~")` works on both platforms, but any
+- [x] `HOME` vs `USERPROFILE` — `os.path.expanduser("~")` works on both platforms, but any
   direct `os.environ["HOME"]` reads will fail on Windows (uses `USERPROFILE` instead)
-- [ ] `PATH` separator: `os.pathsep` is `:` on Unix, `;` on Windows — any code splitting
+- [x] `PATH` separator: `os.pathsep` is `:` on Unix, `;` on Windows — any code splitting
   on `:` explicitly will break. Audit all `os.environ.get("PATH", "").split(":")` → use `os.pathsep`
-- [ ] `COMSPEC` — Windows equivalent of `SHELL`; already partially handled in `shell.py` ✓
+- [x] `COMSPEC` — Windows equivalent of `SHELL`; already partially handled in `shell.py` ✓
 
 ### 1.10 shlex.join() Output
 
 `shlex.join()` is used in several places and produces **Unix-style quoting** (single quotes)
 which is wrong for `cmd.exe` and PowerShell.
 
-- [ ] Audit all `shlex.join()` calls
-- [ ] Create a helper `shell_join(tokens: list[str]) -> str` in `agensic/utils/shell.py`
+- [x] Audit all `shlex.join()` calls
+- [x] Create a helper `shell_join(tokens: list[str]) -> str` in `agensic/utils/shell.py`
   that uses `shlex.join()` on Unix and `subprocess.list2cmdline()` on Windows
 - [ ] Replace direct `shlex.join` calls with the helper
 
 ### 1.11 Self-Update Flow
 
-- [ ] `_run_release_installer()` in `app.py` calls `["bash", "install.sh"]` — completely
+- [x] `_run_release_installer()` in `app.py` calls `["bash", "install.sh"]` — completely
   broken on Windows where bash may not be available
-- [ ] Create a Python-native installer path that doesn't require bash
-- [ ] Or: detect Windows and use `install.ps1` instead
+- [x] Create a Python-native installer path that doesn't require bash
+- [x] Or: detect Windows and use `install.ps1` instead
 
 ### 1.12 GPU Cache
 
-- [ ] `_clear_gpu_cache()` in `vector_db/command_db.py` checks `torch.mps.is_available()`
+- [x] `_clear_gpu_cache()` in `vector_db/command_db.py` checks `torch.mps.is_available()`
   — MPS is macOS-only and doesn't exist on Windows. The try/except already guards this,
   but add a `hasattr(torch, 'mps')` check for clarity
 
