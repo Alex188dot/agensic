@@ -4116,6 +4116,35 @@ def _watch_tracked_process_tree(runtime: TrackRuntime) -> None:
         time.sleep(TRACK_POLL_INTERVAL_SECONDS)
 
 
+def _terminate_tracked_child(proc: subprocess.Popen[bytes] | None) -> None:
+    """Stop the isolated tracked process group after an exceptional relay exit."""
+    if proc is None or proc.poll() is not None:
+        return
+    try:
+        os.killpg(int(proc.pid), signal.SIGTERM)
+    except (ProcessLookupError, PermissionError, OSError):
+        try:
+            proc.terminate()
+        except Exception:
+            return
+    try:
+        proc.wait(timeout=1.0)
+        return
+    except subprocess.TimeoutExpired:
+        pass
+    try:
+        os.killpg(int(proc.pid), signal.SIGKILL)
+    except (ProcessLookupError, PermissionError, OSError):
+        try:
+            proc.kill()
+        except Exception:
+            return
+    try:
+        proc.wait(timeout=1.0)
+    except Exception:
+        pass
+
+
 def _apply_winsize(master_fd: int, stdin_fd: int) -> tuple[int, int] | None:
     try:
         raw = fcntl.ioctl(stdin_fd, termios.TIOCGWINSZ, struct.pack("HHHH", 0, 0, 0, 0))
@@ -4494,6 +4523,8 @@ def run_tracked_command(
             )
     finally:
         runtime.stop_event.set()
+        if runtime.root_exit_code is None:
+            _terminate_tracked_child(proc)
         if watcher_started:
             watcher.join(timeout=5.0)
         if resize_handler is not None:

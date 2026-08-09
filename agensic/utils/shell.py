@@ -220,6 +220,38 @@ def tokenize_command(command: str) -> list[str]:
         return [part for part in raw.split() if part]
 
 
+def tokenize_command_graph(command: str) -> list[list[str]]:
+    """Split shell control-flow into independently inspectable command segments."""
+    raw = str(command or "").replace("\r\n", "\n").replace("\r", "\n")
+    if not raw.strip():
+        return []
+    try:
+        lexer = shlex.shlex(
+            raw.replace("\n", " ; "),
+            posix=True,
+            punctuation_chars="|&;()<>`",
+        )
+        lexer.whitespace_split = True
+        tokens = [str(token or "") for token in lexer]
+    except Exception:
+        tokens = raw.replace("\n", " ; ").split()
+
+    segments: list[list[str]] = []
+    current: list[str] = []
+    for token in tokens:
+        if token and all(char in "|&;()<>`" for char in token):
+            if current:
+                segments.append(current)
+                current = []
+            continue
+        if token == "$" and not current:
+            continue
+        current.append(token)
+    if current:
+        segments.append(current)
+    return segments
+
+
 def extract_executable_with_index(tokens: list[str]) -> tuple[str, int]:
     if not isinstance(tokens, list):
         return ("", -1)
@@ -338,8 +370,32 @@ def is_git_destructive_subcommand(args: list[str]) -> bool:
     return False
 
 
-def is_blocked_command(command: str) -> bool:
-    tokens = tokenize_command(command)
+def _nested_shell_command(tokens: list[str], executable_index: int) -> str:
+    executable_name = os.path.basename(tokens[executable_index]).strip().lower()
+    if executable_name not in {"sh", "bash", "zsh", "dash", "ksh", "fish"}:
+        return ""
+    args = tokens[executable_index + 1 :]
+    for index, token in enumerate(args):
+        if token in {"-c", "--command"} and index + 1 < len(args):
+            return str(args[index + 1] or "")
+    return ""
+
+
+def _indirect_executable(tokens: list[str], executable_index: int) -> str:
+    executable_name = os.path.basename(tokens[executable_index]).strip().lower()
+    args = tokens[executable_index + 1 :]
+    if executable_name == "xargs":
+        for token in args:
+            if token and not token.startswith("-"):
+                return str(token)
+    if executable_name == "find":
+        for index, token in enumerate(args):
+            if token in {"-exec", "-execdir", "-ok", "-okdir"} and index + 1 < len(args):
+                return str(args[index + 1])
+    return ""
+
+
+def _is_blocked_segment(tokens: list[str], depth: int) -> bool:
     executable, executable_index = extract_executable_with_index(tokens)
     if not executable:
         return False
@@ -355,4 +411,18 @@ def is_blocked_command(command: str) -> bool:
         return True
     if executable_name == "git" and is_git_destructive_subcommand(args):
         return True
+    if depth < 4:
+        nested = _nested_shell_command(tokens, executable_index)
+        if nested and is_blocked_command(nested, _depth=depth + 1):
+            return True
+        indirect = _indirect_executable(tokens, executable_index)
+        if indirect and is_blocked_command(indirect, _depth=depth + 1):
+            return True
     return False
+
+
+def is_blocked_command(command: str, _depth: int = 0) -> bool:
+    if _depth > 4:
+        return True
+    segments = tokenize_command_graph(command)
+    return any(_is_blocked_segment(tokens, _depth) for tokens in segments)

@@ -2,6 +2,7 @@ mod agents;
 mod checkpoints;
 mod sessions;
 mod sessions_render;
+mod shell_client;
 
 use chrono::{Duration as ChronoDuration, Local, NaiveDate, TimeZone};
 use clap::Parser;
@@ -507,10 +508,12 @@ struct App {
 
 impl App {
     fn new(client: Client, args: Args) -> Self {
-        let mut filters = Filters::default();
-        filters.label = args.label.clone();
-        filters.tier = args.tier.clone();
-        filters.agent = args.agent.clone();
+        let filters = Filters {
+            label: args.label.clone(),
+            tier: args.tier.clone(),
+            agent: args.agent.clone(),
+            ..Filters::default()
+        };
         Self {
             client,
             auth_token: args.auth_token.clone(),
@@ -738,9 +741,9 @@ impl App {
         let now_ts = now_epoch_seconds();
         let mut out: Vec<RunEntry> = source
             .iter()
-            .cloned()
             .filter(|row| Self::search_hit(row, &query))
             .filter(|row| self.row_passes_filters(row, now_ts))
+            .cloned()
             .collect();
 
         out.sort_by(|left, right| match self.sort_mode {
@@ -2785,6 +2788,13 @@ fn install_terminal_panic_hook() {
 
 fn main() {
     let raw_args: Vec<String> = env::args().collect();
+    if matches!(raw_args.get(1).map(String::as_str), Some("client")) {
+        if let Err(err) = shell_client::run_from_env(&raw_args[2..]) {
+            eprintln!("{}", err);
+            std::process::exit(1);
+        }
+        return;
+    }
     if matches!(raw_args.get(1).map(String::as_str), Some("agents")) {
         install_terminal_panic_hook();
         if let Err(err) = agents::run_from_env(&raw_args[2..]) {

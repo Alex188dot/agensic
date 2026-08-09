@@ -20,6 +20,7 @@ from rapidfuzz import fuzz
 from rapidfuzz.distance import Levenshtein
 from sentence_transformers import SentenceTransformer
 from agensic.paths import APP_PATHS, ensure_app_layout, migrate_legacy_layout
+from agensic.vector_db.prefix_index import CommandPrefixIndex
 from agensic.utils import (
     atomic_write_json_private,
     ensure_private_dir,
@@ -160,6 +161,7 @@ class CommandVectorDB:
         "--config-env",
     }
     PREFIX_SCAN_LIMIT = 2000
+    MAX_IN_MEMORY_COMMANDS = 20_000
     SEMANTIC_VECTOR_TOPN = 80
     EXEC_FUZZ_SCOPE_THRESHOLD = 84.0
     SEMANTIC_MIN_SCORE = 55.0
@@ -216,6 +218,8 @@ class CommandVectorDB:
                 self.feedback_db_path
             )
         self.command_cache: set[str] = set()
+        self._command_cache_order: OrderedDict[str, None] = OrderedDict()
+        self.prefix_index = CommandPrefixIndex()
         self.command_cache_by_exec: Dict[str, set[str]] = defaultdict(set)
         self.token_candidates_by_context: Dict[str, set[str]] = defaultdict(set)
         self.global_token_candidates: set[str] = set()
@@ -367,10 +371,29 @@ class CommandVectorDB:
             if self.is_removed_command(normalized):
                 continue
             self.command_cache.add(normalized)
+            self._command_cache_order.pop(normalized, None)
+            self._command_cache_order[normalized] = None
+            self.prefix_index.add(normalized)
             exec_key = self._prefix_exec_key(normalized)
             if exec_key:
                 self.command_cache_by_exec[exec_key].add(normalized)
             self._register_command_tokens(normalized)
+        self._evict_command_cache_overflow()
+
+    def _evict_command_cache_overflow(self) -> None:
+        evicted = False
+        while len(self._command_cache_order) > self.MAX_IN_MEMORY_COMMANDS:
+            command, _ = self._command_cache_order.popitem(last=False)
+            self.command_cache.discard(command)
+            self.prefix_index.discard(command)
+            exec_key = self._prefix_exec_key(command)
+            if exec_key in self.command_cache_by_exec:
+                self.command_cache_by_exec[exec_key].discard(command)
+                if not self.command_cache_by_exec[exec_key]:
+                    self.command_cache_by_exec.pop(exec_key, None)
+            evicted = True
+        if evicted:
+            self._rebuild_token_indexes()
 
     def _unregister_commands(self, commands: List[str]):
         if not commands:
@@ -380,6 +403,8 @@ class CommandVectorDB:
             if not normalized:
                 continue
             self.command_cache.discard(normalized)
+            self._command_cache_order.pop(normalized, None)
+            self.prefix_index.discard(normalized)
             self.inserted_commands.discard(normalized)
             exec_key = self._prefix_exec_key(normalized)
             if exec_key in self.command_cache_by_exec:
@@ -398,19 +423,7 @@ class CommandVectorDB:
         if not normalized_prefix:
             return []
 
-        exec_key = self._prefix_exec_key(normalized_prefix)
-        source = self.command_cache
-        if exec_key and exec_key in self.command_cache_by_exec:
-            source = self.command_cache_by_exec[exec_key]
-
-        # Bound scan cost on very large command sets.
-        if len(source) > self.PREFIX_SCAN_LIMIT:
-            base_candidates = sorted(source)[: self.PREFIX_SCAN_LIMIT]
-        else:
-            base_candidates = sorted(source)
-
-        matches = [cmd for cmd in base_candidates if cmd.startswith(normalized_prefix)]
-        return matches[:topk]
+        return self.prefix_index.search(normalized_prefix, limit=topk)
 
     @staticmethod
     def _normalize_for_fuzzy(text: str) -> str:
@@ -872,11 +885,11 @@ class CommandVectorDB:
             )
             payload = f"{git_root.lower()}\x1f{remote}"
             key = self._stable_key("repo", payload)
-            self._repo_identity_cache[cwd] = (now, key)
+            self._repo_identity_cache.set(cwd, (now, key))
             return key
 
         fallback = self._stable_key("cwd", cwd.lower())
-        self._repo_identity_cache[cwd] = (now, fallback)
+        self._repo_identity_cache.set(cwd, (now, fallback))
         return fallback
 
     @staticmethod
@@ -1783,7 +1796,8 @@ class CommandVectorDB:
                 for i in range(0, len(docs), batch_size):
                     self.collection.insert(docs[i : i + batch_size])
 
-            self.inserted_commands.update(new_commands)
+            for command in new_commands:
+                self.inserted_commands[command] = True
             _clear_gpu_cache()
             logger.info(f"Successfully inserted {len(docs)} commands")
             return len(docs)
@@ -1902,7 +1916,8 @@ class CommandVectorDB:
                 with self._io_lock:
                     for i in range(0, len(docs), batch_size):
                         self.collection.insert(docs[i : i + batch_size])
-                self.inserted_commands.update(new_commands)
+                for command in new_commands:
+                    self.inserted_commands[command] = True
                 _clear_gpu_cache()
 
             return updated + len(new_commands)
@@ -2489,7 +2504,8 @@ class CommandVectorDB:
             with self._io_lock:
                 for i in range(0, len(docs), 100):
                     self.collection.insert(docs[i : i + 100])
-            self.inserted_commands.update(new_commands)
+            for command in new_commands:
+                self.inserted_commands[command] = True
             self._register_commands(new_commands)
             imported_commands += len(new_commands)
 
@@ -2647,7 +2663,7 @@ class CommandVectorDB:
         return out
 
     def get_prefix_or_semantic_matches(
-        self, prefix: str, topk: int = 100
+        self, prefix: str, topk: int = 100, *, allow_semantic: bool = True
     ) -> List[Dict[str, str]]:
         if not prefix:
             return []
@@ -2668,6 +2684,9 @@ class CommandVectorDB:
                 }
                 for command in lexical_matches[:topk]
             ]
+
+        if not allow_semantic:
+            return []
 
         # Prefix miss: retrieve semantic candidates then re-rank with RapidFuzz.
         candidates = self.search(normalized_prefix, topk=self.SEMANTIC_VECTOR_TOPN)
@@ -3215,6 +3234,8 @@ class CommandVectorDB:
                 self.feedback_collection = None
                 self.inserted_commands.clear()
                 self.command_cache.clear()
+                self._command_cache_order.clear()
+                self.prefix_index.clear()
                 self.command_cache_by_exec.clear()
                 self.token_candidates_by_context.clear()
                 self.global_token_candidates.clear()

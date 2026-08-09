@@ -129,7 +129,11 @@ class SetupMenuTests(unittest.TestCase):
             captured_choices.append(list(choices))
             return cli_app.BACK_SIGNAL
 
-        with patch.object(cli_app, "_setup_select", side_effect=_fake_select):
+        with patch.object(
+            cli_app,
+            "_load_config",
+            return_value={"automatic_agensic_sessions_enabled": True},
+        ), patch.object(cli_app, "_setup_select", side_effect=_fake_select):
             cli_app._setup_sessions_menu()
 
         self.assertEqual(

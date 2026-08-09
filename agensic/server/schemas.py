@@ -9,6 +9,7 @@ class Context(BaseModel):
     shell: str = Field(max_length=128)
     allow_ai: bool = True
     trigger_source: str | None = None
+    request_id: str = Field(default="", max_length=128)
 
 
 class IntentContext(BaseModel):
@@ -76,6 +77,7 @@ class ShutdownStatus(BaseModel):
 
 
 class PredictResponse(BaseModel):
+    request_id: str = ""
     suggestions: list[str]
     pool: list[str]
     pool_meta: list[dict[str, Any]]
