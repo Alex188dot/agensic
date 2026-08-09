@@ -8,6 +8,7 @@ import time
 import platform
 import asyncio
 import subprocess
+import sys
 from pathlib import Path
 from litellm import acompletion
 import requests
@@ -455,17 +456,18 @@ class SuggestionEngine:
                 pass
         else:
             try:
-                from agensic.vector_db import get_runtime_init_status
-
-                init_status = get_runtime_init_status()
-                phase = str(init_status.get("phase") or phase)
-                model_download_in_progress = bool(
-                    init_status.get("model_download_in_progress", False)
-                )
-                model_download_needed = bool(
-                    init_status.get("model_download_needed", False)
-                )
-                error = str(init_status.get("error") or "")
+                runtime_module = sys.modules.get("agensic.vector_db.command_db")
+                status_reader = getattr(runtime_module, "get_runtime_init_status", None)
+                if callable(status_reader):
+                    init_status = status_reader()
+                    phase = str(init_status.get("phase") or phase)
+                    model_download_in_progress = bool(
+                        init_status.get("model_download_in_progress", False)
+                    )
+                    model_download_needed = bool(
+                        init_status.get("model_download_needed", False)
+                    )
+                    error = str(init_status.get("error") or "")
             except Exception:
                 pass
 
@@ -636,7 +638,11 @@ class SuggestionEngine:
             return []
 
         try:
-            matches = self.vector_db.get_prefix_or_semantic_matches(prefix, topk=100)
+            matches = self.vector_db.get_prefix_or_semantic_matches(
+                prefix,
+                topk=100,
+                allow_semantic=bool(getattr(ctx, "allow_semantic", True)),
+            )
         except Exception as e:
             sanitized = self.privacy_guard.sanitize_for_log(str(e))
             state, code = self._classify_storage_issue(sanitized)
@@ -716,10 +722,9 @@ class SuggestionEngine:
         return candidates
 
     def _is_blocked_command(self, command: str) -> bool:
-        if self.vector_db is not None:
-            return self.vector_db.is_blocked_command(command)
-        from agensic.vector_db import CommandVectorDB
-        return CommandVectorDB.is_blocked_command(command)
+        from agensic.utils.shell import is_blocked_command
+
+        return is_blocked_command(command)
 
     def _filter_blocked_candidates(self, buffer: str, candidates: list[str]) -> list[str]:
         if not candidates:
@@ -1171,7 +1176,7 @@ class SuggestionEngine:
             logger.info("Disabling AI fallback for blocked command buffer")
 
         # Get vector-based candidates (up to 20)
-        vector_candidates = self._get_vector_candidates(ctx)
+        vector_candidates = await asyncio.to_thread(self._get_vector_candidates, ctx)
 
         # If we have candidates from history, return the top 3 + full pool
         if vector_candidates:
@@ -1263,7 +1268,7 @@ class SuggestionEngine:
             raw_sugg: list[object] = []
             if isinstance(parsed, dict):
                 raw_sugg = [parsed.get("option_1", ""), parsed.get("option_2", ""), parsed.get("option_3", "")]
-            else:
+            elif "|" in raw:
                 raw_sugg = raw.split("|")
 
             def _mode_from_type(value: object) -> str:
@@ -1349,7 +1354,7 @@ class SuggestionEngine:
         pool = _pad_pool([entry.get("accept_text", "") for entry in ai_pool_meta], size=20)
         pool_meta = ai_pool_meta[:20]
 
-        return (suggestions[:3], pool, pool_meta, not privacy_blocked)
+        return (suggestions[:3], pool, pool_meta, bool(ai_pool_meta) and not privacy_blocked)
 
     async def get_intent_command(self, config: dict, ctx: RequestContext, intent_text: str) -> dict:
         text = (intent_text or "").strip()

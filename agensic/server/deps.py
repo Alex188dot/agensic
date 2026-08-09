@@ -44,6 +44,9 @@ _RATE_LIMIT_STATE: dict[str, deque[float]] = defaultdict(deque)
 _ENV_SETTINGS_LOG_LOCK = threading.Lock()
 _ENV_SETTINGS_LOGGED = False
 _AUTH_CACHE = AuthTokenCache()
+_CONFIG_CACHE_LOCK = threading.Lock()
+_CONFIG_CACHE_MTIME_NS = -2
+_CONFIG_CACHE_PAYLOAD: dict[str, Any] | None = None
 
 
 class ShutdownCoordinator:
@@ -196,18 +199,34 @@ def reset_shutdown_state() -> None:
 
 
 def load_config() -> dict:
+    global _CONFIG_CACHE_MTIME_NS, _CONFIG_CACHE_PAYLOAD
     migrate_legacy_layout()
     ensure_app_layout()
-    if not os.path.exists(CONFIG_FILE):
-        return normalize_config_payload({})
+    try:
+        mtime_ns = int(os.stat(CONFIG_FILE).st_mtime_ns)
+    except OSError:
+        mtime_ns = -1
+    with _CONFIG_CACHE_LOCK:
+        if _CONFIG_CACHE_PAYLOAD is not None and mtime_ns == _CONFIG_CACHE_MTIME_NS:
+            return dict(_CONFIG_CACHE_PAYLOAD)
+    if mtime_ns < 0:
+        payload = normalize_config_payload({})
+        with _CONFIG_CACHE_LOCK:
+            _CONFIG_CACHE_MTIME_NS = mtime_ns
+            _CONFIG_CACHE_PAYLOAD = payload
+        return dict(payload)
     try:
         with open(CONFIG_FILE, "r", encoding="utf-8") as f:
-            payload = json.load(f)
+            parsed = json.load(f)
     except Exception:
-        return normalize_config_payload({})
-    if not isinstance(payload, dict):
-        return normalize_config_payload({})
-    return normalize_config_payload(payload)
+        parsed = {}
+    if not isinstance(parsed, dict):
+        parsed = {}
+    payload = normalize_config_payload(parsed)
+    with _CONFIG_CACHE_LOCK:
+        _CONFIG_CACHE_MTIME_NS = mtime_ns
+        _CONFIG_CACHE_PAYLOAD = payload
+    return dict(payload)
 
 
 def get_client_id(request) -> str:

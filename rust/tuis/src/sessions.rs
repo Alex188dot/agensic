@@ -3,6 +3,8 @@ pub(crate) use crate::sessions_render::copy_button_style;
 #[path = "sessions_changes.rs"]
 mod changes;
 
+#[cfg(test)]
+use self::changes::build_changes_lines;
 use self::changes::{build_changes, changes_max_scroll};
 use crate::checkpoints::{
     checkpoint_path_for_transcript, decode_checkpoint_state, enrich_git_checkpoint_records,
@@ -1109,7 +1111,7 @@ impl App {
         let response = self
             .request(&format!(
                 "/sessions?limit={}",
-                max(1, min(500, self.args.limit))
+                self.args.limit.clamp(1, 500)
             ))
             .send()
             .map_err(|err| format!("sessions request failed: {}", err))?;
@@ -3799,7 +3801,7 @@ fn collect_terminal_lines(events: &[SessionEvent], aggressive: bool) -> Vec<Stri
     lines
 }
 
-fn push_terminal_line(lines: &mut Vec<String>, raw_line: &mut String, aggressive: bool) {
+fn push_terminal_line(lines: &mut Vec<String>, raw_line: &mut str, aggressive: bool) {
     let Some(candidate) = normalize_terminal_line(raw_line, aggressive) else {
         return;
     };
@@ -5382,11 +5384,13 @@ mod tests {
 
     #[test]
     fn changes_pane_merges_file_list_with_committed_diff_stat() {
-        let mut session = SessionSummary::default();
-        session.changes = json!({
-            "files_changed": ["agensic.bash", "rust/tuis/src/main.rs", "tests/integration/test_agensic_bash_sessions.py"],
-            "committed_diff_stat": "agensic.bash | 11 +++++++++++\nrust/tuis/src/main.rs | 23 +++++++++++++++++++++++---\ntests/integration/test_agensic_bash_sessions.py | 27 +++++++++++++++++++++++++++\n3 files changed, 58 insertions(+), 3 deletions(-)"
-        });
+        let session = SessionSummary {
+            changes: json!({
+                "files_changed": ["agensic.bash", "rust/tuis/src/main.rs", "tests/integration/test_agensic_bash_sessions.py"],
+                "committed_diff_stat": "agensic.bash | 11 +++++++++++\nrust/tuis/src/main.rs | 23 +++++++++++++++++++++++---\ntests/integration/test_agensic_bash_sessions.py | 27 +++++++++++++++++++++++++++\n3 files changed, 58 insertions(+), 3 deletions(-)"
+            }),
+            ..Default::default()
+        };
         let detail = DetailState::new(session, Vec::new(), false);
 
         let rendered = build_changes_lines(&detail)
@@ -6287,10 +6291,12 @@ mod tests {
 
     #[test]
     fn changes_pane_scrolls_without_affecting_timeline_selection() {
-        let mut session = SessionSummary::default();
-        session.changes = json!({
-            "files_changed": (0..30).map(|idx| format!("file-{idx}.rs")).collect::<Vec<_>>(),
-        });
+        let session = SessionSummary {
+            changes: json!({
+                "files_changed": (0..30).map(|idx| format!("file-{idx}.rs")).collect::<Vec<_>>(),
+            }),
+            ..Default::default()
+        };
         let events = vec![SessionEvent {
             session_id: "sess-1".to_string(),
             seq: 1,

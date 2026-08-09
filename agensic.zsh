@@ -37,6 +37,10 @@ typeset -g AGENSIC_INTENT_ACTIVE=0
 # Timer for pause detection
 typeset -g AGENSIC_TIMER_FD=""
 typeset -g AGENSIC_TIMER_PID=""
+typeset -g AGENSIC_HAS_ZSELECT=0
+if zmodload zsh/zselect 2>/dev/null; then
+    AGENSIC_HAS_ZSELECT=1
+fi
 typeset -g AGENSIC_LAST_BUFFER=""
 typeset -g AGENSIC_LAST_EXECUTED_CMD=""
 typeset -g AGENSIC_LAST_EXECUTED_STARTED_AT_MS=0
@@ -69,6 +73,8 @@ typeset -g AGENSIC_LINE_ACCEPTED_AI_MODEL=""
 typeset -g AGENSIC_LAST_FETCH_AI_AGENT=""
 typeset -g AGENSIC_LAST_FETCH_AI_PROVIDER=""
 typeset -g AGENSIC_LAST_FETCH_AI_MODEL=""
+typeset -g AGENSIC_PREDICT_REQUEST_SEQ=0
+typeset -g AGENSIC_LATEST_PREDICT_REQUEST_ID=""
 typeset -g AGENSIC_PENDING_LAST_ACTION=""
 typeset -g AGENSIC_PENDING_ACCEPTED_ORIGIN=""
 typeset -g AGENSIC_PENDING_ACCEPTED_MODE=""
@@ -118,6 +124,10 @@ typeset -g AGENSIC_CONFIG_PATH="${AGENSIC_CONFIG_HOME}/agensic/config.json"
 typeset -g AGENSIC_AUTH_PATH="${AGENSIC_CONFIG_HOME}/agensic/auth.json"
 typeset -g AGENSIC_SHARED_HELPERS_PATH="${AGENSIC_SOURCE_DIR}/shell/agensic_shared.sh"
 typeset -g AGENSIC_CLIENT_HELPER="${AGENSIC_SOURCE_DIR}/shell_client.py"
+typeset -g AGENSIC_NATIVE_CLIENT="${AGENSIC_NATIVE_CLIENT:-${AGENSIC_HOME}/install/bin/agensic-tuis}"
+if [[ ! -x "$AGENSIC_NATIVE_CLIENT" && -x "${AGENSIC_SOURCE_DIR}/rust/tuis/target/release/agensic-tuis" ]]; then
+    AGENSIC_NATIVE_CLIENT="${AGENSIC_SOURCE_DIR}/rust/tuis/target/release/agensic-tuis"
+fi
 typeset -g AGENSIC_RUNTIME_PYTHON="${AGENSIC_RUNTIME_PYTHON:-}"
 if [[ -z "$AGENSIC_RUNTIME_PYTHON" ]]; then
     AGENSIC_RUNTIME_PYTHON="${AGENSIC_HOME}/install/.venv/bin/python"
@@ -737,6 +747,51 @@ _agensic_log_fetch_error() {
     chmod 600 "$AGENSIC_PLUGIN_LOG" 2>/dev/null
 }
 
+_agensic_apply_native_prediction() {
+    local response="$1"
+    local expected_request_id="$2"
+    local expected_buffer="$3"
+    local sep=$'\x1f'
+    local -a lines
+    lines=("${(@f)response}")
+    [[ "${lines[1]}" == "agensic_predict_v2" ]] || return 1
+    local response_request_id="${lines[2]#request_id=}"
+    if [[ "$response_request_id" != "$expected_request_id" \
+        || "$expected_request_id" != "$AGENSIC_LATEST_PREDICT_REQUEST_ID" \
+        || "$BUFFER" != "$expected_buffer" ]]; then
+        return 2
+    fi
+    if [[ "${lines[3]#ok=}" != "1" ]]; then
+        AGENSIC_LAST_FETCH_ERROR_CODE="${lines[4]#error_code=}"
+        _agensic_clear_suggestions
+        return 1
+    fi
+    AGENSIC_LAST_FETCH_ERROR_CODE=""
+    AGENSIC_FETCH_SUCCESS_COUNT=$((AGENSIC_FETCH_SUCCESS_COUNT + 1))
+    if [[ "${lines[5]#used_ai=}" == "1" ]]; then
+        AGENSIC_LAST_FETCH_USED_AI=1
+    else
+        AGENSIC_LAST_FETCH_USED_AI=0
+    fi
+    AGENSIC_LAST_FETCH_AI_AGENT="${lines[6]#ai_agent=}"
+    AGENSIC_LAST_FETCH_AI_PROVIDER="${lines[7]#ai_provider=}"
+    AGENSIC_LAST_FETCH_AI_MODEL="${lines[8]#ai_model=}"
+    local pool_line="${lines[9]#pool=}"
+    local display_line="${lines[10]#display=}"
+    local mode_line="${lines[11]#modes=}"
+    local kind_line="${lines[12]#kinds=}"
+    AGENSIC_SUGGESTIONS=()
+    AGENSIC_DISPLAY_TEXTS=()
+    AGENSIC_ACCEPT_MODES=()
+    AGENSIC_SUGGESTION_KINDS=()
+    [[ -n "$pool_line" ]] && AGENSIC_SUGGESTIONS=("${(ps:$sep:)pool_line}")
+    [[ -n "$display_line" ]] && AGENSIC_DISPLAY_TEXTS=("${(ps:$sep:)display_line}")
+    [[ -n "$mode_line" ]] && AGENSIC_ACCEPT_MODES=("${(ps:$sep:)mode_line}")
+    [[ -n "$kind_line" ]] && AGENSIC_SUGGESTION_KINDS=("${(ps:$sep:)kind_line}")
+    AGENSIC_SUGGESTION_INDEX=1
+    return 0
+}
+
 _agensic_fetch_suggestions() {
     if _agensic_session_is_disabled; then
         AGENSIC_SUGGESTIONS=()
@@ -770,6 +825,27 @@ _agensic_fetch_suggestions() {
         AGENSIC_DISPLAY_TEXTS=()
         AGENSIC_ACCEPT_MODES=()
         AGENSIC_SUGGESTION_KINDS=()
+        return
+    fi
+
+    AGENSIC_PREDICT_REQUEST_SEQ=$((AGENSIC_PREDICT_REQUEST_SEQ + 1))
+    local request_id="${$}-${AGENSIC_PREDICT_REQUEST_SEQ}"
+    AGENSIC_LATEST_PREDICT_REQUEST_ID="$request_id"
+    if [[ -x "$AGENSIC_NATIVE_CLIENT" ]]; then
+        _agensic_reload_auth_token_if_needed
+        local native_response
+        native_response="$(
+            AGENSIC_AUTH_TOKEN="$AGENSIC_AUTH_TOKEN" "$AGENSIC_NATIVE_CLIENT" client predict \
+                --buffer "$buffer_content" \
+                --cursor "$CURSOR" \
+                --cwd "$PWD" \
+                --shell zsh \
+                --allow-ai "$allow_ai" \
+                --trigger-source "$trigger_source" \
+                --request-id "$request_id" \
+                --timeout-ms 3000 2>/dev/null
+        )"
+        _agensic_apply_native_prediction "$native_response" "$request_id" "$buffer_content"
         return
     fi
 
@@ -2609,17 +2685,21 @@ _agensic_has_visible_suggestion() {
 }
 
 # ======================================================
-# 2. PAUSE DETECTION (0.15s timer)
+# 2. PAUSE DETECTION (0.05s timer)
 # ======================================================
 
 _agensic_start_timer() {
     # Stop any existing timer callback
     _agensic_stop_timer
 
-    # Create a one-shot readable fd after 0.15s and hook it into ZLE.
+    # Create a short one-shot readable fd and hook it into ZLE.
     local timer_fd=""
     exec {timer_fd}< <(
-        sleep 0.15
+        if (( AGENSIC_HAS_ZSELECT == 1 )); then
+            zselect -t 5
+        else
+            sleep 0.05
+        fi
         print -r -- "1"
     ) || return
 
@@ -2668,7 +2748,7 @@ _agensic_on_timer_trigger() {
         zle -R
         return
     fi
-    # This is called when the 0.15s timer expires
+    # This is called when the 0.05s timer expires
     AGENSIC_TIMER_PID=""
 
     if _agensic_buffer_has_hash; then

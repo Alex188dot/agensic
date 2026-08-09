@@ -4,7 +4,7 @@ import tempfile
 import unittest
 from unittest.mock import Mock, patch
 
-from agensic.vector_db.command_db import CommandVectorDB
+from agensic.vector_db.command_db import CommandVectorDB, _LRUCache
 
 
 class RepoContextGraphTests(unittest.TestCase):
@@ -60,7 +60,7 @@ class RepoContextGraphTests(unittest.TestCase):
 
     def test_resolve_repo_key_git_and_fallback(self):
         db = CommandVectorDB.__new__(CommandVectorDB)
-        db._repo_identity_cache = {}
+        db._repo_identity_cache = _LRUCache(max_size=10)
 
         with tempfile.TemporaryDirectory() as tmp:
             repo = os.path.join(tmp, "repo")

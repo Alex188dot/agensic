@@ -320,7 +320,7 @@ pub fn load_checkpoint_records(path: &str) -> Vec<CheckpointRecord> {
     };
     BufReader::new(contents.as_bytes())
         .lines()
-        .filter_map(|line| line.ok())
+        .map_while(Result::ok)
         .filter_map(|line| serde_json::from_str::<CheckpointRecord>(&line).ok())
         .filter(|record| record.rows > 0 && record.cols > 0 && !record.state_b64.is_empty())
         .collect()

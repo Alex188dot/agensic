@@ -19,6 +19,10 @@ AGENSIC_AUTH_PATH="${AGENSIC_CONFIG_HOME}/agensic/auth.json"
 AGENSIC_PLUGIN_LOG="${AGENSIC_HOME}/plugin.log"
 AGENSIC_SHARED_HELPERS_PATH="${AGENSIC_SOURCE_DIR}/shell/agensic_shared.sh"
 AGENSIC_CLIENT_HELPER="${AGENSIC_CLIENT_HELPER:-${AGENSIC_SOURCE_DIR}/shell_client.py}"
+AGENSIC_NATIVE_CLIENT="${AGENSIC_NATIVE_CLIENT:-${AGENSIC_HOME}/install/bin/agensic-tuis}"
+if [[ ! -x "$AGENSIC_NATIVE_CLIENT" && -x "${AGENSIC_SOURCE_DIR}/rust/tuis/target/release/agensic-tuis" ]]; then
+    AGENSIC_NATIVE_CLIENT="${AGENSIC_SOURCE_DIR}/rust/tuis/target/release/agensic-tuis"
+fi
 AGENSIC_RUNTIME_PYTHON="${AGENSIC_RUNTIME_PYTHON:-}"
 AGENSIC_BASH_ADAPTER_READY=0
 AGENSIC_BASH_READLINE_AVAILABLE=0
@@ -39,6 +43,8 @@ AGENSIC_LAST_FETCH_USED_AI=0
 AGENSIC_LAST_FETCH_AI_AGENT=""
 AGENSIC_LAST_FETCH_AI_PROVIDER=""
 AGENSIC_LAST_FETCH_AI_MODEL=""
+AGENSIC_PREDICT_REQUEST_SEQ=0
+AGENSIC_LATEST_PREDICT_REQUEST_ID=""
 AGENSIC_LAST_NL_INPUT=""
 AGENSIC_LAST_NL_KIND=""
 AGENSIC_LAST_NL_COMMAND=""
@@ -1341,6 +1347,56 @@ _agensic_bash_filter_pool() {
     _agensic_bash_update_display
 }
 
+_agensic_bash_apply_native_prediction() {
+    local response="$1"
+    local expected_request_id="$2"
+    local expected_buffer="$3"
+    local sep=$'\x1f'
+    local -a lines=()
+    _agensic_bash_split_lines_to_array lines "$response"
+    [[ "${lines[0]:-}" == "agensic_predict_v2" ]] || return 1
+    local response_request_id="${lines[1]#request_id=}"
+    local current_buffer=""
+    current_buffer="$(_agensic_bash_current_buffer)"
+    if [[ "$response_request_id" != "$expected_request_id" \
+        || "$expected_request_id" != "$AGENSIC_LATEST_PREDICT_REQUEST_ID" \
+        || "$current_buffer" != "$expected_buffer" ]]; then
+        return 2
+    fi
+    if [[ "${lines[2]#ok=}" != "1" ]]; then
+        AGENSIC_LAST_FETCH_ERROR_CODE="${lines[3]#error_code=}"
+        _agensic_bash_clear_suggestions
+        return 1
+    fi
+    AGENSIC_LAST_FETCH_ERROR_CODE=""
+    AGENSIC_FETCH_SUCCESS_COUNT=$((AGENSIC_FETCH_SUCCESS_COUNT + 1))
+    if [[ "${lines[4]#used_ai=}" == "1" ]]; then
+        AGENSIC_LAST_FETCH_USED_AI=1
+    else
+        AGENSIC_LAST_FETCH_USED_AI=0
+    fi
+    AGENSIC_LAST_FETCH_AI_AGENT="${lines[5]#ai_agent=}"
+    AGENSIC_LAST_FETCH_AI_PROVIDER="${lines[6]#ai_provider=}"
+    AGENSIC_LAST_FETCH_AI_MODEL="${lines[7]#ai_model=}"
+    local pool_line="${lines[8]#pool=}"
+    local display_line="${lines[9]#display=}"
+    local mode_line="${lines[10]#modes=}"
+    local kind_line="${lines[11]#kinds=}"
+    IFS="$sep" read -r -a AGENSIC_SUGGESTIONS <<< "$pool_line"
+    IFS="$sep" read -r -a AGENSIC_DISPLAY_TEXTS <<< "$display_line"
+    IFS="$sep" read -r -a AGENSIC_ACCEPT_MODES <<< "$mode_line"
+    IFS="$sep" read -r -a AGENSIC_SUGGESTION_KINDS <<< "$kind_line"
+    if (( ${#AGENSIC_SUGGESTIONS[@]} > 0 )); then
+        AGENSIC_SUGGESTION_BUFFER="$expected_buffer"
+        AGENSIC_SUGGESTION_INDEX=1
+    else
+        AGENSIC_SUGGESTION_BUFFER=""
+        AGENSIC_SUGGESTION_INDEX=0
+    fi
+    _agensic_bash_update_display
+    return 0
+}
+
 _agensic_bash_fetch_suggestions() {
     local allow_ai="${1:-1}"
     local trigger_source="${2:-manual}"
@@ -1368,7 +1424,11 @@ _agensic_bash_fetch_suggestions() {
     AGENSIC_FETCH_ATTEMPT_COUNT=$((AGENSIC_FETCH_ATTEMPT_COUNT + 1))
     old_suggestion_buffer="$(_agensic_bash_active_suggestion_buffer)"
 
-    if [[ ${#buffer} -lt 2 || ! -f "$AGENSIC_CLIENT_HELPER" ]]; then
+    if [[ ${#buffer} -lt 2 ]]; then
+        _agensic_bash_clear_suggestions
+        return
+    fi
+    if [[ ! -x "$AGENSIC_NATIVE_CLIENT" && ! -f "$AGENSIC_CLIENT_HELPER" ]]; then
         _agensic_bash_clear_suggestions
         return
     fi
@@ -1378,6 +1438,28 @@ _agensic_bash_fetch_suggestions() {
     fi
     if _agensic_bash_should_preserve_native_tab "$buffer"; then
         _agensic_bash_clear_suggestions
+        return
+    fi
+
+    AGENSIC_PREDICT_REQUEST_SEQ=$((AGENSIC_PREDICT_REQUEST_SEQ + 1))
+    local request_id="${BASHPID:-$$}-${AGENSIC_PREDICT_REQUEST_SEQ}"
+    AGENSIC_LATEST_PREDICT_REQUEST_ID="$request_id"
+    # An explicitly substituted helper is an extension/testing seam and takes
+    # precedence over the bundled native client.
+    if [[ -x "$AGENSIC_NATIVE_CLIENT" && "$AGENSIC_CLIENT_HELPER" == "${AGENSIC_SOURCE_DIR}/shell_client.py" ]]; then
+        _agensic_reload_auth_token_if_needed
+        response_json="$(
+            AGENSIC_AUTH_TOKEN="$AGENSIC_AUTH_TOKEN" "$AGENSIC_NATIVE_CLIENT" client predict \
+                --buffer "$buffer" \
+                --cursor "$cursor" \
+                --cwd "$PWD" \
+                --shell bash \
+                --allow-ai "$allow_ai" \
+                --trigger-source "$trigger_source" \
+                --request-id "$request_id" \
+                --timeout-ms 3000 2>/dev/null
+        )"
+        _agensic_bash_apply_native_prediction "$response_json" "$request_id" "$buffer"
         return
     fi
 

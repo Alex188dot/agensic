@@ -18,6 +18,8 @@ class RequestContext:
         shell: str,
         terminal: str | None = None,
         platform_name: str | None = None,
+        cursor_position: int | None = None,
+        allow_semantic: bool = True,
     ):
         self.history_file = history_file
         self.cwd = cwd
@@ -25,6 +27,8 @@ class RequestContext:
         self.shell = shell
         self.terminal = terminal or os.environ.get("TERM", "")
         self.platform_name = platform_name or platform.system()
+        self.cursor_position = len(buffer) if cursor_position is None else int(cursor_position)
+        self.allow_semantic = bool(allow_semantic)
 
 
 class SystemInventory:

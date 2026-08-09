@@ -151,6 +151,50 @@ class ServerContractTests(unittest.TestCase):
             self.assertIn("ai_provider", body)
             self.assertIn("ai_model", body)
 
+    def test_predict_lines_is_cursor_aware_and_echoes_request_id(self):
+        observed = {}
+
+        async def _fake_get_suggestions(config, req_context, allow_ai=True):
+            observed["buffer"] = req_context.buffer
+            observed["allow_semantic"] = req_context.allow_semantic
+            return (
+                ["atus", "", ""],
+                ["atus"] + [""] * 19,
+                [
+                    {
+                        "display_text": "atus",
+                        "accept_text": "atus",
+                        "accept_mode": "suffix_append",
+                        "kind": "normal",
+                    }
+                ],
+                False,
+            )
+
+        with patch.object(deps.engine, "get_suggestions", side_effect=_fake_get_suggestions), patch.object(
+            deps.engine,
+            "get_bootstrap_status",
+            return_value={"ready": True, "phase": "ready", "indexed_commands": 10},
+        ):
+            response = self.client.post(
+                "/predict-lines",
+                json={
+                    "command_buffer": "git st --short",
+                    "cursor_position": 6,
+                    "working_directory": "/tmp",
+                    "shell": "zsh",
+                    "allow_ai": False,
+                    "trigger_source": "pause_timer",
+                    "request_id": "shell-9",
+                },
+            )
+        self.assertEqual(response.status_code, 200)
+        self.assertTrue(response.text.startswith("agensic_predict_v2\n"))
+        self.assertIn("request_id=shell-9\n", response.text)
+        self.assertIn("pool=git status --short\n", response.text)
+        self.assertIn("modes=replace_full\n", response.text)
+        self.assertEqual(observed, {"buffer": "git st", "allow_semantic": True})
+
     def test_predict_history_only_forces_no_ai(self):
         observed_allow_ai: list[bool] = []
 

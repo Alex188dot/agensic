@@ -50,6 +50,20 @@ class CommandBlockingPolicyTests(unittest.TestCase):
             with self.subTest(command=command):
                 self._assert_blocked(command)
 
+    def test_blocks_compound_wrapped_and_indirect_commands(self):
+        blocked = [
+            "echo ok && rm -rf /tmp/demo",
+            "git status | dd of=/tmp/demo",
+            "sh -c 'rm -rf /tmp/demo'",
+            "sudo bash -c 'git reset --hard'",
+            "echo $(rm -rf /tmp/demo)",
+            "find . -exec rm -rf {} ;",
+            "printf '%s\\n' x | xargs rm -rf",
+        ]
+        for command in blocked:
+            with self.subTest(command=command):
+                self._assert_blocked(command)
+
     def test_allows_non_destructive_variants(self):
         allowed = [
             "echo hello",

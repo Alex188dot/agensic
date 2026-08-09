@@ -1,6 +1,8 @@
 import asyncio
 import importlib
 import unittest
+from types import SimpleNamespace
+from unittest.mock import Mock
 
 from agensic.engine.context import RequestContext
 from agensic.engine.suggestion_engine import SuggestionEngine
@@ -79,6 +81,67 @@ class ProviderRoutingTests(unittest.TestCase):
         )
         self.assertEqual(suggestions, ["", "", ""])
         self.assertEqual(len(pool), 20)
+        self.assertEqual(pool_meta, [])
+        self.assertFalse(used_ai)
+
+    def test_failed_ai_request_is_not_reported_as_used(self):
+        self.engine._get_vector_candidates = lambda _ctx: []
+        self.engine._is_blocked_command = lambda _command: False
+        self.engine.build_prompt_context = lambda _ctx: "context"
+        self.engine._is_provider = lambda _config, _provider: False
+        self.engine._build_llm_kwargs = lambda *_args, **_kwargs: {}
+        self.engine.privacy_guard = Mock()
+        self.engine.privacy_guard.sanitize_text.return_value = SimpleNamespace(text="git unknown")
+        self.engine.privacy_guard.sanitize_for_log.side_effect = lambda value: str(value)
+
+        async def _failed_request(*_args, **_kwargs):
+            raise RuntimeError("provider unavailable")
+
+        self.engine._privacy_checked_acompletion = _failed_request
+        ctx = RequestContext(
+            history_file="",
+            cwd="/tmp",
+            buffer="git unknown",
+            shell="bash",
+        )
+        suggestions, pool, pool_meta, used_ai = asyncio.run(
+            self.engine.get_suggestions(
+                {"provider": "openai", "model": "gpt-5-mini"},
+                ctx,
+                allow_ai=True,
+            )
+        )
+        self.assertEqual(suggestions, ["", "", ""])
+        self.assertEqual(len(pool), 20)
+        self.assertEqual(pool_meta, [])
+        self.assertFalse(used_ai)
+
+    def test_unparsable_ai_response_is_not_treated_as_a_suggestion(self):
+        self.engine._get_vector_candidates = lambda _ctx: []
+        self.engine._is_blocked_command = lambda _command: False
+        self.engine.build_prompt_context = lambda _ctx: "context"
+        self.engine._is_provider = lambda _config, _provider: False
+        self.engine._build_llm_kwargs = lambda *_args, **_kwargs: {}
+        self.engine.privacy_guard = Mock()
+        self.engine.privacy_guard.sanitize_text.return_value = SimpleNamespace(text="git unknown")
+        self.engine.privacy_guard.sanitize_for_log.side_effect = lambda value: str(value)
+        response = SimpleNamespace(
+            choices=[SimpleNamespace(message=SimpleNamespace(content="I cannot provide JSON"))]
+        )
+
+        async def _unparsable_request(*_args, **_kwargs):
+            return response, {"redactions": 0, "flags": []}
+
+        self.engine._privacy_checked_acompletion = _unparsable_request
+        ctx = RequestContext("", "/tmp", "git unknown", "bash")
+        suggestions, _pool, pool_meta, used_ai = asyncio.run(
+            self.engine.get_suggestions(
+                {"provider": "openai", "model": "gpt-5-mini"},
+                ctx,
+                allow_ai=True,
+            )
+        )
+        self.assertEqual(suggestions, ["", "", ""])
         self.assertEqual(pool_meta, [])
         self.assertFalse(used_ai)
 
